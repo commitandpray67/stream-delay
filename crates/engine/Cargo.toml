@@ -1,5 +1,6 @@
 [package]
 name = "streamdelay-engine"
+description = "Sans-IO stream delay engine: buffering, keyframe splicing and timestamp rewriting"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+streamdelay-flv.workspace = true
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

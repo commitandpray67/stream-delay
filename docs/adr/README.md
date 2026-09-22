@@ -6,3 +6,4 @@ Each file records one significant decision: its context, the choice and its cons
 |---|---|---|
 | [0001](0001-post-encode-rtmp-proxy.md) | Delay the stream with a post-encode RTMP proxy | Accepted |
 | [0002](0002-keyframe-splicing.md) | Change delay by splicing on keyframes with timestamp rewriting | Accepted |
+| [0003](0003-splice-safety.md) | Keep splices safe for B-frames and open-GOP HEVC | Accepted |

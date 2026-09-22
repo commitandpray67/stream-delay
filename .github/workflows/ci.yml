@@ -43,3 +43,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  e2e:
+    name: End-to-end (ffmpeg)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Build
+        run: cargo build -p streamdelayd
+      - name: H.264 with B-frames
+        run: tests/e2e/run.sh
+      - name: HEVC open GOP (Enhanced RTMP)
+        run: VCODEC=libx265 VCODEC_ARGS="-x265-params log-level=error" DURATION=30 tests/e2e/run.sh
+      - name: Across the 24-bit extended timestamp boundary
+        run: TS_OFFSET=16770 DURATION=30 tests/e2e/run.sh

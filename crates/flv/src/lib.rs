@@ -42,6 +42,74 @@ pub struct VideoInfo {
     pub config_class: u16,
     pub enhanced: bool,
     pub multitrack: bool,
+    /// Composition time offset (PTS - DTS) in milliseconds, for codecs with B-frames.
+    pub composition_time: i32,
+    /// For HEVC: NAL unit type of the first coded slice (IDR, CRA, RASL, ...).
+    pub hevc_nal_type: Option<u8>,
+    /// For HEVC: offset of the length-prefixed NAL unit data in the payload.
+    pub nal_offset: Option<usize>,
+}
+
+/// HEVC NAL unit types relevant to splicing (ITU-T H.265 table 7-1).
+pub mod hevc {
+    pub const RASL_N: u8 = 8;
+    pub const RASL_R: u8 = 9;
+    pub const CRA: u8 = 21;
+
+    /// Random-access skipped leading picture: references frames before its CRA.
+    pub fn is_rasl(t: u8) -> bool {
+        t == RASL_N || t == RASL_R
+    }
+
+    /// Intra random access point (BLA, IDR or CRA).
+    pub fn is_irap(t: u8) -> bool {
+        (16..=23).contains(&t)
+    }
+
+    /// A picture that follows its IRAP in output order.
+    pub fn is_trailing(t: u8) -> bool {
+        t <= 5
+    }
+
+    pub const BLA_W_LP: u8 = 16;
+
+    /// Rewrites every CRA slice in `payload` (length-prefixed NAL units starting at
+    /// `offset`) as BLA_W_LP. A CRA in the middle of a stream does not reset the
+    /// decoder; a BLA marks a broken link so the decoder discards leading pictures
+    /// and restarts output order. This is the standard way to splice open-GOP HEVC.
+    pub fn cra_to_bla(payload: &[u8], offset: usize) -> Option<Vec<u8>> {
+        let mut out = payload.to_vec();
+        let mut pos = offset;
+        let mut changed = false;
+        while pos + 5 <= out.len() {
+            let len =
+                u32::from_be_bytes([out[pos], out[pos + 1], out[pos + 2], out[pos + 3]]) as usize;
+            let header = pos + 4;
+            if len == 0 || header + len > out.len() {
+                break;
+            }
+            if (out[header] >> 1) & 0x3f == CRA {
+                out[header] = (out[header] & 0x81) | (BLA_W_LP << 1);
+                changed = true;
+            }
+            pos = header + len;
+        }
+        changed.then_some(out)
+    }
+}
+
+/// Returns the NAL type of the first coded slice in length-prefixed HEVC data.
+fn first_hevc_vcl(mut data: &[u8]) -> Option<u8> {
+    while data.len() >= 6 {
+        let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let nal = data.get(4..4 + len)?;
+        let t = (nal.first()? >> 1) & 0x3f;
+        if t < 32 {
+            return Some(t);
+        }
+        data = &data[4 + len..];
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +157,14 @@ impl Reader<'_> {
 
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_be_bytes([self.u8()?, self.u8()?]))
+    }
+
+    /// Signed 24-bit big-endian integer.
+    fn si24(&mut self) -> Option<i32> {
+        let s = self.b.get(self.pos..self.pos + 3)?;
+        self.pos += 3;
+        let v = (s[0] as i32) << 16 | (s[1] as i32) << 8 | s[2] as i32;
+        Some((v << 8) >> 8)
     }
 
     fn fourcc(&mut self) -> Option<[u8; 4]> {
@@ -163,6 +239,13 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
         let has_packet_type = codec != VideoCodec::Other;
         let packet_type = if has_packet_type { r.u8()? } else { 1 };
         let config = has_packet_type && packet_type == 0;
+        let composition_time = if has_packet_type && packet_type == 1 {
+            r.si24().unwrap_or(0)
+        } else {
+            0
+        };
+        let nal_offset = (codec == VideoCodec::Hevc && packet_type == 1).then_some(r.pos);
+        let hevc_nal_type = nal_offset.and_then(|o| first_hevc_vcl(payload.get(o..)?));
         return Some(VideoInfo {
             codec,
             keyframe: ft == frame_type::KEY && packet_type == 1,
@@ -170,6 +253,9 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
             config_class: 0,
             enhanced: false,
             multitrack: false,
+            composition_time,
+            hevc_nal_type,
+            nal_offset,
         });
     }
 
@@ -184,6 +270,9 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
             config_class: 0,
             enhanced: true,
             multitrack: false,
+            composition_time: 0,
+            hevc_nal_type: None,
+            nal_offset: None,
         });
     }
     let mut multitrack = false;
@@ -203,8 +292,23 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
         packet_type,
         video_packet::SEQUENCE_START | video_packet::MPEG2TS_SEQUENCE_START
     );
+    let codec = video_codec_from_fourcc(fourcc);
+    // Only AVC and HEVC CodedFrames carry a composition time; CodedFramesX means 0.
+    let composition_time = if packet_type == video_packet::CODED_FRAMES
+        && matches!(codec, VideoCodec::Avc | VideoCodec::Hevc)
+    {
+        r.si24().unwrap_or(0)
+    } else {
+        0
+    };
+    let coded = matches!(
+        packet_type,
+        video_packet::CODED_FRAMES | video_packet::CODED_FRAMES_X
+    );
+    let nal_offset = (codec == VideoCodec::Hevc && coded && !multitrack).then_some(r.pos);
+    let hevc_nal_type = nal_offset.and_then(|o| first_hevc_vcl(payload.get(o..)?));
     Some(VideoInfo {
-        codec: video_codec_from_fourcc(fourcc),
+        codec,
         keyframe: ft == frame_type::KEY
             && matches!(
                 packet_type,
@@ -214,6 +318,9 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
         config_class: (track_id as u16) << 8 | packet_type as u16,
         enhanced: true,
         multitrack,
+        composition_time,
+        hevc_nal_type,
+        nal_offset,
     })
 }
 
@@ -272,12 +379,41 @@ mod tests {
     fn legacy_avc() {
         let seq = inspect_video(&[0x17, 0x00, 0, 0, 0, 1, 0x64]).unwrap();
         assert!(seq.config && !seq.keyframe && seq.codec == VideoCodec::Avc);
-        let idr = inspect_video(&[0x17, 0x01, 0, 0, 0, 0, 0, 0, 1]).unwrap();
+        let idr = inspect_video(&[0x17, 0x01, 0, 0, 0x42, 0, 0, 0, 1]).unwrap();
         assert!(idr.keyframe && !idr.config);
+        assert_eq!(idr.composition_time, 0x42);
+        let negative = inspect_video(&[0x27, 0x01, 0xff, 0xff, 0xfe]).unwrap();
+        assert_eq!(negative.composition_time, -2);
         let p = inspect_video(&[0x27, 0x01, 0, 0, 0]).unwrap();
         assert!(!p.keyframe && !p.config);
         assert!(inspect_video(&[]).is_none());
         assert!(inspect_video(&[0x17]).is_none());
+    }
+
+    #[test]
+    fn hevc_nal_types() {
+        // Enhanced CodedFrames 'hvc1', cts 0, then an AUD (type 35) and a CRA slice.
+        let mut v = vec![0x80 | 0x10 | 0x01];
+        v.extend_from_slice(b"hvc1");
+        v.extend_from_slice(&[0, 0, 0]);
+        v.extend_from_slice(&[0, 0, 0, 3, 35 << 1, 1, 0x50]);
+        v.extend_from_slice(&[0, 0, 0, 3, 21 << 1, 1, 0xaf]);
+        let i = inspect_video(&v).unwrap();
+        assert_eq!(i.hevc_nal_type, Some(hevc::CRA));
+        let bla = hevc::cra_to_bla(&v, i.nal_offset.unwrap()).unwrap();
+        assert_eq!(
+            inspect_video(&bla).unwrap().hevc_nal_type,
+            Some(hevc::BLA_W_LP)
+        );
+        // Only the NAL type bits change.
+        assert_eq!(bla.iter().zip(&v).filter(|(a, b)| a != b).count(), 1);
+        assert!(hevc::is_irap(21) && hevc::is_rasl(9) && hevc::is_trailing(1));
+        // Legacy codec id 12, RASL_N slice.
+        let legacy = [0x2c, 0x01, 0, 0, 0, 0, 0, 0, 2, 8 << 1, 1];
+        assert_eq!(
+            inspect_video(&legacy).unwrap().hevc_nal_type,
+            Some(hevc::RASL_N)
+        );
     }
 
     #[test]
@@ -306,7 +442,10 @@ mod tests {
         // inter frame | CodedFrames
         let mut inter = vec![0x80 | 0x20 | 0x01];
         inter.extend_from_slice(b"hvc1");
-        assert!(!inspect_video(&inter).unwrap().keyframe);
+        inter.extend_from_slice(&[0, 0, 33]);
+        let i = inspect_video(&inter).unwrap();
+        assert!(!i.keyframe);
+        assert_eq!(i.composition_time, 33);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 [package]
 name = "streamdelay-control"
+description = "Local HTTP/WebSocket control API and embedded web UI for stream-delay"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,20 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+streamdelay-relay.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+subtle = "2"
+rand.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [lints]
 workspace = true

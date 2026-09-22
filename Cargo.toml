@@ -37,6 +37,7 @@ streamdelay-relay = { path = "crates/relay" }
 streamdelay-config = { path = "crates/config" }
 streamdelay-obs = { path = "crates/obs" }
 streamdelay-control = { path = "crates/control" }
+streamdelayd = { path = "crates/streamdelayd" }
 
 bytes = "1"
 thiserror = "2"
