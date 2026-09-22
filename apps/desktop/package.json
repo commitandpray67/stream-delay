@@ -1,0 +1,15 @@
+{
+  "name": "@stream-delay/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "tauri": "tauri",
+    "icons": "python3 make_icons.py && tauri icon src-tauri/icons/app-source.png",
+    "dev": "pnpm -C ../../ui build && tauri dev",
+    "build": "pnpm -C ../../ui build && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.5"
+  }
+}

@@ -4,7 +4,7 @@
 
 > **Status: pre-release (milestones M0–M4 of [`docs/PLAN.md`](docs/PLAN.md)).** The relay, delay engine, web UI and desktop app work and are tested end to end with ffmpeg. They have not yet been battle-tested on real Twitch streams, so test with `?bandwidthtest=true` before relying on it.
 
-## What it will do
+## What it does
 
 OBS locks its stream delay when you go live, and Twitch's delay can't be changed mid-stream either. stream-delay sits between your encoder and Twitch as a small local relay:
 
@@ -39,7 +39,11 @@ cargo run --release -p streamdelayd -- run
 3. Add the **dock** URL under **Docks → Custom Browser Docks** and the **overlay** URL as a Browser source.
 4. Start streaming, then change the delay from the dock, the dashboard, hotkeys or the CLI (`streamdelayd delay 30`, `streamdelayd live --after-air`).
 
-The desktop app (tray icon, global hotkeys, installers) lives in [`apps/desktop`](apps/desktop). The HTTP/WebSocket API is documented in [`docs/API.md`](docs/API.md).
+**Desktop app:** [`apps/desktop`](apps/desktop) wraps the same core in a tray app with global hotkeys, autostart and installers for Windows, macOS and Linux.
+
+**Server or second PC:** run the container (`docker run -p 1935:1935 -p 7788:7788 -e STREAMDELAY_INGEST_KEY=… ghcr.io/commitandpray67/stream-delay`) or `streamdelayd run --ingest 0.0.0.0:1935 --ingest-key … --allow-lan`.
+
+The HTTP/WebSocket API (for Stream Deck, Streamer.bot, scripts) is documented in [`docs/API.md`](docs/API.md).
 
 ## Roadmap
 

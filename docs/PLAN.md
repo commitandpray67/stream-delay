@@ -2,7 +2,12 @@
 
 An open-source, cross-platform app for **changing stream delay while live**.
 
-> **Status:** planning. No code yet. This document is the source of truth for scope, architecture and the roadmap. Changes go through PRs to this file, and significant decisions get an ADR in `docs/adr/`.
+> **Status:** M0–M4 are implemented: relay, delay engine, control API, web UI, OBS wizard and desktop app. M5 (hardening, beta) is next. This document is the source of truth for scope, architecture and the roadmap. Changes go through PRs to this file, and significant decisions get an ADR in `docs/adr/`.
+>
+> Where the implementation differs from the plan:
+> - The API is documented by hand in [`API.md`](API.md) rather than generated with utoipa/OpenAPI.
+> - The OBS wizard accepts OBS 28+ (obs-websocket 5.0), not just what the `obws` crate checks by default.
+> - End-to-end testing found that splices need PTS-aware placement and HEVC CRA→BLA rewriting ([ADR 0003](adr/0003-splice-safety.md)).
 
 Working name: **stream-delay** (the binary is `streamdelay`). Pick a public brand name before v1.0, and avoid "Instant" so there is no trademark clash.
 

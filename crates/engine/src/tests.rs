@@ -171,7 +171,7 @@ impl Sim {
             self.now = next;
             if self.encoder_on && self.now >= self.next_video {
                 let ts = self.ts_base + self.video_index * FRAME_MS;
-                let key = self.video_index % GOP_FRAMES == 0;
+                let key = self.video_index.is_multiple_of(GOP_FRAMES);
                 let prefix: &[u8] = if key {
                     &[0x17, 0x01, 0, 0, 0]
                 } else {

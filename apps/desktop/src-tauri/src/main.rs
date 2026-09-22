@@ -1,0 +1,219 @@
+//! stream-delay desktop app.
+//!
+//! Runs the relay and control server in-process, shows a tray icon whose color
+//! follows the delay state, opens the dashboard (the same web UI OBS docks use) in a
+//! native window, and registers global hotkeys.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod hotkeys;
+mod tray;
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use streamdelay_config::{Config, Secrets};
+use streamdelay_control::{App, AppError, AppOptions, Overrides};
+use streamdelay_relay::RelayError;
+use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tracing::{error, info, warn};
+
+/// The running core, shared with tray and hotkey handlers.
+pub struct Core(pub Arc<App>);
+
+/// Ports tried in order when the configured ones are taken (another RTMP server,
+/// or a second copy of stream-delay).
+const INGEST_FALLBACKS: [u16; 3] = [1935, 19350, 29350];
+const API_FALLBACKS: [u16; 3] = [7788, 17788, 27788];
+
+fn main() {
+    init_logging();
+    let minimized = std::env::args().any(|a| a == "--minimized");
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // A second launch just brings up the dashboard of the running one.
+            show_dashboard(app, None);
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let core = match tauri::async_runtime::block_on(start_core()) {
+                Ok(core) => Arc::new(core),
+                Err(e) => {
+                    error!("could not start: {e}");
+                    handle
+                        .dialog()
+                        .message(format!("stream-delay could not start:\n\n{e}"))
+                        .kind(MessageDialogKind::Error)
+                        .title("stream-delay")
+                        .blocking_show();
+                    std::process::exit(1);
+                }
+            };
+            app.manage(Core(core.clone()));
+            tray::create(&handle, &core)?;
+            hotkeys::register(&handle, &core.config());
+            watch_config(handle.clone(), core.clone());
+            if !minimized {
+                let tab = core.needs_setup().then_some("setup");
+                show_dashboard(&handle, tab);
+            }
+            if updater_configured(&handle) {
+                tray::check_for_updates(handle.clone(), false);
+            }
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("failed to build the stream-delay app")
+        .run(|app, event| {
+            // Closing the dashboard keeps the relay running in the tray; only the
+            // tray's Quit (which calls `exit`) ends the app.
+            if let RunEvent::ExitRequested { api, code, .. } = &event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            } else if let RunEvent::Exit = event
+                && let Some(core) = app.try_state::<Core>()
+            {
+                let core = core.0.clone();
+                tauri::async_runtime::block_on(async move { core.shutdown().await });
+            }
+        });
+}
+
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info,obws=error".into());
+    let dir = Config::default_path()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs")));
+    let file = dir.and_then(|d| {
+        std::fs::create_dir_all(&d).ok()?;
+        std::fs::File::create(d.join("stream-delay.log")).ok()
+    });
+    match file {
+        Some(f) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(f))
+            .init(),
+        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
+}
+
+/// Starts relay and control server, moving to fallback ports if the configured
+/// ones are in use (and remembering the ports that worked).
+async fn start_core() -> Result<App, AppError> {
+    let path = Config::default_path()?;
+    let dir = path.parent().map(PathBuf::from).unwrap_or_default();
+    let secrets = Arc::new(Secrets::new(&dir, true));
+    let mut last_err = None;
+    // Each failure moves one of the two ports, so this bounds the retries.
+    for _ in 0..INGEST_FALLBACKS.len() + API_FALLBACKS.len() {
+        let opts = AppOptions {
+            config_path: Some(path.clone()),
+            secrets: secrets.clone(),
+            overrides: Overrides::default(),
+        };
+        match App::start(opts).await {
+            Ok(app) => return Ok(app),
+            Err(e) => {
+                let mut config = Config::load_or_create(&path)?;
+                let moved = match &e {
+                    AppError::Relay(RelayError::Bind { addr, .. }) => {
+                        next_port(&mut config.ingest.bind, *addr, &INGEST_FALLBACKS)
+                    }
+                    AppError::Bind { addr, .. } => {
+                        next_port(&mut config.api.bind, *addr, &API_FALLBACKS)
+                    }
+                    _ => false,
+                };
+                if !moved {
+                    return Err(e);
+                }
+                warn!("{e}; trying another port");
+                config.save(&path)?;
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("at least one attempt"))
+}
+
+/// Moves `bind` to the candidate after the one that failed. Returns false when
+/// there is nothing left to try.
+fn next_port(bind: &mut SocketAddr, failed: SocketAddr, candidates: &[u16]) -> bool {
+    let next = match candidates.iter().position(|p| *p == failed.port()) {
+        Some(i) => candidates.get(i + 1).copied(),
+        None => candidates.first().copied(),
+    };
+    match next {
+        Some(p) => {
+            bind.set_port(p);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Re-applies hotkeys and the tray menu whenever settings change.
+fn watch_config(app: AppHandle, core: Arc<App>) {
+    let mut rx = core.subscribe_config();
+    tauri::async_runtime::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let config = rx.borrow_and_update().clone();
+            hotkeys::register(&app, &config);
+            if let Err(e) = tray::rebuild_menu(&app, &core) {
+                warn!("could not rebuild the tray menu: {e}");
+            }
+        }
+    });
+}
+
+fn updater_configured(app: &AppHandle) -> bool {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|u| u.get("pubkey"))
+        .and_then(|k| k.as_str())
+        .is_some_and(|k| !k.trim().is_empty())
+}
+
+/// Opens (or focuses) the dashboard window, optionally on a specific tab.
+pub fn show_dashboard(app: &AppHandle, tab: Option<&str>) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let Some(core) = app.try_state::<Core>() else {
+        return;
+    };
+    let mut url = core.0.urls().dashboard;
+    if let Some(tab) = tab {
+        url.push('#');
+        url.push_str(tab);
+    }
+    let Ok(url) = url.parse() else { return };
+    let result = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+        .title("stream-delay")
+        .inner_size(1120.0, 820.0)
+        .min_inner_size(420.0, 480.0)
+        .build();
+    match result {
+        Ok(_) => info!("dashboard opened"),
+        Err(e) => error!("could not open the dashboard window: {e}"),
+    }
+}

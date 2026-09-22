@@ -59,6 +59,9 @@ pub struct IngestConfig {
     pub bind: SocketAddr,
     /// Seconds to keep the destination connected after OBS disconnects.
     pub grace_seconds: u64,
+    /// If set, encoders must use this stream key. Recommended when `bind` is not a
+    /// loopback address (two-PC setups, servers).
+    pub key: Option<String>,
 }
 
 impl Default for IngestConfig {
@@ -66,6 +69,7 @@ impl Default for IngestConfig {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 1935)),
             grace_seconds: 30,
+            key: None,
         }
     }
 }

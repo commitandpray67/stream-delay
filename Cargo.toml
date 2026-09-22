@@ -9,7 +9,10 @@ members = [
     "crates/obs",
     "crates/control",
     "crates/streamdelayd",
+    "apps/desktop/src-tauri",
 ]
+# The desktop app needs WebKit/GTK development packages on Linux, so plain
+# `cargo build`/`cargo test` skip it. Build it with `-p streamdelay-desktop`.
 default-members = [
     "crates/rtmp",
     "crates/flv",
@@ -24,10 +27,11 @@ default-members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/commitandpray67/stream-delay"
 authors = ["stream-delay contributors"]
+publish = false
 
 [workspace.dependencies]
 streamdelay-rtmp = { path = "crates/rtmp" }

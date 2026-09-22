@@ -92,6 +92,12 @@ struct RunArgs {
     /// Store secrets in a private file instead of the OS keychain.
     #[arg(long)]
     no_keychain: bool,
+    /// Accept API requests addressed to non-loopback hosts (still token-protected).
+    #[arg(long)]
+    allow_lan: bool,
+    /// Require encoders to publish with this stream key.
+    #[arg(long, env = "STREAMDELAY_INGEST_KEY", hide_env_values = true)]
+    ingest_key: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -185,7 +191,8 @@ fn main() -> Result<()> {
 fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,obws=error".into()),
         )
         .init();
     let config_path = if args.ephemeral {
@@ -211,6 +218,8 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
         max_delay_seconds: args.max_delay,
         start_delay_seconds: args.delay,
         grace_seconds: args.grace,
+        allow_lan: args.allow_lan,
+        ingest_key: args.ingest_key,
     };
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {

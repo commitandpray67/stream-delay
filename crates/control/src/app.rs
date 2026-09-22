@@ -32,6 +32,8 @@ pub struct Overrides {
     pub max_delay_seconds: Option<u64>,
     pub start_delay_seconds: Option<f64>,
     pub grace_seconds: Option<u64>,
+    pub allow_lan: bool,
+    pub ingest_key: Option<String>,
 }
 
 pub struct AppOptions {
@@ -106,23 +108,15 @@ impl App {
         if let Some(v) = o.grace_seconds {
             config.ingest.grace_seconds = v;
         }
-
-        let key_override = o.destination_key.clone();
-        let relay = streamdelay_relay::start(RelayConfig {
-            ingest_bind: config.ingest.bind,
-            destination: destination(&config, opts.secrets.as_ref(), key_override.as_deref()),
-            engine: engine_config(&config),
-            encoder_grace: Duration::from_secs(config.ingest.grace_seconds),
-            ..Default::default()
-        })
-        .await?;
-        if config.delay.start_seconds > 0.0 {
-            let ms = (config.delay.start_seconds * 1000.0) as u64;
-            if let Err(e) = relay.set_delay(ms, config.delay.default_mode).await {
-                warn!("could not apply the start delay: {e}");
-            }
+        if o.allow_lan {
+            config.api.allow_lan = true;
+        }
+        if let Some(k) = &o.ingest_key {
+            config.ingest.key = Some(k.clone());
         }
 
+        // Bind the API first: if its port is taken nothing else has started yet, so
+        // the caller can retry with another port.
         let listener =
             TcpListener::bind(config.api.bind)
                 .await
@@ -134,6 +128,23 @@ impl App {
             addr: config.api.bind,
             source,
         })?;
+        let key_override = o.destination_key.clone();
+        let relay = streamdelay_relay::start(RelayConfig {
+            ingest_bind: config.ingest.bind,
+            destination: destination(&config, opts.secrets.as_ref(), key_override.as_deref()),
+            engine: engine_config(&config),
+            encoder_grace: Duration::from_secs(config.ingest.grace_seconds),
+            ingest_key: config.ingest.key.clone().filter(|k| !k.is_empty()),
+            ..Default::default()
+        })
+        .await?;
+        if config.delay.start_seconds > 0.0 {
+            let ms = (config.delay.start_seconds * 1000.0) as u64;
+            if let Err(e) = relay.set_delay(ms, config.delay.default_mode).await {
+                warn!("could not apply the start delay: {e}");
+            }
+        }
+
         let (config_tx, _) = watch::channel(config.clone());
         let state = AppState {
             shared: Arc::new(Shared {
@@ -177,6 +188,19 @@ impl App {
 
     pub fn urls(&self) -> Urls {
         urls(&self.state)
+    }
+
+    /// True until a stream key (or passthrough) is configured.
+    pub fn needs_setup(&self) -> bool {
+        let c = self.config();
+        c.destination.key_mode == KeyMode::Stored
+            && self.state.shared.key_override.is_none()
+            && self
+                .state
+                .shared
+                .secrets
+                .get(secret::DESTINATION_KEY)
+                .is_none_or(|k| k.is_empty())
     }
 
     /// Applies a preset by index (used by hotkeys and the tray menu).

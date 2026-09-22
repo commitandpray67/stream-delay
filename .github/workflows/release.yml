@@ -1,0 +1,172 @@
+name: Release
+
+# Push a tag like v0.1.0 to build installers, headless binaries and the container
+# image. Everything lands in a draft GitHub release for review.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+            args: ""
+          - name: Windows
+            os: windows-latest
+            args: ""
+          - name: macOS (universal)
+            os: macos-latest
+            args: "--target universal-apple-darwin"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the web UI
+        run: pnpm -C ui install --frozen-lockfile && pnpm -C ui build
+      - name: Install the Tauri CLI
+        run: pnpm -C apps/desktop install --frozen-lockfile
+      - name: Updater configuration
+        id: updater
+        shell: bash
+        env:
+          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          # Signed auto-updates are enabled once the repository variable
+          # TAURI_UPDATER_PUBKEY and secret TAURI_SIGNING_PRIVATE_KEY are set
+          # (see docs/RELEASING.md).
+          if [ -n "$PUBKEY" ]; then
+            printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s"}}}' "$PUBKEY" \
+              > apps/desktop/src-tauri/tauri.release.conf.json
+            echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS signing and notarization (optional until an Apple Developer ID is set up).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: stream-delay ${{ github.ref_name }}
+          releaseBody: See the assets below. Checksums are in SHA256SUMS.txt.
+          releaseDraft: true
+          prerelease: true
+          includeUpdaterJson: true
+          args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
+
+  headless:
+    name: streamdelayd (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, exe: streamdelayd }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, exe: streamdelayd }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: streamdelayd.exe }
+          - { os: macos-latest, target: aarch64-apple-darwin, exe: streamdelayd }
+          - { os: macos-13, target: x86_64-apple-darwin, exe: streamdelayd }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm -C ui install --frozen-lockfile && pnpm -C ui build
+      - run: cargo build --release -p streamdelayd
+      - name: Package
+        shell: bash
+        run: |
+          name=streamdelayd-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir "$name"
+          cp target/release/${{ matrix.exe }} README.md LICENSE docs/API.md "$name"/
+          if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: headless-${{ matrix.target }}
+          path: streamdelayd-*.*
+
+  publish-headless:
+    name: Attach binaries and checksums
+    needs: [desktop, headless]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: headless-*
+          merge-multiple: true
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload "${{ github.ref_name }}" streamdelayd-* --clobber
+          mkdir all && cd all
+          gh release download "${{ github.ref_name }}" --pattern '*' --skip-existing
+          rm -f SHA256SUMS.txt && sha256sum * > SHA256SUMS.txt
+          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber
+
+  container:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=edge
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

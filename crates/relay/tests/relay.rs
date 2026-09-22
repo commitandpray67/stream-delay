@@ -119,7 +119,7 @@ struct Publisher {
 
 fn video_payload(frame: u32) -> Bytes {
     let mut b = BytesMut::new();
-    let key = frame % 30 == 0;
+    let key = frame.is_multiple_of(30);
     b.put_slice(if key {
         &[0x17, 0x01, 0, 0, 0]
     } else {
@@ -409,6 +409,40 @@ async fn passthrough_key_and_second_publisher_rejected() {
         log.lock().unwrap().keys,
         vec!["live_123?bandwidthtest=true".to_string()]
     );
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_key_is_enforced() {
+    let (sink, _log, _kill) = start_sink().await;
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "127.0.0.1:0".parse().unwrap(),
+        ingest_key: Some("let-me-in".into()),
+        destination: Some(Destination {
+            url: format!("rtmp://{sink}/app"),
+            key: DestinationKey::Fixed("k".into()),
+        }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let addr = relay.ingest_addr();
+    let wrong = tokio::spawn(async move { Publisher::connect(addr, "guess").await });
+    assert!(
+        wrong.await.is_err_and(|e| e.is_panic()),
+        "wrong key was accepted"
+    );
+    assert!(
+        relay
+            .state()
+            .ingest
+            .last_error
+            .unwrap()
+            .contains("wrong stream key")
+    );
+    let p = Publisher::connect(addr, "let-me-in").await;
+    assert!(relay.state().ingest.connected);
     p.stop().await;
     relay.shutdown().await;
 }
