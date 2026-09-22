@@ -940,10 +940,7 @@ impl Engine {
 
     fn evict(&mut self, now: Time) {
         let capacity = (self.config.max_delay_ms + self.config.headroom_ms) * MS;
-        loop {
-            let Some(front) = self.ring.front() else {
-                break;
-            };
+        while let Some(front) = self.ring.front() {
             let over_ram = self.bytes > self.config.ram_cap_bytes && self.ring.len() > 1;
             // Evict a whole GOP once its successor keyframe is older than the capacity,
             // so the oldest entry is always a keyframe.
