@@ -35,7 +35,7 @@ pids+=($!)
 sleep 1
 
 echo "== starting streamdelayd"
-STREAMDELAY_KEY=sinkkey STREAMDELAY_TOKEN=$TOKEN RUST_LOG=info "$BIN" run \
+STREAMDELAY_KEY=sinkkey STREAMDELAY_TOKEN=$TOKEN RUST_LOG=info "$BIN" run --ephemeral \
   --ingest $INGEST --dest "rtmp://127.0.0.1:$SINK_PORT/live" --api $API --grace 2 \
   > "$WORK/streamdelayd.log" 2>&1 &
 pids+=($!)

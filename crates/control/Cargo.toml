@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 streamdelay-relay.workspace = true
+streamdelay-config.workspace = true
+streamdelay-obs.workspace = true
+rust-embed = { version = "8", features = ["mime-guess"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio.workspace = true
 serde.workspace = true
@@ -20,6 +23,8 @@ rand.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [dev-dependencies]
+tempfile = "3"
+streamdelay-config.workspace = true
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

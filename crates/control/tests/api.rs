@@ -4,7 +4,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use streamdelay_control::{ControlConfig, Preset};
+use std::sync::Arc;
+
+use streamdelay_config::{Config, Secrets};
 use streamdelay_relay::RelayConfig;
 use tower::ServiceExt;
 
@@ -18,13 +20,13 @@ async fn app() -> axum::Router {
     })
     .await
     .unwrap();
-    let config = ControlConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        token: TOKEN.into(),
-        allow_lan: false,
-        presets: Preset::defaults(),
-    };
-    streamdelay_control::router(relay, &config, PORT)
+    let mut config = Config::default();
+    config.api.token = TOKEN.into();
+    config.destination.url = String::new();
+    // Secrets go to a throwaway directory that is never cleaned up mid-test.
+    let dir = std::env::temp_dir().join(format!("sd-api-test-{}", std::process::id()));
+    let secrets = Arc::new(Secrets::new(&dir, false));
+    streamdelay_control::router(relay, config, secrets, PORT)
 }
 
 fn req(method: &str, path: &str) -> axum::http::request::Builder {
@@ -126,6 +128,9 @@ async fn delay_commands() {
     let (s, body) = send(&app, put(r#"{"seconds":30}"#)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["target_ms"], 30_000);
+    let (s, body) = send(&app, put(r#"{"seconds":10,"mode":"mask"}"#)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["target_ms"], 10_000);
     let (s, body) = send(&app, put(r#"{"seconds":9999}"#)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("maximum"));
@@ -150,4 +155,79 @@ async fn delay_commands() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+fn authed(method: &str, path: &str) -> axum::http::request::Builder {
+    req(method, path).header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+}
+
+#[tokio::test]
+async fn config_hides_secrets_and_validates_updates() {
+    let app = app().await;
+    let (s, body) = send(
+        &app,
+        authed("GET", "/api/v1/config").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        body["config"]["api"]["token"], "",
+        "token must never be returned"
+    );
+    assert_eq!(body["destination_key_set"], false);
+    assert!(
+        body["urls"]["dock"]
+            .as_str()
+            .unwrap()
+            .contains("/dock?token=")
+    );
+    assert_eq!(
+        body["urls"]["obs_server"]
+            .as_str()
+            .unwrap()
+            .split(':')
+            .next(),
+        Some("rtmp")
+    );
+
+    let json = |b: &str| {
+        authed("PUT", "/api/v1/config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(b.to_string()))
+            .unwrap()
+    };
+    let (s, body) = send(&app, json(r##"{"overlay":{"badge":false,"badge_position":"top-left","popup":true,"mask_title":"BRB","mask_subtitle":"","accent_color":"#ff0000","background_color":"#000","text_color":"#ffffff","mask_image":""}}"##)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["config"]["overlay"]["mask_title"], "BRB");
+    let (s, _) = send(&app, json(r##"{"overlay":{"badge":false,"badge_position":"middle","popup":true,"mask_title":"","mask_subtitle":"","accent_color":"red","background_color":"#000","text_color":"#fff","mask_image":""}}"##)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, body) = send(
+        &app,
+        json(r#"{"destination":{"service":"custom","url":"http://nope","key_mode":"stored"}}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("rtmp"));
+
+    let (s, body) = send(
+        &app,
+        authed("PUT", "/api/v1/destination/key")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"key":"live_123"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["destination_key_set"], true);
+    assert!(
+        !body.to_string().contains("live_123"),
+        "key must never be returned"
+    );
+}
+
+#[tokio::test]
+async fn ui_is_served_without_token() {
+    let app = app().await;
+    let (s, _) = send(&app, req("GET", "/dock").body(Body::empty()).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
 }

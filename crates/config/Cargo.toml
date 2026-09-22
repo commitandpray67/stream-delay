@@ -1,12 +1,37 @@
 [package]
 name = "streamdelay-config"
+description = "Configuration file and secret storage for stream-delay"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["keychain"]
+# Store secrets in the OS keychain (falls back to a private file when unavailable).
+keychain = ["dep:keyring"]
+
 [dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+toml = "1"
+streamdelay-engine.workspace = true
+directories = "6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", optional = true, features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", optional = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", optional = true, features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 
 **Change your stream delay while you're live, without restarting OBS.** Free, open source (GPL-3.0), and built for Windows, macOS and Linux.
 
-> **Status: planning.** There is no code yet. The full design and roadmap are in [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: pre-release (milestones M0–M4 of [`docs/PLAN.md`](docs/PLAN.md)).** The relay, delay engine, web UI and desktop app work and are tested end to end with ffmpeg. They have not yet been battle-tested on real Twitch streams, so test with `?bandwidthtest=true` before relying on it.
 
 ## What it will do
 
@@ -23,6 +23,24 @@ OBS  →  rtmp://127.0.0.1:1935/live  →  stream-delay  →  Twitch
 
 Everything OBS sends goes into a rolling buffer, indexed by keyframe. The output to Twitch reads from a cursor into that buffer. Changing the delay moves the cursor to a keyframe and rewrites timestamps so they keep increasing, which means the connection to Twitch never drops. See [How delay changes work](docs/PLAN.md#how-delay-changes-work-the-core-idea).
 
+## Try it
+
+Build from source (Rust stable, Node 20+ with pnpm):
+
+```sh
+pnpm -C ui install && pnpm -C ui build   # web UI, embedded into the binary
+cargo run --release -p streamdelayd -- run
+```
+
+`streamdelayd run` prints the OBS server address and links for the dashboard, OBS dock and overlay:
+
+1. Open the **dashboard** link. Under **Setup**, choose Twitch and paste your stream key (add `?bandwidthtest=true` to test privately).
+2. In OBS: **Settings → Stream → Custom…**, Server `rtmp://127.0.0.1:1935/live`, any stream key. Or let the Setup page configure OBS for you through obs-websocket.
+3. Add the **dock** URL under **Docks → Custom Browser Docks** and the **overlay** URL as a Browser source.
+4. Start streaming, then change the delay from the dock, the dashboard, hotkeys or the CLI (`streamdelayd delay 30`, `streamdelayd live --after-air`).
+
+The desktop app (tray icon, global hotkeys, installers) lives in [`apps/desktop`](apps/desktop). The HTTP/WebSocket API is documented in [`docs/API.md`](docs/API.md).
+
 ## Roadmap
 
 1. **M0:** foundations and CI.
@@ -37,7 +55,7 @@ Details are in [`docs/PLAN.md`](docs/PLAN.md#roadmap-rough-effort-for-one-experi
 
 ## Contributing
 
-The project is at the planning stage. Feedback on the plan is welcome: open an issue or a PR against `docs/PLAN.md`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Design decisions are recorded in [`docs/adr/`](docs/adr/).
 
 ## License
 

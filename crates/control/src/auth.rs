@@ -35,7 +35,13 @@ pub(crate) fn check_origin(
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if !state.allow_lan && !is_loopback_host(host, state.port) {
+    let allow_lan = state
+        .shared
+        .config
+        .read()
+        .map(|c| c.api.allow_lan)
+        .unwrap_or(false);
+    if !allow_lan && !is_loopback_host(host, state.shared.port) {
         return Err((StatusCode::MISDIRECTED_REQUEST, "unexpected Host header"));
     }
     if let Some(origin) = headers.get(header::ORIGIN) {
@@ -70,7 +76,11 @@ fn token_from(req: &Request) -> Option<String> {
 }
 
 pub(crate) fn token_ok(state: &AppState, req: &Request) -> bool {
-    token_from(req).is_some_and(|t| t.as_bytes().ct_eq(state.token.as_bytes()).into())
+    let Ok(config) = state.shared.config.read() else {
+        return false;
+    };
+    let expected = config.api.token.as_bytes();
+    !expected.is_empty() && token_from(req).is_some_and(|t| t.as_bytes().ct_eq(expected).into())
 }
 
 /// Guard for every route: origin checks, plus the token for `/api`.
