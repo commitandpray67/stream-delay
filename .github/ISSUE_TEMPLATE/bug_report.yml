@@ -1,0 +1,45 @@
+name: Bug report
+description: Something is not working as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Never paste your stream key.** Use "Export log bundle" in the dashboard; it redacts secrets.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: stream-delay version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux, Other]
+    validations:
+      required: true
+  - type: input
+    id: encoder
+    attributes:
+      label: Encoder and settings
+      placeholder: "OBS 31.0, NVENC H.264, 6000 kbps, keyframe interval 2s"
+  - type: input
+    id: destination
+    attributes:
+      label: Destination
+      placeholder: "Twitch (rtmp://live.twitch.tv/app)"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Attach the exported log bundle or paste relevant lines.
+      render: text

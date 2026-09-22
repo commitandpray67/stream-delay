@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rtmp",
+    "crates/flv",
+    "crates/engine",
+    "crates/relay",
+    "crates/config",
+    "crates/obs",
+    "crates/control",
+    "crates/streamdelayd",
+]
+default-members = [
+    "crates/rtmp",
+    "crates/flv",
+    "crates/engine",
+    "crates/relay",
+    "crates/config",
+    "crates/obs",
+    "crates/control",
+    "crates/streamdelayd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/commitandpray67/stream-delay"
+authors = ["stream-delay contributors"]
+
+[workspace.dependencies]
+streamdelay-rtmp = { path = "crates/rtmp" }
+streamdelay-flv = { path = "crates/flv" }
+streamdelay-engine = { path = "crates/engine" }
+streamdelay-relay = { path = "crates/relay" }
+streamdelay-config = { path = "crates/config" }
+streamdelay-obs = { path = "crates/obs" }
+streamdelay-control = { path = "crates/control" }
+
+bytes = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+rand = "0.9"
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
