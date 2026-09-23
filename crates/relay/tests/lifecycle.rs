@@ -396,8 +396,10 @@ async fn a_short_stream_whose_destination_is_down_is_given_up_too() {
     // grace period to answer.
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(relay.state().egress.status, EgressStatus::Idle);
+    // Connecting, or retrying (connecting to a closed port fails at once on some
+    // systems and takes a while on others).
     wait_until("the relay tried", Duration::from_secs(8), || {
-        relay.state().egress.status == EgressStatus::Retrying
+        relay.state().egress.status != EgressStatus::Idle
     })
     .await;
     wait_until("the relay gave up", Duration::from_secs(8), || {

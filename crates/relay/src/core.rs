@@ -423,13 +423,19 @@ impl Core {
                 error,
             } => {
                 self.engine.output_disconnected(now, last_written);
-                if let Some(e) = error {
+                // After a stop, how the connection ended is no news (and would
+                // hide why it was stopped).
+                if let Some(e) = error.filter(|_| self.egress_running) {
                     self.state.egress.reconnects += 1;
                     self.state.egress.last_error = Some(clip(e));
                 }
                 self.publish_state();
             }
             Event::EgressStatus { status, error } => {
+                if !self.egress_running && status != EgressStatus::Idle {
+                    // Sent before the egress saw the stop: out of date.
+                    return;
+                }
                 if self.config.destination.is_some() || status != EgressStatus::Idle {
                     self.state.egress.status = status;
                 }
