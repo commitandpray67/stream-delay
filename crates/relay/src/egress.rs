@@ -20,7 +20,24 @@ use crate::core::Event;
 use crate::io::{self, BoxStream};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Waits before reconnecting after a failed or dropped connection. Every second
+/// spent reconnecting adds a second of delay (nothing is skipped), so the first
+/// attempts come quickly.
+const RETRY_WAITS: [Duration; 5] = [
+    Duration::ZERO,
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(5);
+/// After the destination refused the stream (a wrong stream key, for example),
+/// trying again at once would not help and could look like abuse.
+const REFUSED_RETRY_WAIT: Duration = Duration::from_secs(10);
+/// A connection that stayed up this long was working: when it drops, the next
+/// attempt comes at once again.
+const STABLE_CONNECTION: Duration = Duration::from_secs(10);
 /// How long a clean unpublish may take before the connection is just dropped.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -68,7 +85,37 @@ pub(crate) struct Counters {
 enum RunEnd {
     Stopped,
     Retarget(Target),
-    Failed { error: String },
+    Failed(Failure),
+}
+
+/// Why a connection failed or ended.
+struct Failure {
+    message: String,
+    /// The destination refused the stream, rather than being unreachable.
+    refused: bool,
+}
+
+impl Failure {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            refused: false,
+        }
+    }
+}
+
+/// How long to wait before the next attempt, counting `failures` in a row.
+fn retry_wait(failures: &mut usize, refused: bool) -> Duration {
+    let wait = RETRY_WAITS
+        .get(*failures)
+        .copied()
+        .unwrap_or(MAX_RETRY_WAIT);
+    *failures += 1;
+    if refused {
+        wait.max(REFUSED_RETRY_WAIT)
+    } else {
+        wait
+    }
 }
 
 pub(crate) async fn run(
@@ -78,13 +125,18 @@ pub(crate) async fn run(
     counters: Arc<Counters>,
 ) {
     let mut target: Option<Target> = None;
-    let mut backoff = Duration::from_secs(1);
+    // Failed attempts in a row.
+    let mut failures = 0usize;
     loop {
         let Some(t) = target.clone() else {
             // Idle: wait for a start request, discarding anything stale.
             tokio::select! {
                 c = ctl.recv() => match c {
-                    Some(EgressCtl::Start(t)) => target = Some(t),
+                    Some(EgressCtl::Start(t)) => {
+                        // A new broadcast: earlier failures don't count.
+                        failures = 0;
+                        target = Some(t);
+                    }
                     Some(EgressCtl::Stop | EgressCtl::Abort) => {}
                     None => return,
                 },
@@ -117,33 +169,20 @@ pub(crate) async fn run(
         };
         let (stream, session, aborter) = match connected {
             Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                warn!("destination connection failed: {e}");
+            Ok(Err(f)) => {
+                warn!("destination connection failed: {}", f.message);
+                let wait = retry_wait(&mut failures, f.refused);
                 target = wait_backoff(
-                    &mut ctl,
-                    &mut media,
-                    &events,
-                    &counters,
-                    t,
-                    &e,
-                    &mut backoff,
+                    &mut ctl, &mut media, &events, &counters, t, &f.message, wait,
                 )
                 .await;
                 continue;
             }
             Err(_) => {
-                let e = "timed out connecting to the destination".to_string();
+                let e = "timed out connecting to the destination";
                 warn!("{e}");
-                target = wait_backoff(
-                    &mut ctl,
-                    &mut media,
-                    &events,
-                    &counters,
-                    t,
-                    &e,
-                    &mut backoff,
-                )
-                .await;
+                let wait = retry_wait(&mut failures, false);
+                target = wait_backoff(&mut ctl, &mut media, &events, &counters, t, e, wait).await;
                 continue;
             }
         };
@@ -174,7 +213,7 @@ pub(crate) async fn run(
         // through a reconnect backoff.
         drop(aborter);
         let error = match &end {
-            RunEnd::Failed { error } => Some(error.clone()),
+            RunEnd::Failed(f) => Some(f.message.clone()),
             _ => None,
         };
         let _ = events.send(Event::EgressDisconnected {
@@ -187,19 +226,14 @@ pub(crate) async fn run(
                 status(&events, EgressStatus::Idle, None);
             }
             RunEnd::Retarget(t) => target = Some(t),
-            RunEnd::Failed { error } => {
-                warn!("destination connection lost: {error}");
-                if started.elapsed() > Duration::from_secs(30) {
-                    backoff = Duration::from_secs(1);
+            RunEnd::Failed(f) => {
+                warn!("destination connection lost: {}", f.message);
+                if started.elapsed() >= STABLE_CONNECTION {
+                    failures = 0;
                 }
+                let wait = retry_wait(&mut failures, f.refused);
                 target = wait_backoff(
-                    &mut ctl,
-                    &mut media,
-                    &events,
-                    &counters,
-                    t,
-                    &error,
-                    &mut backoff,
+                    &mut ctl, &mut media, &events, &counters, t, &f.message, wait,
                 )
                 .await;
             }
@@ -211,7 +245,8 @@ fn status(events: &mpsc::UnboundedSender<Event>, s: EgressStatus, error: Option<
     let _ = events.send(Event::EgressStatus { status: s, error });
 }
 
-/// Sleeps before the next attempt. Returns the target to use next (None if stopped).
+/// Sleeps `wait` before the next attempt. Returns the target to use next (None if
+/// stopped).
 async fn wait_backoff(
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
     media: &mut mpsc::UnboundedReceiver<(u64, OutMsg)>,
@@ -219,11 +254,10 @@ async fn wait_backoff(
     counters: &Counters,
     current: Target,
     error: &str,
-    backoff: &mut Duration,
+    wait: Duration,
 ) -> Option<Target> {
     status(events, EgressStatus::Retrying, Some(error.to_string()));
-    let sleep = tokio::time::sleep(*backoff);
-    *backoff = (*backoff * 2).min(MAX_BACKOFF);
+    let sleep = tokio::time::sleep(wait);
     tokio::pin!(sleep);
     loop {
         tokio::select! {
@@ -243,27 +277,32 @@ async fn wait_backoff(
     }
 }
 
-async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), String> {
+async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Failure> {
     let tcp = TcpStream::connect((t.url.host.as_str(), t.url.port))
         .await
-        .map_err(|e| format!("could not reach {}:{}: {e}", t.url.host, t.url.port))?;
+        .map_err(|e| {
+            Failure::new(format!(
+                "could not reach {}:{}: {e}",
+                t.url.host, t.url.port
+            ))
+        })?;
     io::tune(&tcp);
     let aborter = Aborter::new(&tcp);
     let mut stream: BoxStream = match t.url.scheme {
         Scheme::Rtmp => Box::pin(tcp),
         Scheme::Rtmps => {
             let name = rustls::pki_types::ServerName::try_from(t.url.host.clone())
-                .map_err(|e| format!("invalid TLS server name: {e}"))?;
+                .map_err(|e| Failure::new(format!("invalid TLS server name: {e}")))?;
             let tls = tokio_rustls::TlsConnector::from(io::tls_config())
                 .connect(name, tcp)
                 .await
-                .map_err(|e| format!("TLS handshake failed: {e}"))?;
+                .map_err(|e| Failure::new(format!("TLS handshake failed: {e}")))?;
             Box::pin(tls)
         }
     };
     let rest = io::client_handshake(&mut stream)
         .await
-        .map_err(|e| format!("RTMP handshake failed: {e}"))?;
+        .map_err(|e| Failure::new(format!("RTMP handshake failed: {e}")))?;
     let mut cfg = ClientConfig::new(t.url.app.clone(), t.url.tc_url.clone(), t.key.clone());
     cfg.extra_connect_props = t.connect_props.clone();
     let mut session = ClientSession::new(cfg);
@@ -275,7 +314,7 @@ async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Stri
             stream
                 .write_all(&out)
                 .await
-                .map_err(|e| format!("write failed: {e}"))?;
+                .map_err(|e| Failure::new(format!("write failed: {e}")))?;
         }
         let data = match pending.take() {
             Some(d) if !d.is_empty() => d.to_vec(),
@@ -283,17 +322,22 @@ async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Stri
                 let n = stream
                     .read(&mut buf)
                     .await
-                    .map_err(|e| format!("read failed: {e}"))?;
+                    .map_err(|e| Failure::new(format!("read failed: {e}")))?;
                 if n == 0 {
-                    return Err(
-                        "the destination closed the connection (check the stream key)".into(),
-                    );
+                    // What servers do with a wrong stream key, too.
+                    return Err(Failure {
+                        message: "the destination closed the connection (check the stream key)"
+                            .into(),
+                        refused: true,
+                    });
                 }
                 buf[..n].to_vec()
             }
         };
         // Both possible events end the connect phase, so only the first one matters.
-        let events = session.feed(&data).map_err(|e| e.to_string())?;
+        let events = session
+            .feed(&data)
+            .map_err(|e| Failure::new(e.to_string()))?;
         if let Some(ev) = events.into_iter().next() {
             match ev {
                 ClientEvent::Publishing => {
@@ -301,13 +345,14 @@ async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Stri
                     stream
                         .write_all(&out)
                         .await
-                        .map_err(|e| format!("write failed: {e}"))?;
+                        .map_err(|e| Failure::new(format!("write failed: {e}")))?;
                     return Ok((stream, session, aborter));
                 }
                 ClientEvent::Error { code, description } => {
-                    return Err(format!(
-                        "destination refused the stream: {code} {description}"
-                    ));
+                    return Err(Failure {
+                        message: format!("destination refused the stream: {code} {description}"),
+                        refused: true,
+                    });
                 }
             }
         }
@@ -389,25 +434,25 @@ async fn publish(
             }
             n = rd.read(&mut buf) => {
                 let n = match n {
-                    Ok(0) => return (RunEnd::Failed { error: "the destination closed the connection".into() }, last_written),
+                    Ok(0) => return (RunEnd::Failed(Failure::new("the destination closed the connection")), last_written),
                     Ok(n) => n,
-                    Err(e) => return (RunEnd::Failed { error: format!("read failed: {e}") }, last_written),
+                    Err(e) => return (RunEnd::Failed(Failure::new(format!("read failed: {e}"))), last_written),
                 };
                 match session.feed(&buf[..n]) {
                     Ok(evs) => {
                         for ev in evs {
                             if let ClientEvent::Error { code, description } = ev {
-                                return (RunEnd::Failed { error: format!("{code} {description}") }, last_written);
+                                return (RunEnd::Failed(Failure { message: format!("{code} {description}"), refused: true }), last_written);
                             }
                         }
                     }
-                    Err(e) => return (RunEnd::Failed { error: e.to_string() }, last_written),
+                    Err(e) => return (RunEnd::Failed(Failure::new(e.to_string())), last_written),
                 }
                 let out = session.take_output();
                 if !out.is_empty() {
                     match write_or_ctl(&mut wr, &out, ctl).await {
                         Written::Done => {}
-                        Written::Failed(e) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
+                        Written::Failed(e) => return (RunEnd::Failed(Failure::new(format!("write failed: {e}"))), last_written),
                         Written::Interrupted(c) => return (ended_by(c, aborter), last_written),
                     }
                 }
@@ -437,7 +482,7 @@ async fn publish(
                 counters.backlog.fetch_sub(bytes, Ordering::Relaxed);
                 match result {
                     Written::Done => {}
-                    Written::Failed(e) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
+                    Written::Failed(e) => return (RunEnd::Failed(Failure::new(format!("write failed: {e}"))), last_written),
                     // Told to stop mid-write (End stream on a slow upload): the RTMP
                     // stream is cut mid-message, so there is no clean unpublish;
                     // dropping the connection ends the broadcast.

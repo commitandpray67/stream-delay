@@ -50,9 +50,10 @@ it.
 
 ## The delay is longer than I set after a connection problem
 
-When the connection to Twitch drops, stream-delay reconnects and continues where it
-left off, so viewers miss nothing, but the delay grows by the length of the outage.
-Press your preset again to go back to the delay you want.
+When the connection to Twitch drops, stream-delay reconnects (the first attempt
+comes at once) and continues where it left off, so viewers miss nothing, but the
+delay grows by the length of the outage. Press your preset again to go back to
+the delay you want.
 
 ## The Mask slate doesn't appear
 

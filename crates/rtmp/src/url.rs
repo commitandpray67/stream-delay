@@ -111,11 +111,11 @@ fn host_for_url(host: &str) -> String {
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&s[prefix.len()..])
-    } else {
-        None
-    }
+    // `get` rather than indexing: the input may have a multi-byte character where
+    // the prefix would end.
+    s.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &s[prefix.len()..])
 }
 
 fn split_host_port(authority: &str, default_port: u16) -> Result<(String, u16), UrlError> {
@@ -174,5 +174,18 @@ mod tests {
         assert_eq!(RtmpUrl::parse("http://x/app"), Err(UrlError::Scheme));
         assert_eq!(RtmpUrl::parse("rtmp://host"), Err(UrlError::App));
         assert_eq!(RtmpUrl::parse("rtmp://host:abc/app"), Err(UrlError::Port));
+        // A multi-byte character where the scheme would end.
+        assert_eq!(RtmpUrl::parse("aaaaaaé"), Err(UrlError::Scheme));
+        assert_eq!(RtmpUrl::parse("rtmpé://x/app"), Err(UrlError::Scheme));
+    }
+
+    proptest::proptest! {
+        /// Settings and the command line pass arbitrary text here.
+        #[test]
+        fn arbitrary_text_never_panics(s in ".*", tail in ".*") {
+            let _ = RtmpUrl::parse(&s);
+            let _ = RtmpUrl::parse(&format!("rtmp://{tail}"));
+            let _ = RtmpUrl::parse(&format!("rtmps://[{tail}"));
+        }
     }
 }

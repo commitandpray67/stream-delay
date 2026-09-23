@@ -136,7 +136,7 @@ impl App {
             config.save(p)?;
         }
         // As saved, without this run's overrides.
-        let saved = config.clone();
+        let mut saved = config.clone();
 
         let o = &opts.overrides;
         let mut key_override = o.destination_key.clone();
@@ -179,9 +179,8 @@ impl App {
             && !config.ingest.bind.ip().to_canonical().is_loopback()
         {
             let key = streamdelay_config::new_token();
+            saved.ingest.key = Some(key.clone());
             if let Some(p) = &opts.config_path {
-                let mut saved = saved;
-                saved.ingest.key = Some(key.clone());
                 saved.save(p)?;
             }
             warn!(
@@ -219,9 +218,17 @@ impl App {
             source,
         })?;
         let key_override_url = config.destination.url.clone();
+        // The stored key belongs to the destination in the settings file; a
+        // destination given on the command line for another server does not get it.
+        let key = key_override.clone().or_else(|| {
+            (!different_server(&saved.destination.url, &config.destination.url))
+                .then(|| opts.secrets.get(secret::DESTINATION_KEY))
+                .flatten()
+                .filter(|k| !k.is_empty())
+        });
         let relay = streamdelay_relay::start(RelayConfig {
             ingest_bind: config.ingest.bind,
-            destination: destination(&config, opts.secrets.as_ref(), key_override.as_deref()),
+            destination: destination(&config, key),
             engine: engine_config(&config),
             encoder_grace: Duration::from_secs(config.ingest.grace_seconds),
             ingest_key: config.ingest.key.clone().filter(|k| !k.is_empty()),
@@ -242,6 +249,7 @@ impl App {
                 tokens: Tokens::new(&config.api.token),
                 allow_lan: config.api.allow_lan,
                 download_codes: Default::default(),
+                saved: std::sync::Mutex::new(saved),
                 config: RwLock::new(config),
                 config_path: opts.config_path,
                 save_lock: std::sync::Mutex::new(()),
@@ -290,12 +298,7 @@ impl App {
         let c = self.config();
         c.destination.key_mode == KeyMode::Stored
             && self.state.key_override(&c.destination.url).is_none()
-            && self
-                .state
-                .shared
-                .secrets
-                .get(secret::DESTINATION_KEY)
-                .is_none_or(|k| k.is_empty())
+            && self.state.stored_key(&c.destination.url).is_none()
     }
 
     /// Applies a preset by index (used by hotkeys and the tray menu).
@@ -396,23 +399,14 @@ pub(crate) fn engine_config(c: &Config) -> EngineConfig {
     }
 }
 
-/// Builds the relay destination from settings and secrets.
-pub(crate) fn destination(
-    c: &Config,
-    secrets: &dyn SecretStore,
-    key_override: Option<&str>,
-) -> Option<Destination> {
+/// Builds the relay destination from settings and the stream key for it.
+pub(crate) fn destination(c: &Config, key: Option<String>) -> Option<Destination> {
     if c.destination.url.trim().is_empty() {
         return None;
     }
     let key = match c.destination.key_mode {
         KeyMode::Passthrough => DestinationKey::Passthrough,
-        KeyMode::Stored => DestinationKey::Fixed(
-            key_override
-                .map(str::to_string)
-                .or_else(|| secrets.get(secret::DESTINATION_KEY))
-                .unwrap_or_default(),
-        ),
+        KeyMode::Stored => DestinationKey::Fixed(key.unwrap_or_default()),
     };
     Some(Destination {
         url: c.destination.url.trim().to_string(),

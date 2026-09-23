@@ -374,3 +374,35 @@ async fn slow_destination_shows_backlog_then_recovers() {
     p.stop().await;
     relay.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_destination_connection_is_retried_at_once() {
+    let (sink, log, _kill) = start_sink().await;
+    let proxy = FaultProxy::start(sink).await;
+    let relay = start_relay(
+        proxy.addr,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(10),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    // Long enough for the connection to count as working.
+    p.stream_for(Duration::from_secs(11)).await;
+    let dropped = Instant::now();
+    proxy.reset_all();
+    p.stream_for(Duration::from_secs(2)).await;
+    let back = log
+        .lock()
+        .unwrap()
+        .media
+        .iter()
+        .find(|m| m.conn == 1)
+        .map(|m| m.at.duration_since(dropped));
+    // Every second spent reconnecting would be a second more delay.
+    assert!(
+        back.is_some_and(|b| b < Duration::from_millis(500)),
+        "back after {back:?}"
+    );
+    p.stop().await;
+    relay.shutdown().await;
+}

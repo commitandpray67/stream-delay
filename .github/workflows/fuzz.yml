@@ -25,6 +25,9 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # The sanitizers need nightly; rust-toolchain.toml would otherwise pick stable.
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly

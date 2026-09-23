@@ -200,6 +200,52 @@ async fn stopping_the_stream_airs_the_rest_then_ends_the_broadcast_cleanly() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_in_obs_ends_the_broadcast_without_waiting_for_the_grace_period() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(10)).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    let stopped = Instant::now();
+    p.stop().await;
+    // Nothing is left to air (no delay): viewers must not watch a frozen stream
+    // for the 10 s grace period.
+    wait_until("the broadcast ended", Duration::from_secs(3), || {
+        log.lock().unwrap().unpublished == 1
+    })
+    .await;
+    assert!(
+        stopped.elapsed() < Duration::from_secs(2),
+        "the broadcast lingered {:?}",
+        stopped.elapsed()
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crashed_encoder_keeps_the_broadcast_open_for_the_grace_period() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(3)).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    let crashed = Instant::now();
+    p.crash();
+    // It may come back: the broadcast waits.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(
+        log.lock().unwrap().unpublished,
+        0,
+        "ended before the grace period"
+    );
+    assert_eq!(relay.state().egress.status, EgressStatus::Live);
+    wait_until("the broadcast ended", Duration::from_secs(5), || {
+        log.lock().unwrap().unpublished == 1
+    })
+    .await;
+    assert!(crashed.elapsed() >= Duration::from_secs(3));
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quitting_while_live_ends_the_broadcast_cleanly() {
     let (sink, log, _kill) = start_sink().await;
     let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
@@ -276,6 +322,8 @@ async fn a_destination_down_at_the_end_is_given_up_and_nothing_airs_later() {
         relay.state().egress.status == EgressStatus::Idle
     })
     .await;
+    let said = relay.state().egress.last_error.unwrap_or_default();
+    assert!(said.contains("could not be reached"), "{said}");
     // The destination comes back. What never aired belongs to a finished stream:
     // sending it would start a broadcast (and notify followers).
     let (_, log, _kill) = start_sink_with(&dead.to_string(), SinkOptions::default()).await;

@@ -57,6 +57,11 @@ jobs:
         run: cargo clippy --all-targets
       - name: Test
         run: cargo test
+      # The fuzz targets are outside the workspace (fuzzing needs nightly), so
+      # nothing else would notice when an API change breaks them.
+      - name: Fuzz targets compile
+        if: runner.os == 'Linux'
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins
 
   desktop:
     name: Desktop app (${{ matrix.os }})

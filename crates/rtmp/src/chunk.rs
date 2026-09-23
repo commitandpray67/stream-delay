@@ -5,7 +5,7 @@
 //! chunks) and runtime chunk-size changes. The encoder always writes a type-0
 //! header for the first chunk of a message, which every RTMP peer accepts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use thiserror::Error;
@@ -27,8 +27,16 @@ const MAX_RESERVE: usize = 256 * 1024;
 /// thread) the heap fragmented until the process used 3–4 times the buffered data
 /// in soak tests, with glibc and mimalloc alike. Equal blocks freed in arrival
 /// order are reused cleanly.
+///
+/// Full blocks are also reused once no message uses them any more, rather than
+/// freed and allocated again: with glibc, freeing a 1 MiB block raises the size
+/// from which it maps memory straight from the OS, and later blocks then came
+/// from its general heap, where the process held 20-35 MB more than the
+/// buffered data in steady-state tests.
 const ARENA_BLOCK: usize = 1024 * 1024;
 const ARENA_MAX_MESSAGE: usize = ARENA_BLOCK / 2;
+/// Unused blocks kept for reuse; any beyond this go back to the allocator.
+const MAX_SPARE_BLOCKS: usize = 4;
 const EXTENDED: u32 = 0x00FF_FFFF;
 
 /// A complete RTMP message.
@@ -83,8 +91,14 @@ pub struct ChunkDecoder {
     buf: BytesMut,
     /// Sum of `partial.len()` over all streams.
     pending: usize,
-    /// Unused rest of the current block that complete messages are copied into.
-    arena: BytesMut,
+    /// Unused rest of the current block that complete messages are copied into
+    /// (none until the first message).
+    arena: Option<BytesMut>,
+    /// Full blocks, oldest first (the unused rest of each), kept to be reused
+    /// once no message uses them any more.
+    retired: VecDeque<BytesMut>,
+    /// Blocks allocated so far (the rest were reused).
+    blocks_allocated: usize,
     /// Largest audio or video message accepted.
     max_media_len: usize,
     /// Largest message of any other type (commands, metadata, control).
@@ -104,7 +118,9 @@ impl ChunkDecoder {
             streams: HashMap::new(),
             buf: BytesMut::new(),
             pending: 0,
-            arena: BytesMut::new(),
+            arena: None,
+            retired: VecDeque::new(),
+            blocks_allocated: 0,
             max_media_len: usize::MAX,
             max_other_len: usize::MAX,
         }
@@ -139,7 +155,7 @@ impl ChunkDecoder {
     pub fn abort(&mut self, csid: u32) {
         if let Some(s) = self.streams.get_mut(&csid) {
             self.pending -= s.partial.len();
-            s.partial.clear();
+            release(&mut s.partial);
             s.in_progress = false;
         }
     }
@@ -296,7 +312,7 @@ impl ChunkDecoder {
             st.extended = extended;
             st.ext_value = ext_value;
             st.has_header = true;
-            st.partial.clear();
+            release(&mut st.partial);
             st.partial.reserve((length as usize).min(MAX_RESERVE));
             st.in_progress = true;
         }
@@ -308,12 +324,17 @@ impl ChunkDecoder {
             st.in_progress = false;
             self.pending -= st.partial.len();
             let payload = if st.partial.len() <= ARENA_MAX_MESSAGE {
-                if self.arena.capacity() < st.partial.len() {
-                    self.arena = BytesMut::with_capacity(ARENA_BLOCK);
-                }
-                self.arena.extend_from_slice(&st.partial);
-                st.partial.clear();
-                self.arena.split().freeze()
+                let arena = match &mut self.arena {
+                    Some(a) if a.capacity() >= st.partial.len() => a,
+                    slot => {
+                        let full = slot.take();
+                        let block = next_block(&mut self.retired, full, &mut self.blocks_allocated);
+                        slot.insert(block)
+                    }
+                };
+                arena.extend_from_slice(&st.partial);
+                release(&mut st.partial);
+                arena.split().freeze()
             } else {
                 st.partial.split().freeze()
             };
@@ -326,6 +347,45 @@ impl ChunkDecoder {
             }));
         }
         Ok(ChunkResult::Partial)
+    }
+}
+
+/// Retires the full block `full` and returns one to copy messages into: a retired
+/// block no message uses any more, or a new one.
+fn next_block(
+    retired: &mut VecDeque<BytesMut>,
+    full: Option<BytesMut>,
+    allocated: &mut usize,
+) -> BytesMut {
+    retired.extend(full);
+    let mut reuse = None;
+    let mut spare = 0;
+    // `try_reclaim` succeeds only for a block this handle alone still refers to.
+    retired.retain_mut(|b| {
+        if !b.try_reclaim(ARENA_BLOCK) {
+            return true;
+        }
+        if reuse.is_none() {
+            reuse = Some(std::mem::take(b));
+            return false;
+        }
+        spare += 1;
+        spare <= MAX_SPARE_BLOCKS
+    });
+    reuse.unwrap_or_else(|| {
+        *allocated += 1;
+        BytesMut::with_capacity(ARENA_BLOCK)
+    })
+}
+
+/// Empties a message buffer for reuse. One larger than a block is freed instead:
+/// kept, every chunk stream could hold on to a buffer the size of the largest
+/// message it ever carried (or started to), which `pending` does not count.
+fn release(partial: &mut BytesMut) {
+    if partial.capacity() > ARENA_BLOCK {
+        *partial = BytesMut::new();
+    } else {
+        partial.clear();
     }
 }
 
@@ -687,6 +747,97 @@ mod tests {
             dec.next_message(),
             Err(ChunkError::MessageTooLarge { type_id: 8, .. })
         ));
+    }
+
+    #[test]
+    fn aborted_and_replaced_messages_free_their_buffers() {
+        let cs = 1024 * 1024;
+        let len = 16 * 1024 * 1024 - 1;
+        // Most of a 16 MiB message on each of `streams` chunk streams.
+        let partial = |csid: u8| {
+            let mut data = vec![
+                csid,
+                0,
+                0,
+                0,
+                (len >> 16) as u8,
+                (len >> 8) as u8,
+                len as u8,
+            ];
+            data.extend_from_slice(&[9, 1, 0, 0, 0]);
+            data.resize(data.len() + cs, 0);
+            for _ in 0..14 {
+                data.push(0xc0 | csid);
+                data.resize(data.len() + cs, 0);
+            }
+            data
+        };
+        let held = |dec: &ChunkDecoder| -> usize {
+            dec.streams.values().map(|s| s.partial.capacity()).sum()
+        };
+        let mut dec = ChunkDecoder::new();
+        dec.set_chunk_size(cs as u32).unwrap();
+        for csid in 2u8..10 {
+            dec.push(&partial(csid));
+            assert!(dec.next_message().unwrap().is_none());
+            dec.abort(u32::from(csid));
+        }
+        assert_eq!(dec.pending, 0);
+        assert!(
+            held(&dec) <= 8 * MAX_RESERVE,
+            "aborts kept {} bytes",
+            held(&dec)
+        );
+        // A new message header discards the unfinished one the same way.
+        for csid in 2u8..10 {
+            dec.push(&partial(csid));
+            assert!(dec.next_message().unwrap().is_none());
+            dec.push(&[csid, 0, 0, 0, 0, 0, 1, 8, 1, 0, 0, 0, 0xaa]);
+            assert_eq!(dec.next_message().unwrap().unwrap().payload.len(), 1);
+        }
+        assert!(
+            held(&dec) <= 8 * MAX_RESERVE,
+            "replaced messages kept {} bytes",
+            held(&dec)
+        );
+    }
+
+    #[test]
+    fn blocks_are_reused_once_their_messages_are_gone() {
+        let mut enc = ChunkEncoder::new();
+        enc.set_chunk_size(64 * 1024);
+        let mut dec = ChunkDecoder::new();
+        dec.set_chunk_size(64 * 1024).unwrap();
+        // Two 400 KB messages fill a block. Each is dropped soon after, as the
+        // delay buffer does with old content.
+        let mut kept = VecDeque::new();
+        for i in 0..40u32 {
+            let mut out = BytesMut::new();
+            enc.write(&mut out, 6, i, 9, 1, &vec![i as u8; 400 * 1024]);
+            dec.push(&out);
+            let m = dec.next_message().unwrap().unwrap();
+            assert!(
+                m.payload.iter().all(|b| *b == i as u8),
+                "message {i} corrupted"
+            );
+            kept.push_back(m);
+            if kept.len() > 4 {
+                kept.pop_front();
+            }
+        }
+        // Three or four blocks hold the four messages kept at any time; 20 would
+        // be allocated without reuse.
+        assert!(
+            dec.blocks_allocated <= 4,
+            "{} blocks allocated",
+            dec.blocks_allocated
+        );
+        assert!(dec.retired.len() <= 4 + MAX_SPARE_BLOCKS);
+        // Messages still in use are never overwritten.
+        for m in &kept {
+            let first = m.payload[0];
+            assert!(m.payload.iter().all(|b| *b == first));
+        }
     }
 
     #[test]

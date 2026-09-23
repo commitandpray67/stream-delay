@@ -98,16 +98,18 @@ work the same. The switch takes effect immediately.
   interval (2 s) longer than requested.
 - **Maximum delay** is 120 s by default and can be raised on the **Delay settings**
   tab (it needs memory: about bitrate × maximum delay, so 6 Mbps × 120 s ≈ 90 MB).
-- **If the connection to Twitch drops,** stream-delay reconnects and continues from
-  where it was in the buffer, so viewers miss nothing; the delay grows by however
-  long the outage lasted. Press a preset to bring it back to the delay you want.
-- **If OBS disconnects** (a crash, a network blip, or you click *Stop
-  Streaming*), stream-delay keeps Twitch connected for 30 s (configurable on the
-  **Delay settings** tab) and keeps airing what is buffered. When OBS comes back
-  in time, the stream continues from its first keyframe. Otherwise, once the
-  buffer has aired and the grace period is over, it ends the Twitch broadcast
-  cleanly. So after you stop streaming, viewers still see the last D seconds
-  before the stream ends.
+- **If the connection to Twitch drops,** stream-delay reconnects at once (then
+  after ½, 1, 2 and 4 s, and every 5 s after that) and continues from where it
+  was in the buffer, so viewers miss nothing; the delay grows by however long the
+  outage lasted. Press a preset to bring it back to the delay you want.
+- **When you click *Stop Streaming* in OBS,** stream-delay airs what is still
+  buffered (the last D seconds) and then ends the Twitch broadcast cleanly. With
+  no delay, the broadcast ends right away.
+- **If OBS crashes or loses its connection,** stream-delay keeps Twitch connected
+  for 30 s (configurable on the **Delay settings** tab) and keeps airing what is
+  buffered. When OBS comes back in time, the stream continues from its first
+  keyframe. Otherwise, once the buffer has aired and the grace period is over, it
+  ends the Twitch broadcast cleanly.
 - **If Twitch can't be reached when OBS stops** (your internet is down, or the
   stream key is refused), stream-delay stops trying once the grace period is
   over and throws away what never aired. It never connects later to air the

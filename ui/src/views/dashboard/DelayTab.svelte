@@ -78,7 +78,7 @@
         <input type="number" min="16" max="16384" bind:value={form.ram_cap_mb} />
       </label>
       <label>
-        Keep destination connected after OBS disconnects (s)
+        Wait for OBS to reconnect after a crash or dropped connection (s)
         <input type="number" min="0" max="600" bind:value={grace} />
       </label>
     </div>

@@ -11,7 +11,7 @@ use streamdelay_obs::{Obs, ObsError, ObsTarget, StreamSettings};
 use tracing::{info, warn};
 
 use crate::AppState;
-use crate::app::{destination, same_server, urls};
+use crate::app::{same_server, urls};
 use crate::routes::ApiError;
 
 const OVERLAY_SOURCE: &str = "Stream Delay Overlay";
@@ -225,7 +225,7 @@ async fn connect(
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     change(&st, |c| {
-        c.obs.host = host;
+        c.obs.host = host.clone();
         c.obs.port = body.port;
     })?;
     Ok(Json(build_status(&st, Ok(obs)).await))
@@ -254,7 +254,7 @@ struct ConfigureResult {
 /// Changes and saves the settings, and updates open pages.
 fn change(
     st: &AppState,
-    f: impl FnOnce(&mut streamdelay_config::Config),
+    f: impl FnMut(&mut streamdelay_config::Config),
 ) -> Result<streamdelay_config::Config, ApiError> {
     let (config, ()) = st.change_config(f)?;
     st.shared.config_tx.send_replace(config.clone());
@@ -301,7 +301,7 @@ async fn configure(
         }
 
         let config = change(&st, |c| {
-            c.obs.backup = Some(backup);
+            c.obs.backup = Some(backup.clone());
             if imported_key {
                 c.destination.key_mode = KeyMode::Stored;
                 // A Twitch key only goes to Twitch.
@@ -312,12 +312,7 @@ async fn configure(
             }
         })?;
         if imported_key {
-            let dest = destination(
-                &config,
-                st.shared.secrets.as_ref(),
-                st.key_override(&config.destination.url),
-            );
-            st.relay().set_destination(dest)?;
+            st.relay().set_destination(st.destination(&config))?;
         }
 
         obs.stream_to(&links.obs_server, &links.obs_key).await?;

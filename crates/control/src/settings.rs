@@ -13,7 +13,7 @@ use streamdelay_relay::RtmpUrl;
 use tracing::info;
 
 use crate::AppState;
-use crate::app::{Urls, destination, different_server, split_url_key, urls};
+use crate::app::{Urls, different_server, split_url_key, urls};
 use crate::auth::Scope;
 use crate::routes::ApiError;
 
@@ -56,11 +56,7 @@ pub(crate) fn public_config(st: &AppState) -> PublicConfig {
         backup.settings_json = None;
     }
     let key_set = st.key_override(&config.destination.url).is_some()
-        || st
-            .shared
-            .secrets
-            .get(secret::DESTINATION_KEY)
-            .is_some_and(|k| !k.is_empty());
+        || st.stored_key(&config.destination.url).is_some();
     PublicConfig {
         scope: Scope::Admin,
         config,
@@ -211,7 +207,16 @@ async fn update_config(
         d.url = url;
         url_key = key;
     }
-    let old_url = st.config().destination.url;
+    // The stored key belongs to the destination in the settings file (the one in
+    // effect may be a command-line override).
+    let old_url = st
+        .shared
+        .saved
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .destination
+        .url
+        .clone();
     let secret_err = |e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e);
     if let Some(key) = &url_key {
         st.shared
@@ -228,38 +233,42 @@ async fn update_config(
             .map_err(secret_err)?;
         info!("destination server changed; the stored stream key was removed");
     }
-    let (new_config, (destination_changed, keep_buffer_changed)) = st.change_config(|c| {
-        let mut restart = false;
-        let mut destination_changed = false;
-        let mut keep_buffer_changed = false;
-        if let Some(d) = update.destination {
-            destination_changed = d != c.destination;
-            c.destination = d;
-        }
-        if let Some(d) = update.delay {
-            restart |= d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
-            keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
-            c.delay = d;
-        }
-        if let Some(o) = update.overlay {
-            c.overlay = o;
-        }
-        if let Some(h) = update.hotkeys {
-            c.hotkeys = h;
-        }
-        if let Some(g) = update.grace_seconds {
-            restart |= g != c.ingest.grace_seconds;
-            c.ingest.grace_seconds = g;
-        }
-        if let Some(l) = update.allow_lan {
-            restart |= l != c.api.allow_lan;
-            c.api.allow_lan = l;
-        }
-        if restart {
-            st.shared.restart_required.store(true, Ordering::Relaxed);
-        }
-        (destination_changed, keep_buffer_changed)
-    })?;
+    // Runs on the settings in effect and on the saved ones (see `change_config`);
+    // what it reports comes from the settings in effect.
+    let (new_config, (destination_changed, keep_buffer_changed, restart)) =
+        st.change_config(|c| {
+            let mut restart = false;
+            let mut destination_changed = false;
+            let mut keep_buffer_changed = false;
+            if let Some(d) = &update.destination {
+                destination_changed = *d != c.destination;
+                c.destination = d.clone();
+            }
+            if let Some(d) = &update.delay {
+                restart |=
+                    d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
+                keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
+                c.delay = d.clone();
+            }
+            if let Some(o) = &update.overlay {
+                c.overlay = o.clone();
+            }
+            if let Some(h) = &update.hotkeys {
+                c.hotkeys = h.clone();
+            }
+            if let Some(g) = update.grace_seconds {
+                restart |= g != c.ingest.grace_seconds;
+                c.ingest.grace_seconds = g;
+            }
+            if let Some(l) = update.allow_lan {
+                restart |= l != c.api.allow_lan;
+                c.api.allow_lan = l;
+            }
+            (destination_changed, keep_buffer_changed, restart)
+        })?;
+    if restart {
+        st.shared.restart_required.store(true, Ordering::Relaxed);
+    }
     if destination_changed {
         apply_destination(&st, &new_config)?;
     }
@@ -271,11 +280,7 @@ async fn update_config(
 }
 
 fn apply_destination(st: &AppState, c: &Config) -> Result<(), ApiError> {
-    let dest = destination(
-        c,
-        st.shared.secrets.as_ref(),
-        st.key_override(&c.destination.url),
-    );
+    let dest = st.destination(c);
     info!(?dest, "destination updated");
     st.relay().set_destination(dest)?;
     Ok(())

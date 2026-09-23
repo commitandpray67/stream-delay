@@ -429,6 +429,10 @@ impl Core {
                 if self.config.destination.is_some() || status != EgressStatus::Idle {
                     self.state.egress.status = status;
                 }
+                // Earlier trouble is over once the destination takes the stream.
+                if status == EgressStatus::Live {
+                    self.state.egress.last_error = None;
+                }
                 if let Some(e) = error {
                     self.state.egress.last_error = Some(clip(e));
                 }
@@ -501,6 +505,13 @@ impl Core {
                 .is_some_and(|t| t.elapsed() >= self.config.encoder_grace)
     }
 
+    /// Like [`Core::finish_stream`], and shows `why` as the destination's last error.
+    fn finish_stream_because(&mut self, why: &str) {
+        self.state.egress.last_error = Some(why.into());
+        self.finish_stream();
+        self.publish_state();
+    }
+
     /// Ends the broadcast (if one is running) and forgets what is left of the
     /// stream, so none of it can start a broadcast later.
     fn finish_stream(&mut self) {
@@ -545,6 +556,11 @@ impl Core {
             return;
         };
         let gone = self.encoder_gone();
+        // OBS stopped the stream on purpose (rather than crashing or losing its
+        // connection): there is no reconnect to wait for, so the broadcast ends as
+        // soon as the rest of the stream has aired.
+        let stopped =
+            self.publisher.is_none() && self.ingest_ended.is_some() && self.encoder_stopped;
         if !self.egress_running {
             if gone {
                 // A connection made now would start a new broadcast of a stream
@@ -562,31 +578,41 @@ impl Core {
             }
             return;
         }
-        if !gone {
+        if !gone && !stopped {
             return;
         }
-        // The encoder has been gone for the grace period. End the broadcast once
-        // everything buffered has been written to the destination (not just queued
-        // for it: the stop would otherwise cut off the last messages).
+        // End the broadcast once everything buffered has been written to the
+        // destination (not just queued for it: the stop would otherwise cut off
+        // the last messages).
         let connected = self.engine.output_is_connected();
         if connected && self.engine.drained() && self.counters.backlog.load(Ordering::Relaxed) == 0
         {
-            info!("encoder gone and buffer drained; ending the broadcast");
+            info!("the stream is over and has all aired; ending the broadcast");
             self.finish_stream();
         } else if !connected {
-            // The destination is unreachable: reconnecting later would start a
-            // new broadcast, so this one ends here.
-            info!("encoder gone and the destination is not connected; ending the broadcast");
-            self.finish_stream();
+            // Unreachable. Within the grace period a reconnect may still air the
+            // rest; after it, reconnecting would start a new broadcast.
+            if gone {
+                info!("encoder gone and the destination is not connected; ending the broadcast");
+                self.finish_stream_because(
+                    "The stream ended while the destination could not be reached; \
+                     what had not aired yet was discarded.",
+                );
+            }
         } else if self.ingest_ended.is_some_and(|t| {
-            let due = self
-                .config
-                .encoder_grace
-                .max(Duration::from_micros(self.engine.effective_delay()));
+            let delay = Duration::from_micros(self.engine.effective_delay());
+            let due = if stopped {
+                delay
+            } else {
+                self.config.encoder_grace.max(delay)
+            };
             t.elapsed() >= due + DRAIN_SLACK
         }) {
             warn!("the destination stopped taking data; ending the broadcast without the rest");
-            self.finish_stream();
+            self.finish_stream_because(
+                "The destination stopped taking data, so the broadcast was ended \
+                 without the rest of the stream.",
+            );
         }
     }
 

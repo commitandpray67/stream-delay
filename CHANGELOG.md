@@ -8,6 +8,18 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Changed
 
+- **Stopping the stream in OBS ends the broadcast as soon as the rest has
+  aired.** It used to stay connected for the whole grace period (30 s by
+  default) with nothing to send, so every stream ended with 30 s of frozen
+  video. The grace period now applies only when OBS crashes or loses its
+  connection. Stopping and restarting OBS within 30 s therefore starts a new
+  broadcast, as it does when streaming to Twitch directly.
+- **Reconnecting to Twitch after a drop starts at once**, then after 0.5, 1, 2
+  and 4 s and every 5 s after that (it used to wait 1 s first and up to 10 s
+  later). Every second spent reconnecting added a second of delay. A refused
+  stream (for example a wrong key) is still retried only every 10 s.
+- Settings given on the command line apply to that run only: changing settings
+  on the dashboard no longer writes them to `config.toml`.
 - The dock no longer has a separate **Go live now** button: its **Live** preset
   does the same, and the dock always shows it, even without a 0 s preset. The
   dashboard, tray menu and hotkeys keep both go-live actions.
@@ -39,6 +51,27 @@ All notable changes to stream-delay are listed here. The format follows
   desktop app asks before quitting while you are streaming.
 - A broadcast whose encoder left no longer waits forever on a destination that
   stopped taking data.
+- **A `--dest` for another server got the stream key saved for your usual
+  destination** when no `STREAMDELAY_KEY` was given. The saved key now only goes
+  to the destination it was saved for (or another server of the same service,
+  such as Twitch over RTMPS).
+- Memory stays flat at about the buffered data plus 12 MB. With glibc, freeing
+  and reallocating the 1 MiB receive blocks kept 20-35 MB more (and the nightly
+  soak test failed its memory check); full blocks are now reused.
+- A destination URL with a non-ASCII character where `rtmp://` would end crashed
+  the request that set it.
+- When stream-delay gives up at the end of a stream because Twitch can't be
+  reached, the dashboard says so, and an old connection error is no longer shown
+  once the destination is working again.
+- The desktop app re-registered all global hotkeys whenever any setting changed,
+  so a hotkey pressed at that moment could be missed; it now does so only when
+  hotkeys or presets change.
+- Release builds: without an Apple certificate configured, the macOS build
+  failed trying to import an empty one. It now builds unsigned, with a warning.
+- The nightly fuzzing job never ran (the repository's `rust-toolchain.toml`
+  overrode the nightly toolchain it needs), and one fuzz target no longer
+  compiled. Both fixed; CI now checks the fuzz targets compile, and the engine
+  target also covers End stream and the rolling-buffer switch.
 - The desktop app kept only the current run's log; the previous one is now kept
   as `stream-delay.previous.log`, so the log of a crashed run survives the
   restart.
@@ -90,6 +123,9 @@ All notable changes to stream-delay are listed here. The format follows
   full, the oldest connection that is not streaming is now closed to make room;
   IPv6 addresses count per /64 network against the per-address limit; and an
   address that sends five wrong ingest keys is ignored for a minute.
+- An encoder could make stream-delay keep large receive buffers outside its
+  memory limits by starting big messages and abandoning them; those buffers are
+  now freed.
 - Messages from the destination server are limited to 128 KiB (a hostile server,
   or anyone in the path of a plain `rtmp://` connection, could make stream-delay
   hold up to 64 MiB), and its error text is shortened before it is shown.

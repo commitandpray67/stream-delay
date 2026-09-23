@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use axum::Router;
 use axum::http::StatusCode;
-use streamdelay_config::{Config, SecretStore};
+use streamdelay_config::{Config, SecretStore, secret};
 use tokio::sync::watch;
 
 pub use app::{App, AppError, AppOptions, MIN_TOKEN_LEN, Overrides, Urls, reachable};
@@ -38,7 +38,12 @@ pub struct AppState {
 
 pub(crate) struct Shared {
     pub relay: RelayHandle,
+    /// The settings in effect: the settings file plus this run's command-line
+    /// overrides.
     pub config: RwLock<Config>,
+    /// The settings as in the file, without the overrides. Changes are made to
+    /// both; only this one is saved.
+    pub saved: Mutex<Config>,
     /// Where to save configuration changes (`None`: keep them in memory only).
     pub config_path: Option<PathBuf>,
     /// Held while a change is made and saved; see [`AppState::change_config`].
@@ -73,9 +78,13 @@ impl AppState {
     /// Applies `change` to the settings and saves them, if there is a settings file.
     /// Changes are made and saved one at a time, so a slower save can never
     /// overwrite a newer change in the file.
+    ///
+    /// `change` runs twice: on the settings in effect (its result is returned) and
+    /// on the saved ones. So command-line overrides stay in effect but never reach
+    /// the file, unless a change sets that setting itself.
     pub(crate) fn change_config<R>(
         &self,
-        change: impl FnOnce(&mut Config) -> R,
+        mut change: impl FnMut(&mut Config) -> R,
     ) -> Result<(Config, R), ApiError> {
         let _saving = self
             .shared
@@ -87,13 +96,53 @@ impl AppState {
             let r = change(&mut c);
             (c.clone(), r)
         };
+        let saved = {
+            let mut s = self
+                .shared
+                .saved
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            change(&mut s);
+            s.clone()
+        };
         if let Some(path) = &self.shared.config_path {
-            config.save(path).map_err(|e| {
+            saved.save(path).map_err(|e| {
                 tracing::warn!("saving settings failed: {e}");
                 ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             })?;
         }
         Ok((config, r))
+    }
+
+    /// The stored stream key, if it may be sent to `url`. It belongs to the
+    /// destination in the settings file: a destination given on the command line
+    /// for another server must not receive it.
+    pub(crate) fn stored_key(&self, url: &str) -> Option<String> {
+        let saved_url = self
+            .shared
+            .saved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .destination
+            .url
+            .clone();
+        if app::different_server(&saved_url, url) {
+            return None;
+        }
+        self.shared
+            .secrets
+            .get(secret::DESTINATION_KEY)
+            .filter(|k| !k.is_empty())
+    }
+
+    /// Where the relay should publish with settings `c`.
+    pub(crate) fn destination(&self, c: &Config) -> Option<streamdelay_relay::Destination> {
+        let url = &c.destination.url;
+        let key = self
+            .key_override(url)
+            .map(str::to_string)
+            .or_else(|| self.stored_key(url));
+        app::destination(c, key)
     }
 
     /// The command-line destination key, unless the destination has since been
@@ -131,6 +180,7 @@ pub(crate) fn state(
             tokens: auth::Tokens::new(&config.api.token),
             allow_lan: config.api.allow_lan,
             download_codes: Default::default(),
+            saved: Mutex::new(config.clone()),
             config: RwLock::new(config),
             config_path,
             save_lock: Mutex::new(()),

@@ -203,12 +203,21 @@ fn next_port(bind: &mut SocketAddr, failed: SocketAddr, candidates: &[u16]) -> b
     }
 }
 
-/// Re-applies hotkeys and the tray menu whenever settings change.
+/// Re-applies hotkeys and the tray menu when the settings they use change. Not on
+/// every change: re-registering drops the hotkeys for a moment, and a key pressed
+/// then (while changing an overlay color, say) would be lost.
 fn watch_config(app: AppHandle, core: Arc<App>) {
     let mut rx = core.subscribe_config();
+    let relevant = |c: &Config| (c.hotkeys.clone(), c.delay.presets.clone());
+    let mut applied = relevant(&core.config());
     tauri::async_runtime::spawn(async move {
         while rx.changed().await.is_ok() {
             let config = rx.borrow_and_update().clone();
+            let now = relevant(&config);
+            if now == applied {
+                continue;
+            }
+            applied = now;
             hotkeys::register(&app, &config);
             if let Err(e) = tray::rebuild_menu(&app, &core) {
                 warn!("could not rebuild the tray menu: {e}");

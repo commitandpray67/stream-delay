@@ -1,6 +1,9 @@
 //! The delay engine under arbitrary (including nonsensical) input: out-of-order
-//! timestamps, garbage payloads, commands at any time, reconnects, clock jumps.
-//! Invariant: output timestamps never go backwards within a connection.
+//! timestamps, garbage payloads, commands at any time, reconnects, clock jumps,
+//! End stream, the rolling buffer switched on and off, and a slow destination.
+//! Invariants: output timestamps never go backwards within a connection; after
+//! End stream nothing is left buffered, and nothing is sent until the destination
+//! connects again.
 #![no_main]
 
 use arbitrary::Arbitrary;
@@ -21,15 +24,29 @@ enum Op {
     Disconnect,
     Connect,
     EncoderRestart,
+    /// End stream.
+    Discard,
+    KeepHistory(bool),
+    /// A poll with little room in the queue to the destination.
+    PollBudget(u16),
 }
 
-fuzz_target!(|ops: Vec<Op>| {
+#[derive(Arbitrary, Debug)]
+struct Input {
+    keep_history: bool,
+    ops: Vec<Op>,
+}
+
+fuzz_target!(|input: Input| {
+    let Input { keep_history, ops } = input;
     let mut e = Engine::new(EngineConfig {
         max_delay_ms: 30_000,
         headroom_ms: 2_000,
         ram_cap_bytes: 256 * 1024,
         mask_margin_ms: 500,
+        keep_history,
     });
+    let mut connected = true;
     let mut now: u64 = 1_000_000_000;
     let mut ts: i64 = 0;
     let mut out: Vec<OutMsg> = Vec::new();
@@ -79,9 +96,13 @@ fuzz_target!(|ops: Vec<Op>| {
             Op::Cancel => {
                 let _ = e.command(now, Command::Cancel);
             }
-            Op::Disconnect => e.output_disconnected(now, None),
+            Op::Disconnect => {
+                e.output_disconnected(now, None);
+                connected = false;
+            }
             Op::Connect => {
                 e.output_connected(now);
+                connected = true;
                 // A new connection restarts timestamps at 0.
                 last = [None; 3];
             }
@@ -90,8 +111,18 @@ fuzz_target!(|ops: Vec<Op>| {
                 e.ingest_start(now);
                 ts = 0;
             }
+            Op::Discard => {
+                e.discard();
+                connected = false;
+                assert!(!e.has_buffered(), "End stream left content buffered");
+            }
+            Op::KeepHistory(keep) => e.set_keep_history(keep),
+            Op::PollBudget(bytes) => {
+                let _ = e.poll_budget(now, &mut out, usize::from(bytes));
+            }
         }
         let _ = e.poll(now, &mut out);
+        assert!(connected || out.is_empty(), "sent {} messages while not connected", out.len());
         check(&mut out, &mut last);
         let _ = e.snapshot(now);
     }
