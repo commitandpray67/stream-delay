@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-09-22
-- Refines: [ADR 0002](0002-keyframe-splicing.md)
+- Refines: [ADR 0002](https://github.com/commitandpray67/stream-delay/blob/main/docs/adr/0002-keyframe-splicing.md)
 
 ## Context
 

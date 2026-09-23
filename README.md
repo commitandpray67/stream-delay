@@ -2,7 +2,9 @@
 
 **Change your stream delay while you're live, without restarting OBS.** Free, open source (GPL-3.0), and built for Windows, macOS and Linux.
 
-> **Status: pre-release (milestones M0–M4 of [`docs/PLAN.md`](docs/PLAN.md)).** The relay, delay engine, web UI and desktop app work and are tested end to end with ffmpeg. They have not yet been battle-tested on real Twitch streams, so test with `?bandwidthtest=true` before relying on it.
+> **Status: beta candidate (milestones M0–M5 of [`docs/PLAN.md`](docs/PLAN.md)).** Everything is built and tested automatically, including end to end with ffmpeg, under network faults, and in hours-long soak runs. It has not yet been battle-tested on real Twitch streams, so test with `?bandwidthtest=true` before relying on it, and please share results ([`docs/testing.md`](docs/testing.md)).
+
+**[User guide](https://commitandpray67.github.io/stream-delay/)** (source in [`docs/book`](docs/book/src/SUMMARY.md)) · [Changelog](CHANGELOG.md) · [API](docs/API.md)
 
 ## What it does
 
@@ -52,7 +54,7 @@ The HTTP/WebSocket API (for Stream Deck, Streamer.bot, scripts) is documented in
 3. **M2:** delay engine.
 4. **M3:** dock, overlay and API.
 5. **M4:** desktop app and installers.
-6. **M5:** hardening, then beta, then **v1.0**.
+6. **M5:** hardening, diagnostics and the user guide. Next: public beta, then **v1.0**.
 7. **Later:** Stream Deck, per-destination multistream delay, long disk-backed delays, and scene-based automation.
 
 Details are in [`docs/PLAN.md`](docs/PLAN.md#roadmap-rough-effort-for-one-experienced-developer).

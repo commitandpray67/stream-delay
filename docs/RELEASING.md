@@ -13,9 +13,10 @@ Review the draft, then publish it.
 
 1. Update `version` in `Cargo.toml` (workspace), `apps/desktop/src-tauri/tauri.conf.json`, `ui/package.json` and `apps/desktop/package.json`.
 2. Make sure CI is green on `main`, including the end-to-end job.
-3. Test on a real Twitch account with `?bandwidthtest=true` on each OS you can reach (see the compatibility checklist in `docs/PLAN.md`).
-4. `git tag v0.x.y && git push origin v0.x.y`.
-5. Edit the draft release notes, then publish.
+3. Test on a real Twitch account with `?bandwidthtest=true` on each OS you can reach, following [`docs/testing.md`](testing.md), and run the 12-hour soak (`DURATION=43200 tests/soak/run.sh`).
+4. Move the `Unreleased` section of `CHANGELOG.md` under the new version and date.
+5. `git tag v0.x.y && git push origin v0.x.y`.
+6. Paste the changelog entry into the draft release notes, then publish.
 
 ## One-time setup
 

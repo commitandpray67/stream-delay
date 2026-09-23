@@ -1,0 +1,17 @@
+[book]
+title = "stream-delay"
+description = "Change your stream delay while you're live, without restarting OBS."
+authors = ["stream-delay contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/commitandpray67/stream-delay"
+edit-url-template = "https://github.com/commitandpray67/stream-delay/edit/main/docs/book/{path}"
+site-url = "/stream-delay/"
+
+[output.html.search]
+enable = true

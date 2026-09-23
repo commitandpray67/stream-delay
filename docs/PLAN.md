@@ -2,7 +2,7 @@
 
 An open-source, cross-platform app for **changing stream delay while live**.
 
-> **Status:** M0–M4 are implemented: relay, delay engine, control API, web UI, OBS wizard and desktop app. M5 (hardening, beta) is next. This document is the source of truth for scope, architecture and the roadmap. Changes go through PRs to this file, and significant decisions get an ADR in `docs/adr/`.
+> **Status:** M0–M5 are implemented: relay, delay engine, control API, web UI, OBS wizard, desktop app, and the M5 hardening (decoder limits, fuzzing, chaos and soak tests, diagnostics export, user guide). What's left before v1.0 is real-world testing on Twitch with the checklist in [`testing.md`](testing.md), a full 12 h soak run, and code signing. This document is the source of truth for scope, architecture and the roadmap. Changes go through PRs to this file, and significant decisions get an ADR in `docs/adr/`.
 >
 > Where the implementation differs from the plan:
 > - The API is documented by hand in [`API.md`](API.md) rather than generated with utoipa/OpenAPI.
