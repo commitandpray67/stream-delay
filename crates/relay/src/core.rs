@@ -40,6 +40,8 @@ pub(crate) enum Event {
     },
     IngestClosed {
         conn: u64,
+        /// Why the connection ended, if it failed.
+        error: Option<String>,
     },
     EgressConnected {
         reply: oneshot::Sender<u64>,
@@ -244,7 +246,13 @@ impl Core {
                     self.engine.ingest_metadata(now, payload);
                 }
             }
-            Event::IngestClosed { conn } => {
+            Event::IngestClosed { conn, error } => {
+                if let Some(e) = error {
+                    // Shown in the dashboard and dock, so a failing encoder
+                    // connection is visible without reading logs.
+                    self.state.ingest.last_error = Some(format!("encoder connection failed: {e}"));
+                    self.publish_state();
+                }
                 if self.is_publisher(conn) {
                     self.publisher = None;
                     self.engine.ingest_end(now);

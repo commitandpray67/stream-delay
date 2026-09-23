@@ -58,14 +58,22 @@ pub(crate) async fn listen(
                 let events = events.clone();
                 let mut shutdown = shutdown.clone();
                 tokio::spawn(async move {
+                    info!(%peer, "encoder connected");
                     let result = tokio::select! {
                         r = handle(tcp, peer, id, events.clone()) => r,
                         _ = shutdown.changed() => Ok(()),
                     };
-                    if let Err(e) = result {
-                        debug!(%peer, "ingest connection ended: {e}");
-                    }
-                    let _ = events.send(Event::IngestClosed { conn: id });
+                    let error = match result {
+                        Ok(()) => {
+                            debug!(%peer, "encoder connection closed");
+                            None
+                        }
+                        Err(e) => {
+                            warn!(%peer, "encoder connection failed: {e}");
+                            Some(e.to_string())
+                        }
+                    };
+                    let _ = events.send(Event::IngestClosed { conn: id, error });
                     drop(slot);
                 });
             }
@@ -112,13 +120,20 @@ async fn handle(
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for ev in evs {
             match ev {
-                ServerEvent::Connect { props, .. } => {
+                ServerEvent::Connect { app, props, .. } => {
+                    let encoder = props
+                        .iter()
+                        .find(|(k, _)| k == "flashVer")
+                        .and_then(|(_, v)| v.as_str())
+                        .unwrap_or("unknown");
+                    info!(%peer, %app, %encoder, "encoder sent connect");
                     connect_props = props
                         .into_iter()
                         .filter(|(k, _)| !OWN_CONNECT_PROPS.contains(&k.as_str()))
                         .collect();
                 }
                 ServerEvent::PublishRequest { app, stream_key } => {
+                    info!(%peer, %app, "encoder asked to publish");
                     let (tx, rx) = oneshot::channel();
                     let _ = events.send(Event::IngestPublish {
                         conn,
@@ -176,7 +191,7 @@ async fn handle(
                     if publishing {
                         info!(%peer, "encoder stopped publishing");
                         publishing = false;
-                        let _ = events.send(Event::IngestClosed { conn });
+                        let _ = events.send(Event::IngestClosed { conn, error: None });
                     }
                 }
             }

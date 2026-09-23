@@ -26,6 +26,9 @@
         <b>Waiting for OBS.</b> In OBS, Settings → Stream: Service <b>Custom…</b>, Server
         <code>{live.config?.urls.obs_server ?? `rtmp://${live.state.ingest.listen}/live`}</code>, any stream key. If OBS
         is already live, it is streaming somewhere else.
+        {#if live.state.ingest.last_error}
+          <br /><span class="error">Last attempt: {live.state.ingest.last_error}</span>
+        {/if}
       </p>
     {:else if live.state.egress.status === "disabled"}
       <p class="notice"><b>No stream key yet.</b> Add it on the dashboard's Setup tab.</p>
