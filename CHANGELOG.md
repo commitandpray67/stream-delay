@@ -6,6 +6,8 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-23
+
 The first public beta. Everything below is new.
 
 ### Relay
@@ -85,3 +87,6 @@ The first public beta. Everything below is new.
   track are not supported.
 - One destination at a time; the buffer is kept in memory.
 - Installers are not code-signed yet (SmartScreen and Gatekeeper warnings).
+
+[Unreleased]: https://github.com/commitandpray67/stream-delay/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/commitandpray67/stream-delay/releases/tag/v0.1.0
