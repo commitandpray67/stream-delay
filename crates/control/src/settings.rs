@@ -135,16 +135,38 @@ fn valid_color(c: &str) -> bool {
     matches!(hex.len(), 3 | 6 | 8) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
-fn validate(u: &SettingsUpdate) -> Result<(), String> {
+/// Longest encoder grace period, in seconds.
+const MAX_GRACE_SECONDS: u64 = 600;
+
+/// Limits that keep the relay working, for settings from any source: the API, the
+/// config file and the command line.
+pub(crate) fn validate_limits(d: &DelayConfig, grace_seconds: u64) -> Result<(), String> {
+    if !(5..=900).contains(&d.max_seconds) {
+        return Err("maximum delay must be between 5 and 900 seconds".into());
+    }
+    if !(0.0..=d.max_seconds as f64).contains(&d.start_seconds) {
+        return Err("start delay must be between 0 and the maximum delay".into());
+    }
+    if !(16..=16_384).contains(&d.ram_cap_mb) {
+        return Err("memory cap must be between 16 and 16384 MiB".into());
+    }
+    if grace_seconds > MAX_GRACE_SECONDS {
+        return Err(format!(
+            "the grace period must be at most {MAX_GRACE_SECONDS} seconds"
+        ));
+    }
+    Ok(())
+}
+
+fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
     if let Some(d) = &u.destination
         && !d.url.trim().is_empty()
     {
         RtmpUrl::parse(&d.url).map_err(|e| format!("destination URL: {e}"))?;
     }
+    let grace = u.grace_seconds.unwrap_or(current.ingest.grace_seconds);
+    validate_limits(u.delay.as_ref().unwrap_or(&current.delay), grace)?;
     if let Some(d) = &u.delay {
-        if !(5..=900).contains(&d.max_seconds) {
-            return Err("maximum delay must be between 5 and 900 seconds".into());
-        }
         if d.presets.is_empty() || d.presets.len() > 10 {
             return Err("configure between 1 and 10 presets".into());
         }
@@ -153,12 +175,6 @@ fn validate(u: &SettingsUpdate) -> Result<(), String> {
             if !p.seconds.is_finite() || p.seconds < 0.0 || p.seconds > max {
                 return Err(format!("preset {} s is outside 0..{max} s", p.seconds));
             }
-        }
-        if !(0.0..=max).contains(&d.start_seconds) {
-            return Err("start delay must be between 0 and the maximum delay".into());
-        }
-        if !(16..=16_384).contains(&d.ram_cap_mb) {
-            return Err("memory cap must be between 16 and 16384 MiB".into());
         }
     }
     if let Some(o) = &u.overlay {
@@ -185,7 +201,7 @@ async fn update_config(
     State(st): State<AppState>,
     Json(mut update): Json<SettingsUpdate>,
 ) -> Result<Json<PublicConfig>, ApiError> {
-    validate(&update).map_err(ApiError::bad_request)?;
+    validate(&update, &st.config()).map_err(ApiError::bad_request)?;
     // A key typed into the URL (rtmp://host/app/<key>) is stored like one entered
     // in the key field, so the URL shown to the UI and saved in config.toml never
     // contains it.

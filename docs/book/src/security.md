@@ -25,13 +25,18 @@ it is built to be safe by default:
 - **The RTMP input also listens on `127.0.0.1` only** by default. When it can be
   reached from your network, an ingest key is required so nobody else can
   stream to it; if you don't set one, stream-delay generates one and shows it
-  with the OBS server address. A wrong key is only refused after a second, so
-  keys can't be guessed quickly.
+  with the OBS server address. A wrong key is only refused after a second, and
+  an address that sends five wrong keys has to wait a minute, so keys can't be
+  guessed.
 - **Hostile network input:** the RTMP, AMF0 and FLV parsers have hard limits on
   memory use, and are fuzzed and property-tested so malformed data can't crash
   them. Until an encoder has started publishing it may only send small
-  messages, must publish within 15 seconds, and one address can hold at most
-  four connections, so strangers cannot exhaust memory or lock OBS out.
+  messages and must publish within 15 seconds. One address (for IPv6, one /64
+  network) can hold at most four connections, and when all connection slots are
+  taken the oldest one that is not streaming is closed to make room, so strangers
+  cannot exhaust memory or lock OBS out.
+- **API tokens** must be at least 16 characters; a generated one has 32. A
+  shorter one set with `--token` or `STREAMDELAY_TOKEN` is refused at startup.
 - **`--ephemeral` runs** keep secrets in memory only.
 - **No telemetry, no accounts, no servers of our own.** stream-delay only connects
   to the destination you choose, to OBS if you set up obs-websocket, and to GitHub

@@ -15,7 +15,8 @@ before your real stream.
   1935 was already in use (by another RTMP server or a second copy of
   stream-delay), the desktop app moves to 19350 or 29350 and shows the new address
   there. Run the OBS setup again, or update OBS by hand.
-- With an ingest key (Docker or two-PC setups), OBS must use that key.
+- With an ingest key (Docker or two-PC setups), OBS must use that key. After five
+  wrong keys, stream-delay ignores that computer for a minute.
 
 ## "stream-delay is already running"
 
@@ -88,5 +89,7 @@ green or smeared frames, or the stream stalls, please
 
 The desktop app also writes a full log to `logs/stream-delay.log` next to the
 settings file (see [Where things are stored](install.md#where-things-are-stored)).
+The log of the run before is kept as `stream-delay.previous.log`: after a crash,
+attach that one.
 Security problems should be reported privately instead: see
 [Security and privacy](security.md).

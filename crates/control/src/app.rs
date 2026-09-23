@@ -65,7 +65,18 @@ pub enum AppError {
          window. Close it, then start the app again."
     )]
     AlreadyRunning,
+    #[error("invalid settings: {0}")]
+    Settings(String),
+    #[error(
+        "the API token must be at least {MIN_TOKEN_LEN} characters long; leave it unset \
+         to use a generated one"
+    )]
+    WeakToken,
 }
+
+/// Shortest API token accepted. Generated tokens have 32 characters; a short one
+/// chosen by hand could be guessed, as nothing slows down wrong tokens.
+pub const MIN_TOKEN_LEN: usize = 16;
 
 /// Links for the streamer to paste into OBS.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -179,6 +190,11 @@ impl App {
                 config.ingest.bind
             );
             config.ingest.key = Some(key);
+        }
+        crate::settings::validate_limits(&config.delay, config.ingest.grace_seconds)
+            .map_err(AppError::Settings)?;
+        if config.api.token.chars().count() < MIN_TOKEN_LEN {
+            return Err(AppError::WeakToken);
         }
         if config.destination.key_mode == KeyMode::Passthrough
             && config.ingest.key.as_deref().is_some_and(|k| !k.is_empty())

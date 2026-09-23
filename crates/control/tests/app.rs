@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use streamdelay_config::{Config, MemorySecrets, ObsBackup, SecretStore, secret};
-use streamdelay_control::{App, AppOptions, Overrides};
+use streamdelay_control::{App, AppError, AppOptions, Overrides};
 
 fn overrides(ingest: &str) -> Overrides {
     Overrides {
@@ -146,4 +146,52 @@ async fn saved_obs_settings_move_out_of_the_config_file() {
     assert!(saved.contains("hunter2-secret") && saved.contains("custom-key-5150"));
     assert_eq!(secrets.get(secret::OBS_BACKUP_KEY), None);
     app.shutdown().await;
+}
+
+#[tokio::test]
+async fn short_tokens_and_out_of_range_settings_are_refused_at_startup() {
+    let start = |overrides: Overrides| {
+        App::start(AppOptions {
+            config_path: None,
+            secrets: Arc::new(MemorySecrets::default()),
+            overrides,
+        })
+    };
+    let short = start(Overrides {
+        token: Some("hunter2".into()),
+        ..overrides("127.0.0.1:0")
+    })
+    .await;
+    assert!(
+        matches!(short, Err(AppError::WeakToken)),
+        "short token accepted"
+    );
+    let empty = start(Overrides {
+        token: Some(String::new()),
+        ..overrides("127.0.0.1:0")
+    })
+    .await;
+    assert!(
+        matches!(empty, Err(AppError::WeakToken)),
+        "empty token accepted"
+    );
+    // Would overflow the buffer size computation.
+    let huge = start(Overrides {
+        max_delay_seconds: Some(u64::MAX / 10),
+        ..overrides("127.0.0.1:0")
+    })
+    .await;
+    assert!(
+        matches!(huge, Err(AppError::Settings(_))),
+        "huge maximum delay accepted"
+    );
+    let grace = start(Overrides {
+        grace_seconds: Some(1_000_000),
+        ..overrides("127.0.0.1:0")
+    })
+    .await;
+    assert!(
+        matches!(grace, Err(AppError::Settings(_))),
+        "huge grace period accepted"
+    );
 }

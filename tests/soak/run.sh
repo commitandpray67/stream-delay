@@ -32,7 +32,7 @@ OUT=${OUT:-$(mktemp -d)}
 INGEST=127.0.0.1:${INGEST_PORT:-19450}
 SINK_PORT=${SINK_PORT:-19460}
 API=127.0.0.1:${API_PORT:-17888}
-TOKEN=soak-token
+TOKEN=soak-test-token-0123456789
 mkdir -p "$OUT"
 pids=()
 cleanup() {

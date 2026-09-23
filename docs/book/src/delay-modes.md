@@ -51,7 +51,8 @@ stream-delay remembers the moment you pressed the button. Viewers keep watching
 until they reach that moment, then the stream jumps to live; what happens while
 that airs is skipped. Use it to let chat see everything up to "now" (for example,
 the end of a match) before you drop the delay. It is on the dashboard, the tray
-menu and a hotkey; the dock keeps only **Go live now** to stay compact.
+menu and a hotkey. The dock, to stay compact, has neither button: its **Live**
+preset goes live now.
 
 ### Lowering the delay (for example 60 s → 20 s)
 
@@ -64,9 +65,14 @@ The stream skips forward to a keyframe so that the delay becomes 20 s. The skipp
 in the delay buffer, so none of it is ever shown. Use it when something went wrong
 on stream and even the delayed part must not air. It cuts the connection to Twitch
 outright, so even on a slow upload, video still waiting to be sent is dropped
-rather than delivered. In the dock and dashboard it
+rather than delivered, and if stream-delay is still connecting to Twitch, that
+connection is dropped before the broadcast can start. In the dock and dashboard it
 takes two clicks (the second within 3 seconds); it is also in the tray menu, the
 API and the command line, and can have a hotkey (none by default).
+
+Quitting stream-delay also ends the stream: it tells Twitch the broadcast is over
+before it exits, but what is still in the buffer does not air. The desktop app
+asks before quitting while you are streaming.
 
 OBS can keep streaming to stream-delay; nothing goes out until you press
 **Resume broadcasting** or stop and start streaming in OBS. If OBS loses its
@@ -102,3 +108,11 @@ work the same. The switch takes effect immediately.
   buffer has aired and the grace period is over, it ends the Twitch broadcast
   cleanly. So after you stop streaming, viewers still see the last D seconds
   before the stream ends.
+- **If Twitch can't be reached when OBS stops** (your internet is down, or the
+  stream key is refused), stream-delay stops trying once the grace period is
+  over and throws away what never aired. It never connects later to air the
+  rest: that would start a new broadcast, and notify your followers, long after
+  you stopped.
+- **If OBS's connection dies without stream-delay noticing** (for example the
+  network between two PCs drops), OBS's reconnect is accepted as soon as the old
+  connection has been silent for 2 seconds, and the stream continues.

@@ -976,3 +976,30 @@ fn spliced_cra_is_rewritten_as_bla() {
     let first = out.iter().find(|m| m.seq.is_some()).unwrap();
     assert_eq!((first.payload[9] >> 1) & 0x3f, flv::hevc::BLA_W_LP);
 }
+
+#[test]
+fn decoder_configuration_kept_for_splices_is_bounded() {
+    // Enhanced RTMP multitrack sequence starts, one per track id.
+    let config = |track: u8, extra: usize| {
+        let mut p = vec![0x96, 0x00, b'a', b'v', b'c', b'1', track];
+        p.resize(p.len() + extra, 0);
+        Bytes::from(p)
+    };
+    let mut e = Engine::new(EngineConfig::default());
+    e.ingest_start(0);
+    for track in 0..=255u8 {
+        e.ingest(1_000, Kind::Video, 0, config(track, 16));
+    }
+    let headers = &e.sessions.last().unwrap().headers;
+    assert_eq!(headers.len(), MAX_HEADERS);
+    assert_eq!(
+        headers.last().unwrap().class,
+        255 << 8,
+        "the newest are kept"
+    );
+    // One too large to keep is still streamed, just not kept for splices.
+    e.ingest(1_000, Kind::Video, 0, config(7, MAX_HEADER_BYTES));
+    let headers = &e.sessions.last().unwrap().headers;
+    assert!(headers.iter().all(|h| h.payload.len() <= MAX_HEADER_BYTES));
+    assert!(e.has_buffered());
+}

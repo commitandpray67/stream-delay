@@ -43,7 +43,7 @@ cargo run --release -p streamdelayd -- run
 
 **Desktop app:** [`apps/desktop`](apps/desktop) wraps the same core in a tray app with global hotkeys, autostart and installers for Windows, macOS and Linux.
 
-**Server or second PC:** run the container (`docker run -p 1935:1935 -p 7788:7788 -e STREAMDELAY_INGEST_KEY=… ghcr.io/commitandpray67/stream-delay`) or `streamdelayd run --ingest 0.0.0.0:1935 --ingest-key … --allow-lan`.
+**Server or second PC:** run the container (`docker run -p 1935:1935 -p 127.0.0.1:7788:7788 -e STREAMDELAY_INGEST_KEY=… ghcr.io/commitandpray67/stream-delay`) or `streamdelayd run --ingest 0.0.0.0:1935 --ingest-key … --allow-lan`.
 
 The HTTP/WebSocket API (for Stream Deck, Streamer.bot, scripts) is documented in [`docs/API.md`](docs/API.md).
 

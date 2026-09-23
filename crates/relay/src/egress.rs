@@ -98,7 +98,23 @@ pub(crate) async fn run(
 
         status(&events, EgressStatus::Connecting, None);
         info!(destination = %t.url.redacted(), "connecting to destination");
-        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connect(&t)).await;
+        // Stop and End stream must win over a connection attempt: a publish that
+        // completes after them would start a broadcast nobody wants.
+        let connected = tokio::select! {
+            biased;
+            c = ctl.recv() => {
+                target = match c {
+                    Some(EgressCtl::Start(t)) => Some(t),
+                    Some(EgressCtl::Stop | EgressCtl::Abort) | None => {
+                        info!("connection attempt cancelled");
+                        status(&events, EgressStatus::Idle, None);
+                        None
+                    }
+                };
+                continue;
+            }
+            r = tokio::time::timeout(CONNECT_TIMEOUT, connect(&t)) => r,
+        };
         let (stream, session, aborter) = match connected {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
@@ -131,6 +147,20 @@ pub(crate) async fn run(
                 continue;
             }
         };
+        // The destination accepted the stream just as a stop arrived: end it at once.
+        if let Ok(c) = ctl.try_recv() {
+            let end = ended_by(Some(c), &aborter);
+            drop(stream);
+            drop(aborter);
+            target = match end {
+                RunEnd::Retarget(t) => Some(t),
+                _ => {
+                    status(&events, EgressStatus::Idle, None);
+                    None
+                }
+            };
+            continue;
+        }
         info!("publishing to destination");
         let (gen_tx, gen_rx) = tokio::sync::oneshot::channel();
         let _ = events.send(Event::EgressConnected { reply: gen_tx });

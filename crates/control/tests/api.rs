@@ -628,3 +628,13 @@ async fn allowing_lan_access_waits_for_a_restart() {
         .unwrap();
     assert_eq!(send(&app, r).await.0, StatusCode::MISDIRECTED_REQUEST);
 }
+
+#[tokio::test]
+async fn grace_period_is_bounded() {
+    let app = app_with_secrets("-grace").await;
+    let (s, body) = put_config(&app, r#"{"grace_seconds": 100000}"#).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("grace"));
+    let (s, body) = put_config(&app, r#"{"grace_seconds": 60}"#).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}

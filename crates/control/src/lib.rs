@@ -24,7 +24,7 @@ use axum::http::StatusCode;
 use streamdelay_config::{Config, SecretStore};
 use tokio::sync::watch;
 
-pub use app::{App, AppError, AppOptions, Overrides, Urls, reachable};
+pub use app::{App, AppError, AppOptions, MIN_TOKEN_LEN, Overrides, Urls, reachable};
 pub use auth::{Scope, scoped_token};
 pub use routes::ApiError;
 pub use streamdelay_config::Preset;

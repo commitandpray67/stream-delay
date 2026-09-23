@@ -3,14 +3,14 @@
 use std::sync::{Arc, Mutex};
 
 use streamdelay_control::App;
-use streamdelay_relay::{GoLiveWhen, Phase, RelayState};
+use streamdelay_relay::{EgressStatus, GoLiveWhen, Phase, RelayState};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
 
@@ -281,8 +281,31 @@ fn on_menu(app: &AppHandle, id: &str) {
         }
         "updates" => check_for_updates(app.clone(), true),
         "quit" => {
-            info!("quitting from the tray");
-            app.exit(0);
+            let state = core.relay().state();
+            if !state.ingest.connected && state.egress.status != EgressStatus::Live {
+                info!("quitting from the tray");
+                app.exit(0);
+                return;
+            }
+            // Quitting ends the stream: make sure that is what was meant.
+            let app2 = app.clone();
+            app.dialog()
+                .message(
+                    "You are streaming through stream-delay. Quitting ends your stream now, \
+                     and what is still in the delay buffer does not air.",
+                )
+                .title("Quit stream-delay?")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Quit and end the stream".into(),
+                    "Keep streaming".into(),
+                ))
+                .show(move |quit| {
+                    if quit {
+                        info!("quitting from the tray while streaming");
+                        app2.exit(0);
+                    }
+                });
         }
         other => {
             if let Some(i) = other
@@ -324,7 +347,7 @@ pub fn check_for_updates(app: AppHandle, interactive: bool) {
                          don't do this while you are live."
                     ))
                     .title("Update available")
-                    .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+                    .buttons(MessageDialogButtons::OkCancelCustom(
                         "Install".into(),
                         "Later".into(),
                     ))

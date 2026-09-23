@@ -11,6 +11,13 @@
   const snap = $derived(live.state?.delay ?? null);
   const ended = $derived(live.state?.ended ?? false);
   const presets = $derived(live.config?.config.delay.presets ?? []);
+  // The dock has no separate "Go live now" button, so its preset row always offers
+  // one ("Live"), even if no 0 s preset is configured. Index -1 marks that one.
+  const presetButtons = $derived.by(() => {
+    const list = presets.map((p, index) => ({ index, seconds: p.seconds }));
+    if (compact && !presets.some((p) => p.seconds <= 0)) list.unshift({ index: -1, seconds: 0 });
+    return list;
+  });
   const maxSeconds = $derived(live.config?.config.delay.max_seconds ?? 120);
   // Without the rolling buffer there is nothing to rewind into, so every increase
   // is covered by the Mask slate.
@@ -87,12 +94,12 @@
   <StatusBadge {snap} {ended} large={!compact} />
 
   <div class="presets" role="group" aria-label="Delay presets">
-    {#each presets as p, i (i)}
+    {#each presetButtons as p (p.index)}
       <button
         class:active={presetActive(p.seconds)}
         aria-pressed={presetActive(p.seconds)}
         disabled={busy}
-        onclick={() => presetClick(i, p.seconds)}
+        onclick={() => presetClick(p.index, p.seconds)}
       >
         {formatSecondsLabel(p.seconds)}
       </button>
@@ -135,15 +142,15 @@
   </form>
 
   {#if ended}
-    <div class="golive single">
+    <div class="golive">
       <button class="primary" disabled={busy} onclick={() => run(resumeStream)}>{t("action.resume")}</button>
     </div>
   {:else}
     <div class="golive">
-      <button class="primary" disabled={busy || !canGoLive} onclick={() => run(() => goLive("now"))}>
-        {t("action.goLive")}
-      </button>
       {#if !compact}
+        <button class="primary" disabled={busy || !canGoLive} onclick={() => run(() => goLive("now"))}>
+          {t("action.goLive")}
+        </button>
         <button
           disabled={busy || !canGoLive}
           title={t("action.goLiveAfter.help")}
@@ -224,14 +231,10 @@
     display: grid;
     gap: 0.4rem;
   }
+  /* One row of equal buttons: End stream, plus Cancel while a change is pending. */
   .compact .golive {
-    grid-template-columns: 1fr 1fr;
-  }
-  .compact .golive.single {
-    grid-template-columns: 1fr;
-  }
-  .compact .golive > :nth-child(3) {
-    grid-column: span 2;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
   }
   button.danger.armed {
     background: var(--danger);

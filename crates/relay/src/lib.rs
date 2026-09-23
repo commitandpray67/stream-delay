@@ -247,11 +247,12 @@ impl RelayHandle {
         self.state.clone()
     }
 
-    /// Stops the relay, cleanly unpublishing from the destination.
+    /// Stops the relay, cleanly unpublishing from the destination. Returns once
+    /// the destination has been told the stream ended (at most a few seconds).
     pub async fn shutdown(&self) {
         let (tx, rx) = oneshot::channel();
         if self.control.send(Control::Shutdown(tx)).is_ok() {
-            let _ = tokio::time::timeout(Duration::from_secs(3), rx).await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
         }
     }
 }

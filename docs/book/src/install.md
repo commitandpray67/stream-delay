@@ -51,7 +51,7 @@ Run `streamdelayd run --help` for all options, such as `--dest`,
 
 ```sh
 docker run -d --name stream-delay --restart unless-stopped \
-  -p 1935:1935 -p 7788:7788 -v stream-delay:/data \
+  -p 1935:1935 -p 127.0.0.1:7788:7788 -v stream-delay:/data \
   -e STREAMDELAY_INGEST_KEY=choose-a-secret \
   ghcr.io/commitandpray67/stream-delay
 docker logs stream-delay          # shows the dashboard link with its token
@@ -61,8 +61,15 @@ The container listens on all interfaces, so it requires an ingest key: OBS must
 stream with that key (Settings → Stream → Stream Key), and nobody else can
 publish to your relay. Set it with `STREAMDELAY_INGEST_KEY`; without it,
 stream-delay generates one, saves it in `/data/config.toml` and prints it next to
-the OBS server address in `docker logs`. Keep port 7788 private (firewall or VPN); it is protected by
-the token in the dashboard link.
+the OBS server address in `docker logs`.
+
+Port 7788 is the dashboard and control API. The command above makes it reachable
+only from the machine running Docker. To use the dashboard from other devices on
+your home network, publish it with `-p 7788:7788` instead. Never make it
+reachable from the internet: it is plain HTTP, and the dashboard link carries the
+token that controls everything. On a remote server, reach it through an SSH
+tunnel (`ssh -L 7788:127.0.0.1:7788 you@server`, then open the link on your
+computer) or a VPN.
 
 ### Two-PC setups
 
@@ -78,7 +85,7 @@ restart stream-delay.
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | Settings | `~/.config/stream-delay/config.toml` | `~/Library/Application Support/dev.stream-delay.stream-delay/config.toml` | `%APPDATA%\stream-delay\stream-delay\config\config.toml` |
-| Desktop app log | `logs/stream-delay.log` next to the settings file | same | same |
+| Desktop app log | `logs/stream-delay.log` next to the settings file (the previous run's in `stream-delay.previous.log`) | same | same |
 | Stream key, OBS password, OBS settings backup | OS keychain (Secret Service) | Keychain | Credential Manager |
 
 If no keychain is available (or with `--no-keychain`), secrets go to a file next

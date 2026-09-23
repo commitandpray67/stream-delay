@@ -14,13 +14,14 @@ URL, and click **Apply**. Drag the dock wherever you like.
 The dock shows:
 
 - a large status badge: **LIVE**, **DELAY 30 s**, **ADDING…**, **GOING LIVE…**;
-- your preset buttons (0/15/30/60/120 s by default; change them on the
-  **Delay settings** tab);
+- your preset buttons (Live/15/30/60/120 s by default; change them on the
+  **Delay settings** tab). **Live** drops the delay at the next keyframe; the
+  dock always shows it, even if you remove the 0 s preset;
 - a custom value field and the Rewind/Mask choice;
-- **Go live now** (enabled while there is a delay to drop), **End stream** (two
-  clicks; ends the broadcast without airing the buffer) and **Cancel** while a
-  Mask or go-live change is still pending. After ending, **Resume broadcasting**
-  takes their place;
+- **End stream** (two clicks; ends the broadcast without airing the buffer) and
+  **Cancel** while a Mask or go-live change is still pending. After ending,
+  **Resume broadcasting** takes their place. (**Go live now** and **Air up to
+  now, then go live** are on the dashboard, the tray menu and hotkeys.)
 - how much of the stream is buffered, plus warnings (keyframe interval, upload
   backlog, Enhanced Broadcasting).
 

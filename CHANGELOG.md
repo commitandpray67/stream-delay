@@ -6,7 +6,42 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The dock no longer has a separate **Go live now** button: its **Live** preset
+  does the same, and the dock always shows it, even without a 0 s preset. The
+  dashboard, tray menu and hotkeys keep both go-live actions.
+- API tokens must be at least 16 characters; a shorter `--token` or
+  `STREAMDELAY_TOKEN` is refused at startup (generated tokens have 32).
+- Settings from the config file and the command line (`--max-delay`, `--delay`,
+  `--grace`) are checked at startup with the same limits as the dashboard; the
+  grace period can be at most 600 s.
+- The Docker instructions publish the dashboard port on the local machine only
+  (`-p 127.0.0.1:7788:7788`); see the user guide before exposing it.
+
 ### Fixed
+
+- **A finished stream could go live again later.** If Twitch could not be
+  reached when OBS stopped (internet down, or a refused stream key),
+  stream-delay kept retrying forever, and once Twitch was reachable again it
+  started a new broadcast with a leftover frame of the finished stream (which
+  can notify followers). It now gives up once the grace period is over and
+  discards what never aired.
+- **End stream while stream-delay was still connecting to Twitch** let that
+  connection finish and start the broadcast for a moment. The attempt is now
+  dropped before the broadcast starts.
+- **OBS's reconnect was refused after a network drop between two PCs**, for up
+  to 30 s, because its old connection still looked open ("another encoder is
+  already streaming"). A reconnecting encoder now takes over once the old
+  connection has been silent for 2 s.
+- Quitting stream-delay while live now waits until Twitch has been told the
+  broadcast ended (at most a few seconds) instead of a fixed 0.3 s, and the
+  desktop app asks before quitting while you are streaming.
+- A broadcast whose encoder left no longer waits forever on a destination that
+  stopped taking data.
+- The desktop app kept only the current run's log; the previous one is now kept
+  as `stream-delay.previous.log`, so the log of a crashed run survives the
+  restart.
 
 - **Resume broadcasting aired what OBS sent while the stream was ended.**
   Resuming within the delay after **End stream** aired everything from the moment
@@ -50,6 +85,18 @@ All notable changes to stream-delay are listed here. The format follows
 - *Download diagnostics* uses a single-use link, so the dashboard's access token
   no longer ends up in the browser's download history.
 - The events WebSocket accepts messages of at most 64 KiB.
+- Anyone who could reach the RTMP input could keep OBS from connecting by
+  holding all 16 connection slots with idle connections. When the slots are
+  full, the oldest connection that is not streaming is now closed to make room;
+  IPv6 addresses count per /64 network against the per-address limit; and an
+  address that sends five wrong ingest keys is ignored for a minute.
+- Messages from the destination server are limited to 128 KiB (a hostile server,
+  or anyone in the path of a plain `rtmp://` connection, could make stream-delay
+  hold up to 64 MiB), and its error text is shortened before it is shown.
+- Decoder configuration kept for splices is capped, so an encoder can no longer
+  make stream-delay hold data outside the memory cap with many of them.
+- GitHub Actions are pinned to commit hashes, so a moved tag of a third-party
+  action cannot run in the release job, which holds the signing keys.
 - Web pages can no longer be framed by other sites, and responses send
   `nosniff` and `Referrer-Policy: no-referrer`.
 - Release builds: the update signing key and Apple credentials are only

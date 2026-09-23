@@ -21,9 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Build
@@ -32,11 +32,12 @@ jobs:
         env:
           HOURS: ${{ inputs.hours || '2' }}
           OUT: ${{ runner.temp }}/soak
+        # The input is read as data, never pasted into code.
         run: |
-          DURATION=$(python3 -c "print(int(min(float('$HOURS'), 5.5) * 3600))") tests/soak/run.sh
+          DURATION=$(python3 -c 'import os; print(int(min(float(os.environ["HOURS"]), 5.5) * 3600))') tests/soak/run.sh
       - name: Upload samples and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: soak-results
           path: ${{ runner.temp }}/soak

@@ -9,7 +9,7 @@ use bytes::Bytes;
 use streamdelay_engine::{Engine, EngineError, Kind, OutMsg};
 use streamdelay_rtmp::RtmpUrl;
 use streamdelay_rtmp::amf0::Amf0Value;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
@@ -24,6 +24,53 @@ use crate::{
 /// empty.
 const MAX_EGRESS_BACKLOG: u64 = 8 * 1024 * 1024;
 
+/// A publisher that has sent nothing for this long is taken to be a dead
+/// connection the network has not reported yet (the encoder's computer lost
+/// its network): the encoder reconnecting may take its place.
+const TAKEOVER_SILENCE: Duration = Duration::from_secs(2);
+
+/// Once the encoder has gone for good, how long past the moment the last of the
+/// stream was due to air a broadcast may keep draining to a destination that
+/// has stopped taking data.
+const DRAIN_SLACK: Duration = Duration::from_secs(30);
+
+/// How long shutting down waits for the destination to be unpublished cleanly
+/// (the egress itself gives up on a clean close after 2 s).
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+
+/// Longest error text kept in the state, which every page receives. Errors can
+/// carry text from the destination server.
+const MAX_ERROR_LEN: usize = 300;
+
+/// Why a publish was refused.
+pub(crate) struct Rejection {
+    pub reason: String,
+    /// The stream key was wrong, which counts towards the address's cooldown.
+    pub bad_key: bool,
+}
+
+impl Rejection {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            bad_key: false,
+        }
+    }
+}
+
+/// Shortens error text for the state.
+fn clip(mut s: String) -> String {
+    if s.len() > MAX_ERROR_LEN {
+        let mut end = MAX_ERROR_LEN;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push('…');
+    }
+    s
+}
+
 pub(crate) enum Event {
     IngestPublish {
         conn: u64,
@@ -31,7 +78,9 @@ pub(crate) enum Event {
         app: String,
         key: String,
         connect_props: Vec<(String, Amf0Value)>,
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Closes the connection, if another takes its place.
+        close: Arc<Notify>,
+        reply: oneshot::Sender<Result<(), Rejection>>,
     },
     IngestMedia {
         conn: u64,
@@ -66,6 +115,9 @@ pub(crate) enum Event {
 
 struct Publisher {
     conn: u64,
+    close: Arc<Notify>,
+    /// When the encoder last sent something.
+    last_seen: Instant,
 }
 
 struct Core {
@@ -156,9 +208,28 @@ pub(crate) async fn run(
             c = control.recv() => match c {
                 Some(Control::Shutdown(done)) => {
                     let _ = shutdown.send(true);
-                    let _ = core.egress_ctl.send(EgressCtl::Stop);
-                    // Give the egress a moment to unpublish cleanly.
-                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    if core.egress_running {
+                        let _ = core.egress_ctl.send(EgressCtl::Stop);
+                        // Wait for the clean unpublish, so the broadcast ends at once
+                        // rather than when the destination notices the connection is
+                        // gone.
+                        let _ = tokio::time::timeout(SHUTDOWN_WAIT, async {
+                            while let Some(ev) = events.recv().await {
+                                match ev {
+                                    // Connected just now: let it proceed to the stop.
+                                    Event::EgressConnected { reply } => {
+                                        let _ = reply.send(core.generation);
+                                    }
+                                    Event::EgressStatus {
+                                        status: EgressStatus::Idle,
+                                        ..
+                                    } => break,
+                                    _ => {}
+                                }
+                            }
+                        })
+                        .await;
+                    }
                     let _ = done.send(());
                     return;
                 }
@@ -256,14 +327,27 @@ impl Core {
                 app,
                 key,
                 connect_props,
+                close,
                 reply,
             } => {
                 let result = self.accept_publisher(&app, &key);
                 if result.is_ok() {
+                    if let Some(old) = self.publisher.take() {
+                        // The encoder reconnected while its old connection still
+                        // looked open: close that one and carry on with this one.
+                        info!("the encoder reconnected; closing its previous, silent connection");
+                        old.close.notify_one();
+                        self.engine.ingest_end(now);
+                        self.encoder_stopped = false;
+                    }
                     self.engine.ingest_start(now);
                     self.ingest_ended = None;
                     self.last_publisher = Some((key, connect_props));
-                    self.publisher = Some(Publisher { conn });
+                    self.publisher = Some(Publisher {
+                        conn,
+                        close,
+                        last_seen: Instant::now(),
+                    });
                     self.state.ingest.connected = true;
                     self.state.ingest.peer = Some(peer.to_string());
                     self.state.ingest.app = Some(app);
@@ -281,7 +365,7 @@ impl Core {
                         }
                     }
                 } else if let Err(e) = &result {
-                    self.state.ingest.last_error = Some(e.clone());
+                    self.state.ingest.last_error = Some(e.reason.clone());
                 }
                 let _ = reply.send(result);
                 self.publish_state();
@@ -292,12 +376,14 @@ impl Core {
                 ts,
                 payload,
             } => {
-                if self.is_publisher(conn) {
+                if let Some(p) = self.publisher_mut(conn) {
+                    p.last_seen = Instant::now();
                     self.engine.ingest(now, kind, ts, payload);
                 }
             }
             Event::IngestMetadata { conn, payload } => {
-                if self.is_publisher(conn) {
+                if let Some(p) = self.publisher_mut(conn) {
+                    p.last_seen = Instant::now();
                     self.engine.ingest_metadata(now, payload);
                 }
             }
@@ -309,7 +395,8 @@ impl Core {
                 if let Some(e) = error {
                     // Shown in the dashboard and dock, so a failing encoder
                     // connection is visible without reading logs.
-                    self.state.ingest.last_error = Some(format!("encoder connection failed: {e}"));
+                    self.state.ingest.last_error =
+                        Some(clip(format!("encoder connection failed: {e}")));
                     self.publish_state();
                 }
                 if self.is_publisher(conn) {
@@ -334,7 +421,7 @@ impl Core {
                 self.engine.output_disconnected(now, last_written);
                 if let Some(e) = error {
                     self.state.egress.reconnects += 1;
-                    self.state.egress.last_error = Some(e);
+                    self.state.egress.last_error = Some(clip(e));
                 }
                 self.publish_state();
             }
@@ -342,8 +429,8 @@ impl Core {
                 if self.config.destination.is_some() || status != EgressStatus::Idle {
                     self.state.egress.status = status;
                 }
-                if error.is_some() {
-                    self.state.egress.last_error = error;
+                if let Some(e) = error {
+                    self.state.egress.last_error = Some(clip(e));
                 }
                 self.publish_state();
             }
@@ -354,14 +441,17 @@ impl Core {
         self.publisher.as_ref().is_some_and(|p| p.conn == conn)
     }
 
-    fn accept_publisher(&self, app: &str, key: &str) -> Result<(), String> {
-        if self.publisher.is_some() {
-            return Err("another encoder is already streaming to stream-delay".into());
-        }
+    fn publisher_mut(&mut self, conn: u64) -> Option<&mut Publisher> {
+        self.publisher.as_mut().filter(|p| p.conn == conn)
+    }
+
+    fn accept_publisher(&self, app: &str, key: &str) -> Result<(), Rejection> {
         if let Some(want) = &self.config.ingest_app
             && want != app
         {
-            return Err(format!("unknown application '{app}' (expected '{want}')"));
+            return Err(Rejection::new(format!(
+                "unknown application '{app}' (expected '{want}')"
+            )));
         }
         // Constant time, so response timing does not reveal how much of a guess
         // was right.
@@ -371,7 +461,10 @@ impl Core {
                 key.as_bytes(),
             ))
         {
-            return Err("wrong stream key for stream-delay".into());
+            return Err(Rejection {
+                reason: "wrong stream key for stream-delay".into(),
+                bad_key: true,
+            });
         }
         if matches!(
             self.config.destination,
@@ -381,9 +474,42 @@ impl Core {
             })
         ) && key.is_empty()
         {
-            return Err("passthrough mode needs the destination stream key in the encoder".into());
+            return Err(Rejection::new(
+                "passthrough mode needs the destination stream key in the encoder",
+            ));
+        }
+        // Checked last, so only an encoder that could publish may take over from
+        // a connection that has gone silent.
+        if self
+            .publisher
+            .as_ref()
+            .is_some_and(|p| p.last_seen.elapsed() < TAKEOVER_SILENCE)
+        {
+            return Err(Rejection::new(
+                "another encoder is already streaming to stream-delay",
+            ));
         }
         Ok(())
+    }
+
+    /// The encoder left more than the grace period ago and did not come back: the
+    /// stream is over, apart from airing what is still buffered.
+    fn encoder_gone(&self) -> bool {
+        self.publisher.is_none()
+            && self
+                .ingest_ended
+                .is_some_and(|t| t.elapsed() >= self.config.encoder_grace)
+    }
+
+    /// Ends the broadcast (if one is running) and forgets what is left of the
+    /// stream, so none of it can start a broadcast later.
+    fn finish_stream(&mut self) {
+        if self.egress_running {
+            self.egress_running = false;
+            let _ = self.egress_ctl.send(EgressCtl::Stop);
+        }
+        self.engine.discard();
+        self.ingest_ended = None;
     }
 
     /// Runs the engine, forwards due messages and manages the egress connection.
@@ -418,8 +544,16 @@ impl Core {
             }
             return;
         };
+        let gone = self.encoder_gone();
         if !self.egress_running {
-            if !self.state.ended && self.engine.output_wanted(now) {
+            if gone {
+                // A connection made now would start a new broadcast of a stream
+                // that has finished (for example once the network is back).
+                if self.engine.has_buffered() {
+                    info!("encoder gone; discarding what never aired");
+                }
+                self.finish_stream();
+            } else if !self.state.ended && self.engine.output_wanted(now) {
                 let Some(target) = self.target(&dest) else {
                     return;
                 };
@@ -428,23 +562,31 @@ impl Core {
             }
             return;
         }
-        // End the broadcast once the encoder has been gone for the grace period and
+        if !gone {
+            return;
+        }
+        // The encoder has been gone for the grace period. End the broadcast once
         // everything buffered has been written to the destination (not just queued
         // for it: the stop would otherwise cut off the last messages).
-        if self.publisher.is_none()
-            && self.engine.drained()
-            && self.counters.backlog.load(Ordering::Relaxed) == 0
-            && self
-                .ingest_ended
-                .is_some_and(|t| t.elapsed() >= self.config.encoder_grace)
+        let connected = self.engine.output_is_connected();
+        if connected && self.engine.drained() && self.counters.backlog.load(Ordering::Relaxed) == 0
         {
             info!("encoder gone and buffer drained; ending the broadcast");
-            self.egress_running = false;
-            let _ = self.egress_ctl.send(EgressCtl::Stop);
-            // What is left belongs to the finished stream; don't keep it around
-            // for a later stream to rewind into.
-            self.engine.discard();
-            self.ingest_ended = None;
+            self.finish_stream();
+        } else if !connected {
+            // The destination is unreachable: reconnecting later would start a
+            // new broadcast, so this one ends here.
+            info!("encoder gone and the destination is not connected; ending the broadcast");
+            self.finish_stream();
+        } else if self.ingest_ended.is_some_and(|t| {
+            let due = self
+                .config
+                .encoder_grace
+                .max(Duration::from_micros(self.engine.effective_delay()));
+            t.elapsed() >= due + DRAIN_SLACK
+        }) {
+            warn!("the destination stopped taking data; ending the broadcast without the rest");
+            self.finish_stream();
         }
     }
 

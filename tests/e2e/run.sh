@@ -15,7 +15,7 @@ WORK="$(mktemp -d)"
 INGEST=127.0.0.1:19350
 SINK_PORT=19360
 API=127.0.0.1:17788
-TOKEN=e2e-token
+TOKEN=e2e-test-token-0123456789
 DURATION=${DURATION:-44}
 pids=()
 cleanup() {

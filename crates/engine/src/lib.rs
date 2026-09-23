@@ -26,6 +26,12 @@ pub type Time = u64;
 const MS: u64 = 1_000;
 const SEC: u64 = 1_000_000;
 
+/// Decoder configuration messages kept per encoder session, to resend after a
+/// splice. Real streams have one or two per track; the limits only keep a
+/// misbehaving encoder from holding data outside the memory cap.
+const MAX_HEADERS: usize = 64;
+const MAX_HEADER_BYTES: usize = 1024 * 1024;
+
 /// Tunables for the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
@@ -380,15 +386,22 @@ impl Engine {
         }
         let seq = self.next_seq;
         self.next_seq += 1;
-        if let Some(class) = config {
+        if let Some(class) = config
+            && payload.len() <= MAX_HEADER_BYTES
+        {
             session
                 .headers
                 .retain(|h| !(h.kind == kind && h.class == class));
+            if session.headers.len() >= MAX_HEADERS {
+                session.headers.remove(0);
+            }
             session.headers.push(HeaderRec {
                 seq,
                 kind,
                 class,
-                payload: payload.clone(),
+                // A copy: the original shares its allocation with neighbouring
+                // messages, which would otherwise stay in memory as long as this.
+                payload: Bytes::copy_from_slice(&payload),
             });
         }
         if sync {
@@ -526,6 +539,26 @@ impl Engine {
     /// True when everything in the buffer has been sent.
     pub fn drained(&self) -> bool {
         self.out.next_seq >= self.next_seq
+    }
+
+    /// True while the destination connection is up (between
+    /// [`Engine::output_connected`] and [`Engine::output_disconnected`]).
+    pub fn output_is_connected(&self) -> bool {
+        self.out.connected
+    }
+
+    /// The delay viewers get (or will get, before the broadcast starts).
+    pub fn effective_delay(&self) -> Time {
+        if self.out.started {
+            self.out.delay
+        } else {
+            self.out.target
+        }
+    }
+
+    /// True when anything is buffered.
+    pub fn has_buffered(&self) -> bool {
+        !self.ring.is_empty()
     }
 
     // ----- commands -------------------------------------------------------------

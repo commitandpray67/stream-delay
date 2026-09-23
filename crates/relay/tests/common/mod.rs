@@ -34,6 +34,20 @@ pub struct SinkLog {
     pub unpublished: usize,
     /// Connections the relay closed or reset.
     pub disconnected: usize,
+    /// Publishes accepted: broadcasts the destination started.
+    pub published: usize,
+    /// Connections the relay closed while the sink was holding back its answer to
+    /// `publish` (see [`SinkOptions::publish_delay`]).
+    pub abandoned: usize,
+}
+
+/// How the sink answers `publish`.
+#[derive(Clone, Default)]
+pub struct SinkOptions {
+    /// Wait this long before answering.
+    pub publish_delay: Duration,
+    /// Refuse, like a destination given the wrong stream key.
+    pub reject: bool,
 }
 
 /// A minimal RTMP server standing in for Twitch.
@@ -42,7 +56,19 @@ pub async fn start_sink() -> (
     Arc<Mutex<SinkLog>>,
     tokio::sync::watch::Sender<bool>,
 ) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    start_sink_with("127.0.0.1:0", SinkOptions::default()).await
+}
+
+/// A sink listening on `bind` that answers `publish` as `opts` says.
+pub async fn start_sink_with(
+    bind: &str,
+    opts: SinkOptions,
+) -> (
+    SocketAddr,
+    Arc<Mutex<SinkLog>>,
+    tokio::sync::watch::Sender<bool>,
+) {
+    let listener = TcpListener::bind(bind).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let log = Arc::new(Mutex::new(SinkLog::default()));
     // Sending `true` drops the current connection (to simulate a network failure).
@@ -59,6 +85,7 @@ pub async fn start_sink() -> (
                 l.connections - 1
             };
             let log = log2.clone();
+            let opts = opts.clone();
             let mut kill = kill_rx.clone();
             kill.mark_unchanged();
             tokio::spawn(async move {
@@ -84,12 +111,13 @@ pub async fn start_sink() -> (
                 let mut data = rest.to_vec();
                 loop {
                     let Ok(events) = s.feed(&data) else { return };
+                    let mut publish_requested = false;
                     for ev in events {
                         let mut l = log.lock().unwrap();
                         match ev {
                             ServerEvent::PublishRequest { stream_key, .. } => {
                                 l.keys.push(stream_key);
-                                s.accept_publish();
+                                publish_requested = true;
                             }
                             ServerEvent::Media {
                                 kind,
@@ -105,6 +133,23 @@ pub async fn start_sink() -> (
                             ServerEvent::Metadata { .. } => l.metadata += 1,
                             ServerEvent::Unpublish => l.unpublished += 1,
                             _ => {}
+                        }
+                    }
+                    if publish_requested {
+                        if !opts.publish_delay.is_zero() {
+                            // Anything but more data meanwhile means the relay gave up.
+                            let r =
+                                tokio::time::timeout(opts.publish_delay, tcp.read(&mut buf)).await;
+                            if matches!(r, Ok(Ok(0) | Err(_))) {
+                                log.lock().unwrap().abandoned += 1;
+                                return;
+                            }
+                        }
+                        if opts.reject {
+                            s.reject_publish("NetStream.Publish.BadName", "invalid stream key");
+                        } else {
+                            s.accept_publish();
+                            log.lock().unwrap().published += 1;
                         }
                     }
                     let o = s.take_output();
@@ -166,6 +211,14 @@ pub fn frame_of(p: &[u8]) -> Option<u32> {
 
 impl Publisher {
     pub async fn connect(addr: SocketAddr, key: &str) -> Self {
+        match Self::try_connect(addr, key).await {
+            Ok(p) => p,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Like [`Publisher::connect`], but returns why the relay refused.
+    pub async fn try_connect(addr: SocketAddr, key: &str) -> Result<Self, String> {
         let mut tcp = TcpStream::connect(addr).await.unwrap();
         let mut hs = ClientHandshake::new();
         let mut out = BytesMut::new();
@@ -192,11 +245,13 @@ impl Publisher {
             if evs.contains(&ClientEvent::Publishing) {
                 break;
             }
-            if let Some(ClientEvent::Error { code, .. }) = evs.first() {
-                panic!("publish rejected: {code}");
+            if let Some(ClientEvent::Error { code, description }) = evs.first() {
+                return Err(format!("publish rejected: {code} {description}"));
             }
-            let n = tcp.read(&mut buf).await.unwrap();
-            assert!(n > 0, "relay closed the connection");
+            let n = tcp.read(&mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("relay closed the connection".into());
+            }
             data = buf[..n].to_vec();
         }
         let meta = streamdelay_rtmp::amf0::encode_all(&[
@@ -213,13 +268,27 @@ impl Publisher {
         session.send_media(MediaKind::Audio, 0, &[0xaf, 0x00, 0x11, 0x90]);
         let o = session.take_output();
         tcp.write_all(&o).await.unwrap();
-        Self {
+        Ok(Self {
             tcp,
             session,
             frame: 0,
             audio: 0,
             started: Instant::now(),
             base: 0,
+        })
+    }
+
+    /// True if the relay has closed this connection (waiting up to `wait`).
+    #[allow(dead_code)]
+    pub async fn closed_by_relay(&mut self, wait: Duration) -> bool {
+        let mut buf = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, self.tcp.read(&mut buf)).await {
+                Ok(Ok(0) | Err(_)) => return true,
+                Ok(Ok(_)) => continue,
+                Err(_) => return false,
+            }
         }
     }
 

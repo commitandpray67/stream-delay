@@ -102,7 +102,10 @@ fn init_logging() {
         .and_then(|p| p.parent().map(|d| d.join("logs")));
     let file = dir.and_then(|d| {
         std::fs::create_dir_all(&d).ok()?;
-        std::fs::File::create(d.join("stream-delay.log")).ok()
+        let path = d.join("stream-delay.log");
+        // Keep the previous run's log: after a crash, that is the one that matters.
+        let _ = std::fs::rename(&path, d.join("stream-delay.previous.log"));
+        std::fs::File::create(path).ok()
     });
     let output = match file {
         Some(f) => tracing_subscriber::fmt::layer()
