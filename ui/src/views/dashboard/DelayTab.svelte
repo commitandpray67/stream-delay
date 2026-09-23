@@ -25,7 +25,9 @@
     e.preventDefault();
     message = error = "";
     try {
-      await updateConfig({ delay: $state.snapshot(form), grace_seconds: Number(grace) });
+      // The rolling-buffer switch lives on the Setup tab; keep its current value.
+      const delay = { ...$state.snapshot(form), keep_buffer: adminConfig()?.config.delay.keep_buffer ?? true };
+      await updateConfig({ delay, grace_seconds: Number(grace) });
       message = "Saved.";
     } catch (err) {
       error = (err as Error).message;

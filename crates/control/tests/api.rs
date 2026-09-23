@@ -472,3 +472,54 @@ async fn changing_to_another_server_forgets_the_stored_key() {
         "key carried over via an empty URL"
     );
 }
+
+#[tokio::test]
+async fn end_stream_resume_and_buffer_setting() {
+    let app = app_with_secrets("-end").await;
+    let (s, body) = send(
+        &app,
+        authed("POST", "/api/v1/stream/end")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["ended"], true);
+    let (s, body) = send(
+        &app,
+        authed("POST", "/api/v1/stream/resume")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["ended"], false);
+
+    // The rolling buffer can be switched off without a restart.
+    let (_, current) = send(
+        &app,
+        authed("GET", "/api/v1/config").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let mut delay = current["config"]["delay"].clone();
+    assert_eq!(delay["keep_buffer"], true);
+    delay["keep_buffer"] = false.into();
+    let (s, body) = send(
+        &app,
+        authed("PUT", "/api/v1/config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "delay": delay }).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["config"]["delay"]["keep_buffer"], false);
+    assert_eq!(body["restart_required"], false);
+
+    // The health check names the app, so a second copy can recognize it.
+    let (s, body) = send(&app, req("GET", "/healthz").body(Body::empty()).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["app"], "stream-delay");
+}

@@ -154,11 +154,17 @@ pub struct RelayState {
     pub delay: Snapshot,
     pub ingest: IngestState,
     pub egress: EgressState,
+    /// The streamer ended the broadcast with "end stream". Nothing is sent until
+    /// they resume or the encoder starts a new stream.
+    pub ended: bool,
 }
 
 pub(crate) enum Control {
     Command(Command, oneshot::Sender<Result<Ack, EngineError>>),
     SetDestination(Option<Destination>),
+    EndStream(oneshot::Sender<()>),
+    Resume(oneshot::Sender<()>),
+    SetKeepHistory(bool),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -190,6 +196,35 @@ impl RelayHandle {
 
     pub async fn go_live(&self, when: GoLiveWhen) -> Result<Ack, RelayError> {
         self.command(Command::GoLive(when)).await
+    }
+
+    /// Ends the broadcast now and throws away everything buffered, so none of it
+    /// ever airs. The encoder may keep sending; nothing goes out until
+    /// [`RelayHandle::resume`] or a new encoder session.
+    pub async fn end_stream(&self) -> Result<(), RelayError> {
+        let (tx, rx) = oneshot::channel();
+        self.control
+            .send(Control::EndStream(tx))
+            .map_err(|_| RelayError::Closed)?;
+        rx.await.map_err(|_| RelayError::Closed)
+    }
+
+    /// Starts broadcasting again after [`RelayHandle::end_stream`], from content
+    /// received from now on and with the current delay.
+    pub async fn resume(&self) -> Result<(), RelayError> {
+        let (tx, rx) = oneshot::channel();
+        self.control
+            .send(Control::Resume(tx))
+            .map_err(|_| RelayError::Closed)?;
+        rx.await.map_err(|_| RelayError::Closed)
+    }
+
+    /// Turns the rolling buffer on or off. Off: aired content is dropped and every
+    /// delay increase uses mask mode. Takes effect immediately.
+    pub fn set_keep_history(&self, keep: bool) -> Result<(), RelayError> {
+        self.control
+            .send(Control::SetKeepHistory(keep))
+            .map_err(|_| RelayError::Closed)
     }
 
     /// Changes the destination; takes effect on the next connection.

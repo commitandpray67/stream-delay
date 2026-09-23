@@ -40,11 +40,13 @@ test channel) to see what viewers see.
 | 2 | Preset 60 s (Rewind) | Jumps back another ~30 s. |
 | 3 | Lower to 15 s | Skips forward; the clock is 15–17 s behind. |
 | 4 | Mask 20 s | Slate appears at once, stays for ~40 s, and no content is shown twice. |
-| 5 | Go live after it airs | Plays up to the moment you pressed, then jumps to live. |
+| 5 | Air up to now, then go live | Plays up to the moment you pressed, then jumps to live. |
 | 6 | Delay 30 s, then **Go live now** | Jumps to live within ~2 s. |
 | 7 | Stop OBS's stream, wait 10 s, start again (within the 30 s grace period) | The Twitch connection stays up in Inspector; the stream continues. |
 | 8 | Disconnect the network for ~10 s while delayed | stream-delay reconnects; after it, nothing was skipped and the delay is ~10 s longer. |
-| 9 | Stream 1 h with a change every few minutes | No Inspector warnings besides the reconnect in step 8; memory in Task Manager/Activity Monitor stays flat. |
+| 9 | Delay 30 s, then **End stream** | The broadcast ends in Inspector at once; the last 30 s never air. **Resume** starts a new broadcast 30 s behind. |
+| 10 | Setup → turn off the rolling buffer, then preset 30 s | The slate covers the stream while the delay builds (Mask); nothing repeats. |
+| 11 | Stream 1 h with a change every few minutes | No Inspector warnings besides the reconnect in step 8 and the end in step 9; memory in Task Manager/Activity Monitor stays flat. |
 
 For each step, note anything odd: freezes (and how long), artifacts, audio
 drift, player errors, and whether the low-latency and normal Twitch players

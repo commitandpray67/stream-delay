@@ -12,6 +12,7 @@ mod tray;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use streamdelay_config::{Config, Secrets};
 use streamdelay_control::{App, AppError, AppOptions, Overrides};
@@ -135,6 +136,16 @@ async fn start_core() -> Result<App, AppError> {
             Ok(app) => return Ok(app),
             Err(e) => {
                 let mut config = Config::load_or_create(&path)?;
+                // Moving to other ports would save them in the settings and break
+                // the OBS server address and dock link when the port is only taken
+                // by another copy of stream-delay.
+                if matches!(
+                    e,
+                    AppError::Relay(RelayError::Bind { .. }) | AppError::Bind { .. }
+                ) && stream_delay_answers(config.api.bind.port())
+                {
+                    return Err(AppError::AlreadyRunning);
+                }
                 let moved = match &e {
                     AppError::Relay(RelayError::Bind { addr, .. }) => {
                         next_port(&mut config.ingest.bind, *addr, &INGEST_FALLBACKS)
@@ -154,6 +165,23 @@ async fn start_core() -> Result<App, AppError> {
         }
     }
     Err(last_err.expect("at least one attempt"))
+}
+
+/// True when stream-delay answers on `port` (its health check names the app).
+fn stream_delay_answers(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+    let request = format!("GET /healthz HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    if s.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    let _ = s.read_to_string(&mut response);
+    response.contains(r#""app":"stream-delay""#)
 }
 
 /// Moves `bind` to the candidate after the one that failed. Returns false when

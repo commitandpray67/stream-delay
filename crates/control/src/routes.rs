@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError};
+use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError, RelayState};
 
 use crate::auth::{self, Scope};
 use crate::{AppState, diagnostics, obs_routes, settings, ui};
@@ -56,6 +56,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/v1/delay", put(set_delay))
         .route("/api/v1/live", post(go_live))
         .route("/api/v1/cancel", post(cancel))
+        .route("/api/v1/stream/end", post(end_stream))
+        .route("/api/v1/stream/resume", post(resume))
         .route("/api/v1/presets/{index}", post(preset))
         .route_layer(middleware::from_fn(|r: Request, n: Next| {
             auth::require(Scope::Control, r, n)
@@ -68,7 +70,18 @@ pub(crate) fn router(state: AppState) -> Router {
             auth::require(Scope::Admin, r, n)
         }));
     Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        // Names the app, so a second copy can tell that the port is taken by
+        // stream-delay rather than by another program.
+        .route(
+            "/healthz",
+            get(|| async {
+                Json(json!({
+                    "status": "ok",
+                    "app": "stream-delay",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }))
+            }),
+        )
         .merge(read)
         .merge(control)
         .merge(admin)
@@ -117,6 +130,17 @@ async fn go_live(
 ) -> Result<Json<Ack>, ApiError> {
     let when = body.map_or(GoLiveWhen::Now, |b| b.when);
     Ok(Json(st.relay().go_live(when).await?))
+}
+
+/// Ends the broadcast now; nothing buffered airs.
+async fn end_stream(State(st): State<AppState>) -> Result<Json<RelayState>, ApiError> {
+    st.relay().end_stream().await?;
+    Ok(Json(st.relay().state()))
+}
+
+async fn resume(State(st): State<AppState>) -> Result<Json<RelayState>, ApiError> {
+    st.relay().resume().await?;
+    Ok(Json(st.relay().state()))
 }
 
 async fn cancel(State(st): State<AppState>) -> Result<Json<Ack>, ApiError> {

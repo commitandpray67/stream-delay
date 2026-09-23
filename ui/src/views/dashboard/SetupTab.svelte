@@ -1,7 +1,7 @@
 <script lang="ts">
   import CopyField from "../../components/CopyField.svelte";
   import { clearStreamKey, setStreamKey, updateConfig } from "../../lib/api";
-  import { adminConfig } from "../../lib/live.svelte";
+  import { adminConfig, live } from "../../lib/live.svelte";
   import ObsWizard from "./ObsWizard.svelte";
 
   const pc = $derived(adminConfig());
@@ -51,6 +51,27 @@
       error = (err as Error).message;
     }
   }
+
+  let bufferMessage = $state("");
+  let bufferError = $state("");
+
+  async function setKeepBuffer(keep: boolean) {
+    bufferMessage = bufferError = "";
+    if (!pc) return;
+    try {
+      await updateConfig({ delay: { ...pc.config.delay, keep_buffer: keep } });
+      bufferMessage = keep ? "Rewind is available." : "Delay will be added behind the slate (Mask).";
+    } catch (err) {
+      bufferError = (err as Error).message;
+    }
+  }
+
+  // Memory the rolling buffer needs at the current bitrate, if known.
+  const bufferMb = $derived.by(() => {
+    const kbps = live.state?.delay.ingest.bitrate_kbps ?? 0;
+    const max = pc?.config.delay.max_seconds ?? 120;
+    return kbps > 0 ? Math.round((kbps * max) / 8 / 1000) : null;
+  });
 
   async function forgetKey() {
     error = message = "";
@@ -140,6 +161,28 @@
         The dock link can only change the delay and the overlay link can only show it; neither can change your
         settings or stream key. Still, don't share them on stream.
       </p>
+    </section>
+
+    <section class="panel stack" aria-labelledby="buffer-h">
+      <h2 id="buffer-h">4. Instant delay</h2>
+      <label class="inline">
+        <input
+          type="checkbox"
+          checked={pc.config.delay.keep_buffer}
+          onchange={(e) => setKeepBuffer((e.currentTarget as HTMLInputElement).checked)}
+        />
+        Keep a rolling buffer so delay can be added instantly (Rewind)
+      </label>
+      <p class="muted small">
+        <b>On:</b> stream-delay keeps the last {Math.round(pc.config.delay.max_seconds / 60)} min of your stream in
+        memory{#if bufferMb}&nbsp;(about {bufferMb} MB at your current bitrate){/if}, so <b>Rewind</b> adds delay at
+        once. Viewers see the last few seconds again.<br />
+        <b>Off:</b> only what the current delay needs is kept. Adding delay then always uses <b>Mask</b>: the overlay
+        slate covers the stream while the delay builds up, so add the overlay to your scenes. Lowering the delay,
+        going live and ending the stream work the same.
+      </p>
+      {#if bufferMessage}<p class="ok small">{bufferMessage}</p>{/if}
+      {#if bufferError}<p class="error small" role="alert">{bufferError}</p>{/if}
     </section>
   </div>
 {/if}

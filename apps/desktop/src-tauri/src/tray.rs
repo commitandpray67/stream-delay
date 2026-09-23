@@ -41,6 +41,9 @@ fn icon(phase: Phase) -> Image<'static> {
 fn status_text(state: &RelayState) -> String {
     let d = &state.delay;
     let secs = (d.effective_ms as f64 / 1000.0).round();
+    if state.ended {
+        return "Stream ended: nothing is being sent".into();
+    }
     match d.phase {
         Phase::Offline => "Offline: waiting for OBS".into(),
         Phase::Live => "Live (no delay)".into(),
@@ -80,7 +83,22 @@ fn build_menu(app: &AppHandle, core: &App) -> tauri::Result<(Menu<Wry>, TrayItem
     menu.append(&MenuItem::with_id(
         app,
         "after-air",
-        "Go live after it airs",
+        "Air up to now, then go live",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "end-stream",
+        "End stream now (buffer is not aired)",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "resume",
+        "Resume broadcasting",
         true,
         None::<&str>,
     )?)?;
@@ -232,6 +250,20 @@ fn on_menu(app: &AppHandle, id: &str) {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = core.relay().go_live(GoLiveWhen::AfterAir).await {
                     warn!("go live failed: {e}");
+                }
+            });
+        }
+        "end-stream" => {
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = core.relay().end_stream().await {
+                    warn!("end stream failed: {e}");
+                }
+            });
+        }
+        "resume" => {
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = core.relay().resume().await {
+                    warn!("resume failed: {e}");
                 }
             });
         }

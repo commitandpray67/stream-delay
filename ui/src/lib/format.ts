@@ -24,8 +24,10 @@ export function formatBytes(n: number): string {
   return `${n} B`;
 }
 
-export function phaseTone(phase: Phase): "live" | "delayed" | "busy" | "off" {
+export function phaseTone(phase: Phase | "ended"): "live" | "delayed" | "busy" | "ended" | "off" {
   switch (phase) {
+    case "ended":
+      return "ended";
     case "live":
       return "live";
     case "delayed":

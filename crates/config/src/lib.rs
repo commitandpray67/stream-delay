@@ -169,6 +169,10 @@ pub struct DelayConfig {
     pub presets: Vec<Preset>,
     /// Upper bound on buffered data, in MiB.
     pub ram_cap_mb: u64,
+    /// Keep a rolling buffer of the stream so delay can be added instantly
+    /// (Rewind). When off, only what the current delay needs is kept and every
+    /// increase uses Mask.
+    pub keep_buffer: bool,
 }
 
 impl Default for DelayConfig {
@@ -179,6 +183,7 @@ impl Default for DelayConfig {
             default_mode: DelayMode::Rewind,
             presets: Preset::defaults(),
             ram_cap_mb: 512,
+            keep_buffer: true,
         }
     }
 }
@@ -270,6 +275,9 @@ pub struct HotkeyConfig {
     pub enabled: bool,
     pub go_live: String,
     pub go_live_after_air: String,
+    /// Ends the broadcast without airing the buffer. Unassigned by default so it
+    /// can't be pressed by accident.
+    pub end_stream: String,
     /// One shortcut per delay preset, in order. Empty strings are unassigned.
     pub presets: Vec<String>,
 }
@@ -280,6 +288,7 @@ impl Default for HotkeyConfig {
             enabled: true,
             go_live: "CmdOrCtrl+Alt+Shift+L".into(),
             go_live_after_air: "CmdOrCtrl+Alt+Shift+A".into(),
+            end_stream: String::new(),
             presets: (1..=5)
                 .map(|i| format!("CmdOrCtrl+Alt+Shift+{i}"))
                 .collect(),

@@ -17,12 +17,15 @@ The dock shows:
 - your preset buttons (0/15/30/60/120 s by default; change them on the
   **Delay settings** tab);
 - a custom value field and the Rewind/Mask choice;
-- **Go live now** and **Go live after it airs**, and **Cancel** while a Mask or
-  go-live change is still pending;
+- **Go live now** (enabled while there is a delay to drop), **End stream** (two
+  clicks; ends the broadcast without airing the buffer) and **Cancel** while a
+  Mask or go-live change is still pending. After ending, **Resume broadcasting**
+  takes their place;
 - how much of the stream is buffered, plus warnings (keyframe interval, upload
   backlog, Enhanced Broadcasting).
 
-The same controls are on the dashboard's **Control** tab, and the dock works in any
+The same controls, plus **Air up to now, then go live**, are on the dashboard's
+**Control** tab, and the dock works in any
 browser (a phone or tablet too, if you enable LAN access on the Advanced tab).
 
 ## Overlay

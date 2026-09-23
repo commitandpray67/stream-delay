@@ -136,10 +136,15 @@ impl IngestTracker {
 
 pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
     let o = &e.out;
-    let history_ms = e
-        .ring
-        .front()
-        .map_or(0, |f| now.saturating_sub(f.arrival) / MS);
+    // How far back the buffer reaches. Once the encoder is gone, nothing new
+    // arrives, so measure up to the newest entry rather than to now.
+    let history_ms = match (e.ring.front(), e.ring.back()) {
+        (Some(first), Some(last)) => {
+            let end = if e.ingest_active { now } else { last.arrival };
+            end.saturating_sub(first.arrival) / MS
+        }
+        _ => 0,
+    };
     let offline = !e.ingest_active && (e.drained() || !o.connected);
     let effective = if o.started { o.delay } else { o.target };
     let phase = match o.pending {

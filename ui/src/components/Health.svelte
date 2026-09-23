@@ -30,7 +30,7 @@
     <dt>To destination</dt>
     <dd>
       <span class:ok={state.egress.status === "live"} class:warn={state.egress.status === "retrying"}>
-        {egressLabel[state.egress.status]}
+        {state.ended && state.egress.status !== "live" ? "Stopped (stream ended)" : egressLabel[state.egress.status]}
       </span>
       {#if state.egress.destination}<span class="muted"> · {state.egress.destination}</span>{/if}
       {#if state.egress.status === "live"} · {formatBitrate(state.egress.bitrate_kbps)}{/if}

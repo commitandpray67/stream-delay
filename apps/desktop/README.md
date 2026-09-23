@@ -4,7 +4,7 @@ A tray app that runs the stream-delay relay, opens the dashboard in a native win
 
 ## What it does
 
-- **Tray icon** colored by state: green = live, amber = delayed, blue = changing, grey = offline. The menu has the delay presets, "Go live after it airs", quick links (dashboard, OBS setup, copy the OBS server/dock/overlay URLs), "Start with my computer" and Quit.
+- **Tray icon** colored by state: green = live, amber = delayed, blue = changing, grey = offline. The menu has the delay presets, "Air up to now, then go live", "End stream now" and "Resume broadcasting", quick links (dashboard, OBS setup, copy the OBS server/dock/overlay URLs), "Start with my computer" and Quit.
 - **Dashboard window** opens on first launch at the Setup tab: paste your stream key, then let stream-delay configure OBS through obs-websocket (with a one-click restore), or follow the manual steps.
 - **Global hotkeys**, configurable in the dashboard under Advanced. Defaults:
 
@@ -12,7 +12,8 @@ A tray app that runs the stream-delay relay, opens the dashboard in a native win
   |---|---|
   | Ctrl+Alt+Shift+1 … 5 (Cmd on macOS) | Presets 1–5 (Live, 15 s, 30 s, 1 min, 2 min) |
   | Ctrl+Alt+Shift+L | Go live now |
-  | Ctrl+Alt+Shift+A | Go live after it airs |
+  | Ctrl+Alt+Shift+A | Air up to now, then go live |
+  | (none by default) | End stream (the buffer is not aired) |
 
   On Linux they need X11 (or XWayland); under a pure Wayland session use the OBS dock or the tray.
 - Closing the window keeps the relay running in the tray. Quit from the tray menu ends the broadcast cleanly.

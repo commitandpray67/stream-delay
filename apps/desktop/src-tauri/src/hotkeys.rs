@@ -12,6 +12,7 @@ use crate::Core;
 enum Action {
     GoLive,
     GoLiveAfterAir,
+    EndStream,
     Preset(usize),
 }
 
@@ -28,6 +29,7 @@ pub fn register(app: &AppHandle, config: &Config) {
     let mut bindings = vec![
         (h.go_live.clone(), Action::GoLive),
         (h.go_live_after_air.clone(), Action::GoLiveAfterAir),
+        (h.end_stream.clone(), Action::EndStream),
     ];
     let presets = config.delay.presets.len();
     bindings.extend(
@@ -64,6 +66,7 @@ fn run(app: &AppHandle, action: Action) {
         let result = match action {
             Action::GoLive => core.relay().go_live(GoLiveWhen::Now).await.map(|_| ()),
             Action::GoLiveAfterAir => core.relay().go_live(GoLiveWhen::AfterAir).await.map(|_| ()),
+            Action::EndStream => core.relay().end_stream().await,
             Action::Preset(i) => core.apply_preset(i).await,
         };
         if let Err(e) = result {

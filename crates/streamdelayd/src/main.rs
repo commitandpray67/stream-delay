@@ -58,6 +58,18 @@ enum Cmd {
         #[command(flatten)]
         api: ApiArgs,
     },
+    /// End the broadcast now on a running instance. Nothing still in the delay
+    /// buffer airs. Resume with `streamdelayd resume` or by restarting the stream
+    /// in OBS.
+    End {
+        #[command(flatten)]
+        api: ApiArgs,
+    },
+    /// Broadcast again after `streamdelayd end`.
+    Resume {
+        #[command(flatten)]
+        api: ApiArgs,
+    },
     /// Print the state of a running instance as JSON.
     State {
         #[command(flatten)]
@@ -210,6 +222,18 @@ fn main() -> Result<()> {
                 "/api/v1/live",
                 serde_json::json!({ "when": when }),
             )?)
+        }
+        Cmd::End { api } => {
+            let (url, token) = api.resolve(&cli.config)?;
+            client::post(&url, &token, "/api/v1/stream/end", serde_json::json!({}))?;
+            println!("Stream ended. Nothing buffered will air.");
+            Ok(())
+        }
+        Cmd::Resume { api } => {
+            let (url, token) = api.resolve(&cli.config)?;
+            client::post(&url, &token, "/api/v1/stream/resume", serde_json::json!({}))?;
+            println!("Broadcasting again.");
+            Ok(())
         }
         Cmd::State { api } => {
             let (url, token) = api.resolve(&cli.config)?;

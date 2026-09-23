@@ -72,6 +72,8 @@ export const setDelay = (seconds: number, mode?: DelayMode) =>
 export const goLive = (when: GoLiveWhen) => api<Ack>("POST", "/api/v1/live", { when });
 export const applyPreset = (index: number) => api<Ack>("POST", `/api/v1/presets/${index}`);
 export const cancel = () => api<Ack>("POST", "/api/v1/cancel");
+export const endStream = () => api<RelayState>("POST", "/api/v1/stream/end");
+export const resumeStream = () => api<RelayState>("POST", "/api/v1/stream/resume");
 export const getState = () => api<RelayState>("GET", "/api/v1/state");
 export const getConfig = () => api<PublicConfig>("GET", "/api/v1/config");
 export const updateConfig = (update: Record<string, unknown>) =>

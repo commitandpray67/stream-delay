@@ -3,9 +3,13 @@
   import { t } from "../lib/i18n";
   import type { Snapshot } from "../lib/types";
 
-  let { snap, large = false }: { snap: Snapshot | null; large?: boolean } = $props();
+  let {
+    snap,
+    ended = false,
+    large = false,
+  }: { snap: Snapshot | null; ended?: boolean; large?: boolean } = $props();
 
-  const phase = $derived(snap?.phase ?? "offline");
+  const phase = $derived(ended ? "ended" : (snap?.phase ?? "offline"));
   const delay = $derived(formatDelay(snap?.effective_ms ?? 0));
   const label = $derived(t(`phase.${phase}`, { delay }));
   const hint = $derived(t(`hint.${phase}`, { delay }));
@@ -38,6 +42,9 @@
   }
   .busy {
     --tone: var(--busy);
+  }
+  .ended {
+    --tone: var(--danger);
   }
   .dot {
     width: 0.7rem;

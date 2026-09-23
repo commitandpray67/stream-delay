@@ -109,8 +109,14 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
         out = out.replace(s.as_str(), "<redacted>");
     }
     // Twitch keys look like live_<digits>_<alphanumerics>; token query parameters
-    // may appear in logged URLs.
-    for prefix in ["live_", "token="] {
+    // may appear in logged URLs. Words that merely contain "live_", such as the
+    // setting go_live_after_air, are left alone.
+    type Rule = (&'static str, fn(&str) -> bool);
+    let rules: [Rule; 2] = [
+        ("live_", is_twitch_key_tail),
+        ("token=", |value| !value.is_empty()),
+    ];
+    for (prefix, looks_secret) in rules {
         let mut result = String::with_capacity(out.len());
         let mut rest = out.as_str();
         while let Some(i) = rest.find(prefix) {
@@ -119,10 +125,12 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
             let end = tail
                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
                 .unwrap_or(tail.len());
-            if end > 0 {
+            if looks_secret(&tail[..end]) {
                 result.push_str("<redacted>");
+                rest = &tail[end..];
+            } else {
+                rest = tail;
             }
-            rest = &tail[end..];
         }
         result.push_str(rest);
         out = result;
@@ -135,6 +143,12 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
         out = out.replace(home, "~");
     }
     out
+}
+
+/// `<digits>_<something>`: what follows `live_` in a Twitch stream key.
+fn is_twitch_key_tail(tail: &str) -> bool {
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && tail.len() > digits + 1 && tail.as_bytes()[digits] == b'_'
 }
 
 fn known_secrets(st: &AppState) -> Vec<String> {
@@ -208,6 +222,15 @@ mod tests {
         assert!(r.contains("token=<redacted>&x=1"));
         // Too-short values are not blindly replaced everywhere.
         assert!(r.ends_with("abc"));
+    }
+
+    #[test]
+    fn words_containing_live_are_not_keys() {
+        let text = r#"{"go_live_after_air":"x","live_now":1,"key":"live_987_xYz"}"#;
+        let r = redact(text, &[]);
+        assert!(r.contains(r#""go_live_after_air":"x""#), "{r}");
+        assert!(r.contains(r#""live_now":1"#), "{r}");
+        assert!(r.contains(r#""key":"live_<redacted>""#), "{r}");
     }
 
     #[test]

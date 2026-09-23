@@ -52,6 +52,8 @@ export interface RelayState {
     backlog_bytes: number;
     reconnects: number;
   };
+  /** The broadcast was ended with "End stream"; nothing is sent until resumed. */
+  ended: boolean;
 }
 
 export interface Preset {
@@ -77,6 +79,8 @@ export interface DelayConfig {
   default_mode: DelayMode;
   presets: Preset[];
   ram_cap_mb: number;
+  /** Keep a rolling buffer so Rewind can add delay instantly. */
+  keep_buffer: boolean;
 }
 
 export interface DestinationConfig {
@@ -89,6 +93,7 @@ export interface HotkeyConfig {
   enabled: boolean;
   go_live: string;
   go_live_after_air: string;
+  end_stream: string;
   presets: string[];
 }
 

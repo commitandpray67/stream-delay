@@ -8,7 +8,8 @@ They work while any window has focus, including your game.
 |---|---|
 | Preset 1 … 5 (0, 15, 30, 60, 120 s) | `Ctrl+Alt+Shift+1` … `5` |
 | Go live now | `Ctrl+Alt+Shift+L` |
-| Go live after it airs | `Ctrl+Alt+Shift+A` |
+| Air up to now, then go live | `Ctrl+Alt+Shift+A` |
+| End stream (buffer is not aired) | none; set one on the Advanced tab |
 
 On macOS, `Cmd` replaces `Ctrl`. Change or disable them on the dashboard's
 **Advanced** tab; names look like `CmdOrCtrl+Alt+Shift+1`. If another program
@@ -21,7 +22,7 @@ settings to a command such as `streamdelayd delay 30`.
 ## Tray menu (desktop app)
 
 The icon color shows the state (green: live, amber: delayed). The menu has your
-presets, the two go-live actions, links to the dashboard and OBS setup, **Copy**
+presets, the go-live actions, **End stream now** and **Resume broadcasting**, links to the dashboard and OBS setup, **Copy**
 entries for the server address, dock and overlay URLs, **Start with my
 computer**, and **Check for updates…**. Closing the dashboard window keeps
 stream-delay running; use **Quit stream-delay** in the tray to stop it.
@@ -35,7 +36,9 @@ address and token from the settings file.
 streamdelayd delay 30           # rewind to a 30 s delay
 streamdelayd delay 20 --mask    # cover the change with the slate
 streamdelayd live               # go live now
-streamdelayd live --after-air   # go live once what's buffered has aired
+streamdelayd live --after-air   # air up to now, then go live
+streamdelayd end                # end the broadcast; nothing buffered airs
+streamdelayd resume             # broadcast again
 streamdelayd state              # current state as JSON
 ```
 
@@ -54,7 +57,9 @@ URL*: it's the part after `token=`). Then, for example:
 | Mask 30 s | `PUT http://127.0.0.1:7788/api/v1/delay`, body `{"seconds": 30, "mode": "mask"}` |
 | Preset 3 | `POST http://127.0.0.1:7788/api/v1/presets/2` (0-based) |
 | Go live | `POST http://127.0.0.1:7788/api/v1/live`, body `{"when": "now"}` |
-| Go live after it airs | `POST http://127.0.0.1:7788/api/v1/live`, body `{"when": "after-air"}` |
+| Air up to now, then go live | `POST http://127.0.0.1:7788/api/v1/live`, body `{"when": "after-air"}` |
+| End stream | `POST http://127.0.0.1:7788/api/v1/stream/end` |
+| Resume | `POST http://127.0.0.1:7788/api/v1/stream/resume` |
 
 Send the header `Authorization: Bearer <token>` and, with a body,
 `Content-Type: application/json`. Tools that can't set headers can add

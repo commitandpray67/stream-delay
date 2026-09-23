@@ -17,6 +17,13 @@ before your real stream.
   there. Run the OBS setup again, or update OBS by hand.
 - With an ingest key (Docker or two-PC setups), OBS must use that key.
 
+## "stream-delay is already running"
+
+The desktop app found another copy of stream-delay on its ports, usually
+`streamdelayd` still running in a terminal window. Close it (Ctrl+C in that
+window), then start the app again. Only one copy can run at a time; the app and
+`streamdelayd` share the same settings, stream key and links.
+
 ## The dock or overlay is blank, or says the link is missing its token
 
 The links contain a private token. Copy them again from the **Setup** tab or the

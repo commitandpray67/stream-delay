@@ -660,8 +660,13 @@ proptest! {
         ops in prop::collection::vec(op(), 1..25),
         audio in any::<bool>(),
         jitter in 0u64..4_000,
+        keep_history in any::<bool>(),
     ) {
-        let mut s = Sim::new(EngineConfig { max_delay_ms: 60_000, ..Default::default() });
+        let mut s = Sim::new(EngineConfig {
+            max_delay_ms: 60_000,
+            keep_history,
+            ..Default::default()
+        });
         s.audio = audio;
         s.jitter = jitter;
         s.connect();
@@ -735,6 +740,103 @@ fn output_reset_starts_a_fresh_broadcast() {
     assert!(fresh.iter().all(|(_, _, i)| i.session == new_session));
     assert_eq!(fresh[0].1.msg.timestamp, 0);
     assert!(fresh[0].1.at - fresh[0].2.arrival >= 5 * SEC);
+}
+
+#[test]
+fn without_history_only_what_the_delay_needs_is_kept() {
+    let mut s = Sim::new(EngineConfig {
+        keep_history: false,
+        ..config()
+    });
+    s.connect();
+    s.advance(60 * SEC);
+    // Live: only the keyframe interval the output would restart from is kept.
+    let live_history = s.snapshot().history_ms;
+    assert!(live_history <= 2_100, "history {live_history}");
+    // Asking for a rewind uses the mask instead: the delay builds behind the slate.
+    let ack = s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    assert!(ack.pending, "{ack:?}");
+    assert!(s.snapshot().mask_visible);
+    s.advance(40 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed);
+    assert!((10_000..=12_100).contains(&snap.effective_ms), "{snap:?}");
+    assert!(!snap.mask_visible);
+    // Now about the delay plus one keyframe interval is kept.
+    assert!(snap.history_ms <= 14_200, "history {}", snap.history_ms);
+    s.check_invariants();
+}
+
+#[test]
+fn discard_never_sends_what_was_buffered() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(30 * SEC);
+    let discarded_at = s.now;
+    s.e.discard();
+    assert_eq!(s.snapshot().history_ms, 0);
+    s.advance(5 * SEC);
+    let n = s.sent.len();
+    s.connect();
+    s.advance(40 * SEC);
+    let after: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
+    assert!(!after.is_empty());
+    assert!(
+        after.iter().all(|(_, _, i)| i.arrival >= discarded_at),
+        "content buffered before the discard was sent"
+    );
+    // The new broadcast starts on a keyframe and keeps the target delay.
+    let first_video = after
+        .iter()
+        .find(|(_, _, i)| i.kind == Kind::Video)
+        .unwrap();
+    assert!(first_video.2.keyframe);
+    assert!(
+        after
+            .iter()
+            .all(|(_, sent, i)| sent.at - i.arrival >= 20 * SEC)
+    );
+    s.check_invariants_in(n..s.sent.len());
+}
+
+#[test]
+fn buffer_display_stops_growing_after_the_encoder_leaves() {
+    let mut s = Sim::new(config());
+    s.advance(10 * SEC);
+    s.stop_encoder();
+    s.advance(300 * SEC);
+    let history = s.snapshot().history_ms;
+    assert!(history <= 10_100, "history {history}");
+}
+
+#[test]
+fn a_new_stream_does_not_rewind_into_the_previous_one() {
+    let mut s = live_sim();
+    let old = s.session;
+    s.stop_encoder();
+    s.advance(10 * SEC);
+    s.e.output_reset();
+    s.start_encoder(0);
+    s.connect();
+    s.advance(5 * SEC);
+    let n = s.sent.len();
+    let ack = s.cmd(Command::SetDelay {
+        ms: 30_000,
+        mode: DelayMode::Rewind,
+    });
+    assert!(ack.history_short, "{ack:?}");
+    s.advance(10 * SEC);
+    assert!(
+        s.media_sent_in(n..s.sent.len())
+            .all(|(_, _, i)| i.session != old),
+        "rewound into the previous stream"
+    );
 }
 
 /// HEVC payload: enhanced CodedFramesX 'hvc1' with one slice of the given NAL type.

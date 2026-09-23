@@ -45,17 +45,39 @@ obs-websocket.
 The stream jumps forward to live at the next keyframe (within about 2 s). What
 happened during the delay window is skipped and never shown.
 
-### Go live after it airs
+### Air up to now, then go live
 
 stream-delay remembers the moment you pressed the button. Viewers keep watching
-until they reach that moment, then the stream jumps to live. Use this to let chat
-see everything up to "now" (for example, the end of a match) before you drop the
-delay.
+until they reach that moment, then the stream jumps to live; what happens while
+that airs is skipped. Use it to let chat see everything up to "now" (for example,
+the end of a match) before you drop the delay. It is on the dashboard, the tray
+menu and a hotkey; the dock keeps only **Go live now** to stay compact.
 
 ### Lowering the delay (for example 60 s → 20 s)
 
 The stream skips forward to a keyframe so that the delay becomes 20 s. The skipped
 40 s are never shown.
+
+## Ending the stream
+
+**End stream** ends the broadcast on Twitch immediately and throws away everything
+in the delay buffer, so none of it is ever shown. Use it when something went wrong
+on stream and even the delayed part must not air. In the dock and dashboard it
+takes two clicks (the second within 3 seconds); it is also in the tray menu, the
+API and the command line, and can have a hotkey (none by default).
+
+OBS can keep streaming to stream-delay; nothing goes out until you press
+**Resume broadcasting** or stop and start streaming in OBS. Resuming starts a new
+broadcast from what OBS sends from then on, with your current delay.
+
+## Without the rolling buffer
+
+On the **Setup** tab you can turn off **Keep a rolling buffer**. stream-delay then
+keeps only what the current delay needs (almost nothing while live), which saves
+memory, but there is nothing to rewind into: every delay increase uses **Mask**,
+even from presets and hotkeys set to Rewind. Add the overlay to your scenes so the
+slate covers the build-up. Lowering the delay, going live and ending the stream
+work the same. The switch takes effect immediately.
 
 ## Details worth knowing
 

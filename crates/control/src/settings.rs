@@ -209,6 +209,7 @@ async fn update_config(
         info!("destination server changed; the stored stream key was removed");
     }
     let mut destination_changed = false;
+    let mut keep_buffer_changed = false;
     let new_config = {
         let mut c = st.shared.config.write().expect("config lock");
         let mut restart = false;
@@ -218,6 +219,7 @@ async fn update_config(
         }
         if let Some(d) = update.delay {
             restart |= d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
+            keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
             c.delay = d;
         }
         if let Some(o) = update.overlay {
@@ -242,6 +244,9 @@ async fn update_config(
     save(&st, &new_config)?;
     if destination_changed {
         apply_destination(&st, &new_config)?;
+    }
+    if keep_buffer_changed {
+        st.relay().set_keep_history(new_config.delay.keep_buffer)?;
     }
     st.shared.config_tx.send_replace(new_config);
     Ok(Json(public_config(&st)))

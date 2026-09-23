@@ -41,7 +41,8 @@
       <label class="inline"><input type="checkbox" bind:checked={hotkeys.enabled} /> Enable global hotkeys</label>
       <div class="cols">
         <label>Go live now <input bind:value={hotkeys.go_live} /></label>
-        <label>Go live after it airs <input bind:value={hotkeys.go_live_after_air} /></label>
+        <label>Air up to now, then go live <input bind:value={hotkeys.go_live_after_air} /></label>
+        <label>End stream (empty = no hotkey) <input bind:value={hotkeys.end_stream} /></label>
         {#each pc.config.delay.presets as p, i (i)}
           <label>
             Preset {i + 1} ({p.seconds <= 0 ? "live" : `${p.seconds} s`})

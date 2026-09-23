@@ -60,6 +60,11 @@ pub enum AppError {
         addr: SocketAddr,
         source: std::io::Error,
     },
+    #[error(
+        "stream-delay is already running, for example as streamdelayd in a terminal \
+         window. Close it, then start the app again."
+    )]
+    AlreadyRunning,
 }
 
 /// Links for the streamer to paste into OBS.
@@ -356,6 +361,7 @@ pub(crate) fn engine_config(c: &Config) -> EngineConfig {
     EngineConfig {
         max_delay_ms: c.delay.max_seconds * 1000,
         ram_cap_bytes: (c.delay.ram_cap_mb as usize).saturating_mul(1024 * 1024),
+        keep_history: c.delay.keep_buffer,
         ..Default::default()
     }
 }

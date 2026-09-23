@@ -37,6 +37,10 @@ pub struct EngineConfig {
     pub ram_cap_bytes: usize,
     /// In mask mode, how long after the slate appears the rewind point may start.
     pub mask_margin_ms: u64,
+    /// Keep a rolling history (up to `max_delay_ms`) so delay can be added by
+    /// rewinding. When false, content is dropped once it has aired and every delay
+    /// increase uses mask mode, which builds the delay from new content.
+    pub keep_history: bool,
 }
 
 impl Default for EngineConfig {
@@ -46,6 +50,7 @@ impl Default for EngineConfig {
             headroom_ms: 10_000,
             ram_cap_bytes: 512 * 1024 * 1024,
             mask_margin_ms: 500,
+            keep_history: true,
         }
     }
 }
@@ -283,10 +288,21 @@ impl Engine {
         &self.config
     }
 
+    /// Turns the rolling history on or off (see [`EngineConfig::keep_history`]).
+    /// Turning it off drops aired content on the next eviction.
+    pub fn set_keep_history(&mut self, keep: bool) {
+        self.config.keep_history = keep;
+    }
+
     // ----- ingest ---------------------------------------------------------------
 
     /// A publisher connected. Returns the new session id.
     pub fn ingest_start(&mut self, _now: Time) -> u32 {
+        // Unless a broadcast is still running (an encoder reconnecting within the
+        // grace period), what is left of an earlier stream must not be rewound into.
+        if !self.out.started {
+            self.drop_buffer();
+        }
         let id = self.next_session;
         self.next_session += 1;
         self.sessions.push(Session {
@@ -458,6 +474,31 @@ impl Engine {
         o.pending = Pending::None;
     }
 
+    /// Drops everything buffered and ends the current broadcast on the output side
+    /// (see [`Engine::output_reset`]). Nothing received before this call is ever
+    /// sent; the output starts again from the next keyframe, with the current
+    /// target delay. Used for "end stream" and after a broadcast has finished.
+    pub fn discard(&mut self) {
+        self.drop_buffer();
+        self.output_reset();
+    }
+
+    fn drop_buffer(&mut self) {
+        self.ring.clear();
+        self.syncs.clear();
+        self.bytes = 0;
+        self.base_seq = self.next_seq;
+        // Keep the running encoder session: its codec headers are needed to start
+        // the next broadcast.
+        let current = self
+            .ingest_active
+            .then(|| self.sessions.last().map(|s| s.id))
+            .flatten();
+        self.sessions.retain(|s| Some(s.id) == current);
+        self.out.next_seq = self.next_seq;
+        self.out.need_sync = true;
+    }
+
     pub fn output_generation(&self) -> u64 {
         self.out.generation
     }
@@ -526,6 +567,12 @@ impl Engine {
                 } else if ms == 0 {
                     return self.command(now, Command::GoLive(GoLiveWhen::Now));
                 } else if d > self.out.delay {
+                    // Without history there is nothing to rewind into.
+                    let mode = if self.config.keep_history {
+                        mode
+                    } else {
+                        DelayMode::Mask
+                    };
                     match mode {
                         DelayMode::Rewind => self.rewind(now, d),
                         DelayMode::Mask => {
@@ -938,8 +985,36 @@ impl Engine {
 
     // ----- buffer management ----------------------------------------------------
 
+    /// Without history, the oldest entry that must stay: the keyframe the output
+    /// would restart from after a reconnect (or, before the broadcast starts, the
+    /// one it would start from), and a pending mask's rewind point.
+    fn keep_from(&self, now: Time) -> Option<u64> {
+        if self.config.keep_history {
+            return None;
+        }
+        let o = &self.out;
+        let mut keep = if o.started {
+            self.syncs
+                .iter()
+                .rev()
+                .find(|&&s| s <= o.next_seq)
+                .copied()
+                .unwrap_or(o.next_seq)
+        } else {
+            self.newest_sync_arrived_by(now.checked_sub(o.delay))?
+        };
+        if let Pending::Mask {
+            anchor: Some(a), ..
+        } = o.pending
+        {
+            keep = keep.min(a);
+        }
+        Some(keep)
+    }
+
     fn evict(&mut self, now: Time) {
         let capacity = (self.config.max_delay_ms + self.config.headroom_ms) * MS;
+        let keep_from = self.keep_from(now);
         while let Some(front) = self.ring.front() {
             let over_ram = self.bytes > self.config.ram_cap_bytes && self.ring.len() > 1;
             // Evict a whole GOP once its successor keyframe is older than the capacity,
@@ -949,7 +1024,9 @@ impl Engine {
                 Some(s) => self.entry(s).is_some_and(|e| e.arrival + capacity < now),
                 None => !front.sync && front.arrival + capacity < now,
             };
-            if !over_ram && !gop_expired {
+            // Without history, a GOP goes as soon as nothing needs it any more.
+            let not_needed = keep_from.zip(next_sync).is_some_and(|(k, s)| s <= k);
+            if !over_ram && !gop_expired && !not_needed {
                 break;
             }
             let end = next_sync.unwrap_or(front.seq + 1);

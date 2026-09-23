@@ -32,6 +32,11 @@ Run `streamdelayd urls` to print links that already contain their tokens.
 | `POST /api/v1/live` | `{"when": "now" \| "after-air"}` | Drop the delay at the next keyframe, or after everything buffered so far has aired. |
 | `POST /api/v1/presets/{index}` | none | Apply a configured preset (0-based). |
 | `POST /api/v1/cancel` | none | Cancel a pending change (for example a mask in progress). |
+| `POST /api/v1/stream/end` | none | End the broadcast now. Everything still in the delay buffer is thrown away and never airs. Nothing is sent until `resume` or a new encoder stream. Returns the state. |
+| `POST /api/v1/stream/resume` | none | Broadcast again after `end`, from content received from now on, with the current delay. Returns the state. |
+
+With the rolling buffer off (`delay.keep_buffer: false` in the settings), a delay
+increase always uses `mask`, whatever mode is requested.
 
 Commands return an acknowledgement:
 
@@ -62,11 +67,13 @@ Commands return an acknowledgement:
   },
   "ingest": { "listen": "127.0.0.1:1935", "connected": true, "peer": "127.0.0.1:53546", "app": "live", "last_error": null },
   "egress": { "status": "live", "destination": "rtmp://live.twitch.tv/app", "last_error": null,
-              "bitrate_kbps": 6150, "backlog_bytes": 0, "reconnects": 0 }
+              "bitrate_kbps": 6150, "backlog_bytes": 0, "reconnects": 0 },
+  "ended": false
 }
 ```
 
-`phase` is one of the following:
+`ended` (top level) is `true` after `POST /api/v1/stream/end` until the broadcast
+resumes. `phase` is one of the following:
 
 | Phase | Meaning |
 |---|---|
@@ -101,6 +108,12 @@ Commands return an acknowledgement:
 | `POST /api/v1/obs/connect` | `{"host": "127.0.0.1", "port": 4455, "password": "..."}` | Test and save the obs-websocket connection. |
 | `POST /api/v1/obs/configure` | `{"import_key": true, "add_overlay": true}` | Back up OBS's stream settings, point OBS at stream-delay, and optionally import the Twitch key and add the overlay. |
 | `POST /api/v1/obs/restore` | none | Put OBS's original stream settings back. |
+
+## Health check
+
+`GET /healthz` needs no token and returns `{"status": "ok", "app": "stream-delay", "version": "0.1.0"}`.
+The desktop app uses it to tell when another copy of stream-delay already holds its
+ports.
 
 ## Diagnostics
 

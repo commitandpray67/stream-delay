@@ -200,6 +200,32 @@ impl Core {
                 };
                 self.publish_state();
             }
+            Control::EndStream(reply) => {
+                // Drop the buffer first so nothing buffered can be sent, then close
+                // the destination connection, which ends the broadcast.
+                self.engine.discard();
+                if self.egress_running {
+                    self.egress_running = false;
+                    let _ = self.egress_ctl.send(EgressCtl::Stop);
+                }
+                self.state.ended = true;
+                info!("stream ended by the streamer; buffered content discarded");
+                let _ = reply.send(());
+                self.publish_state();
+            }
+            Control::SetKeepHistory(keep) => {
+                info!(keep, "rolling buffer setting changed");
+                self.engine.set_keep_history(keep);
+                self.publish_state();
+            }
+            Control::Resume(reply) => {
+                if self.state.ended {
+                    self.state.ended = false;
+                    info!("resuming the broadcast");
+                }
+                let _ = reply.send(());
+                self.publish_state();
+            }
             Control::Shutdown(_) => unreachable!("handled by the caller"),
         }
     }
@@ -225,6 +251,12 @@ impl Core {
                     self.state.ingest.peer = Some(peer.to_string());
                     self.state.ingest.app = Some(app);
                     self.state.ingest.last_error = None;
+                    // Starting a new stream in the encoder is the natural way to
+                    // go live again after "end stream".
+                    if self.state.ended {
+                        self.state.ended = false;
+                        info!("new encoder stream; broadcasting again");
+                    }
                 } else if let Err(e) = &result {
                     self.state.ingest.last_error = Some(e.clone());
                 }
@@ -345,7 +377,7 @@ impl Core {
             return;
         };
         if !self.egress_running {
-            if self.engine.output_wanted(now) {
+            if !self.state.ended && self.engine.output_wanted(now) {
                 let Some(target) = self.target(&dest) else {
                     return;
                 };
@@ -365,7 +397,9 @@ impl Core {
             info!("encoder gone and buffer drained; ending the broadcast");
             self.egress_running = false;
             let _ = self.egress_ctl.send(EgressCtl::Stop);
-            self.engine.output_reset();
+            // What is left belongs to the finished stream; don't keep it around
+            // for a later stream to rewind into.
+            self.engine.discard();
             self.ingest_ended = None;
         }
     }
@@ -402,8 +436,9 @@ impl Core {
         let now = self.now();
         self.state.delay = self.engine.snapshot(now);
         let written = self.counters.written.load(Ordering::Relaxed);
+        // Same 2 s window as the ingest bitrate, so the two can be compared.
         let elapsed = self.last_rate_at.elapsed().as_secs_f64();
-        if elapsed >= 1.0 {
+        if elapsed >= 2.0 {
             let bits = written.saturating_sub(self.last_written_total) as f64 * 8.0;
             self.state.egress.bitrate_kbps = (bits / 1000.0 / elapsed) as u64;
             self.last_written_total = written;

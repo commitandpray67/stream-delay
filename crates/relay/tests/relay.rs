@@ -275,3 +275,69 @@ async fn connections_that_never_publish_are_closed() {
     p.stop().await;
     relay.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_stream_discards_the_buffer_and_resume_starts_fresh() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(6)).await;
+
+    // About 3 s of captured frames are still in the buffer when the stream ends.
+    let ended_at = Instant::now();
+    let last_captured = p.frame;
+    relay.end_stream().await.unwrap();
+    assert!(relay.state().ended);
+    p.stream_for(Duration::from_secs(3)).await;
+    {
+        let l = log.lock().unwrap();
+        assert_eq!(l.unpublished, 1, "the broadcast must end");
+        assert_eq!(l.connections, 1, "nothing may reconnect while ended");
+        // Nothing reached the destination after the end, apart from what was
+        // already on its way.
+        let late: Vec<u32> = video_frames(&l)
+            .iter()
+            .filter(|(at, _, _)| *at > ended_at + Duration::from_millis(300))
+            .map(|f| f.1)
+            .collect();
+        assert!(late.is_empty(), "frames aired after ending: {late:?}");
+    }
+
+    relay.resume().await.unwrap();
+    assert!(!relay.state().ended);
+    p.stream_for(Duration::from_secs(6)).await;
+    let (connections, second) = {
+        let l = log.lock().unwrap();
+        let second: Vec<_> = l
+            .media
+            .iter()
+            .filter(|m| m.conn == 1)
+            .filter_map(|m| frame_of(&m.payload).map(|f| (m.at, f)))
+            .collect();
+        (l.connections, second)
+    };
+    assert_eq!(connections, 2, "resume starts a new broadcast");
+    assert!(!second.is_empty(), "nothing aired after resuming");
+    // Only content captured after the end airs, still with the delay.
+    for (at, id) in &second {
+        assert!(*id >= last_captured, "frame {id} from before the end aired");
+        let age = at.saturating_duration_since(p.captured_at(*id));
+        assert!(
+            age >= Duration::from_millis(3_000),
+            "frame {id} aired after {age:?}"
+        );
+    }
+    assert_eq!(
+        second[0].1 % 30,
+        0,
+        "the new broadcast must start on a keyframe"
+    );
+    p.stop().await;
+    relay.shutdown().await;
+}

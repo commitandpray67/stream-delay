@@ -26,10 +26,17 @@ The first public beta. Everything below is new.
 ### Delay
 
 - Change the delay while live. **Rewind** jumps back instantly; **Mask** covers
-  the change with an on-stream slate; **go live now**; **go live after it airs**;
+  the change with an on-stream slate; **go live now**; **air up to now, then go
+  live**;
   lowering the delay skips forward. Every change lands on a keyframe with
   continuous timestamps, including B-frame streams and open-GOP HEVC.
 - Guarantee: once a delay is in effect, nothing airs sooner than that delay allows.
+- **End stream**: ends the broadcast at once without airing what is in the delay
+  buffer; **Resume** (or restarting the stream in OBS) starts a new broadcast.
+- Optional rolling buffer (Setup): turn it off to keep only what the current
+  delay needs; delay is then always added behind the Mask slate.
+- A new stream never rewinds into the previous one, and the buffer is released
+  when a broadcast ends.
 - Presets, a start delay, a maximum delay (120 s by default) and a memory cap.
 - Health warnings for long keyframe intervals, a slow uplink, Enhanced Broadcasting
   (multitrack) and not enough buffered history.
@@ -55,7 +62,8 @@ The first public beta. Everything below is new.
 - Stream keys and passwords are stored in the OS keychain (in memory only with
   `--ephemeral`). A key typed into the destination URL is stored the same way,
   and changing the destination to another server forgets the saved key.
-- Moves to another port automatically if 1935 or 7788 is taken.
+- Moves to another port automatically if 1935 or 7788 is taken by another
+  program, and says so if another copy of stream-delay is already running.
 
 ### Support and hardening
 
