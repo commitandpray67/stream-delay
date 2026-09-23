@@ -55,6 +55,8 @@ The first public beta. Everything below is new.
 
 - **Download diagnostics** (dashboard → Advanced, or `streamdelayd diagnostics`):
   version, settings, state and recent logs, with keys, passwords and tokens removed.
+- Memory stays flat on long streams: buffered media is stored in shared 1 MiB
+  blocks rather than one allocation per message, which fragmented the heap.
 - Limits on memory use for untrusted RTMP input; fuzzing of the RTMP, AMF0 and
   FLV parsers and the engine; chaos tests (destination resets and stalls, encoder
   crashes); a soak test that watches memory over hours.

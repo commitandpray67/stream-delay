@@ -21,6 +21,14 @@ pub const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 /// Up-front allocation for a new message; larger messages grow as data arrives, so a
 /// header alone cannot make us allocate its declared length.
 const MAX_RESERVE: usize = 256 * 1024;
+/// Complete messages up to `ARENA_MAX_MESSAGE` bytes are copied into shared blocks
+/// of `ARENA_BLOCK` bytes. A delay buffer keeps messages for minutes; with one
+/// allocation per message (a few hundred bytes to hundreds of KB, freed on another
+/// thread) the heap fragmented until the process used 3–4 times the buffered data
+/// in soak tests, with glibc and mimalloc alike. Equal blocks freed in arrival
+/// order are reused cleanly.
+const ARENA_BLOCK: usize = 1024 * 1024;
+const ARENA_MAX_MESSAGE: usize = ARENA_BLOCK / 2;
 const EXTENDED: u32 = 0x00FF_FFFF;
 
 /// A complete RTMP message.
@@ -55,6 +63,8 @@ struct StreamState {
     stream_id: u32,
     extended: bool,
     ext_value: u32,
+    /// The message being received. Reused for the next message once its bytes have
+    /// been copied out.
     partial: BytesMut,
     in_progress: bool,
     has_header: bool,
@@ -67,6 +77,8 @@ pub struct ChunkDecoder {
     buf: BytesMut,
     /// Sum of `partial.len()` over all streams.
     pending: usize,
+    /// Unused rest of the current block that complete messages are copied into.
+    arena: BytesMut,
 }
 
 impl Default for ChunkDecoder {
@@ -82,6 +94,7 @@ impl ChunkDecoder {
             streams: HashMap::new(),
             buf: BytesMut::new(),
             pending: 0,
+            arena: BytesMut::new(),
         }
     }
 
@@ -261,7 +274,16 @@ impl ChunkDecoder {
         if st.partial.len() >= st.length as usize {
             st.in_progress = false;
             self.pending -= st.partial.len();
-            let payload = st.partial.split().freeze();
+            let payload = if st.partial.len() <= ARENA_MAX_MESSAGE {
+                if self.arena.capacity() < st.partial.len() {
+                    self.arena = BytesMut::with_capacity(ARENA_BLOCK);
+                }
+                self.arena.extend_from_slice(&st.partial);
+                st.partial.clear();
+                self.arena.split().freeze()
+            } else {
+                st.partial.split().freeze()
+            };
             return Ok(ChunkResult::Complete(Message {
                 csid,
                 timestamp: st.timestamp,
@@ -508,6 +530,70 @@ mod tests {
             }
         }
         assert_eq!(result, Err(ChunkError::TooManyStreams));
+    }
+
+    fn decode_4k(out: &BytesMut) -> Vec<Message> {
+        let mut dec = ChunkDecoder::new();
+        dec.set_chunk_size(4096).unwrap();
+        dec.push(out);
+        decode_all(&mut dec)
+    }
+
+    #[test]
+    fn small_messages_share_a_block() {
+        let mut enc = ChunkEncoder::new();
+        enc.set_chunk_size(4096);
+        let mut out = BytesMut::new();
+        for i in 0..6u8 {
+            let csid = if i % 2 == 0 { 6 } else { 4 };
+            enc.write(
+                &mut out,
+                csid,
+                u32::from(i),
+                9,
+                1,
+                &vec![i; 1000 + usize::from(i)],
+            );
+        }
+        let msgs = decode_4k(&out);
+        assert_eq!(msgs.len(), 6);
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(&m.payload[..], &vec![i as u8; 1000 + i][..]);
+        }
+        // Consecutive messages sit next to each other in one allocation.
+        for w in msgs.windows(2) {
+            let end = w[0].payload.as_ptr() as usize + w[0].payload.len();
+            assert_eq!(end, w[1].payload.as_ptr() as usize);
+        }
+    }
+
+    #[test]
+    fn large_messages_and_full_blocks_stay_intact() {
+        let mut enc = ChunkEncoder::new();
+        enc.set_chunk_size(4096);
+        let mut out = BytesMut::new();
+        // Enough to fill several blocks, with some messages too large for them.
+        let sizes: Vec<usize> = (0..40)
+            .map(|i| {
+                if i % 7 == 0 {
+                    ARENA_MAX_MESSAGE + 1 + i
+                } else {
+                    90_000 + i * 97
+                }
+            })
+            .collect();
+        for (i, n) in sizes.iter().enumerate() {
+            enc.write(&mut out, 6, i as u32, 9, 1, &vec![i as u8; *n]);
+        }
+        let msgs = decode_4k(&out);
+        assert_eq!(msgs.len(), sizes.len());
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(m.payload.len(), sizes[i]);
+            assert!(
+                m.payload.iter().all(|b| *b == i as u8),
+                "message {i} corrupted"
+            );
+        }
     }
 
     #[test]
