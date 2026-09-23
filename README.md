@@ -1,10 +1,10 @@
 # stream-delay
 
-**Change your stream delay while you're live, without restarting OBS.** Free, open source (GPL-3.0), and built for Windows, macOS and Linux.
+**Change your stream delay while you're live, without restarting OBS.** Free and open source (GPL-3.0), for Windows, macOS and Linux.
 
-> **Status: beta candidate (milestones M0–M5 of [`docs/PLAN.md`](docs/PLAN.md)).** Everything is built and tested automatically, including end to end with ffmpeg, under network faults, and in hours-long soak runs. It has not yet been battle-tested on real Twitch streams, so test with `?bandwidthtest=true` before relying on it, and please share results ([`docs/testing.md`](docs/testing.md)).
+**[Download](https://github.com/commitandpray67/stream-delay/releases/latest)** · **[User guide](https://commitandpray67.github.io/stream-delay/)** · [Quick start](https://commitandpray67.github.io/stream-delay/quick-start.html) · [Changelog](CHANGELOG.md) · [API](docs/API.md)
 
-**[User guide](https://commitandpray67.github.io/stream-delay/)** (source in [`docs/book`](docs/book/src/SUMMARY.md)) · [Changelog](CHANGELOG.md) · [API](docs/API.md)
+> **Beta.** Every change is tested automatically, end to end with ffmpeg, under network faults and in long soak runs, but stream-delay has seen little use on real Twitch streams so far. Try it with a private test stream first (add `?bandwidthtest=true` to your Twitch stream key), and please [tell us how it went](docs/testing.md).
 
 ## What it does
 
@@ -14,55 +14,78 @@ OBS locks its stream delay when you go live, and Twitch's delay can't be changed
 OBS  →  rtmp://127.0.0.1:1935/live  →  stream-delay  →  Twitch
 ```
 
-- **Add delay instantly** when you need protection from stream snipers. Viewers briefly see the last few seconds again, and nothing new leaks.
-- **Mask mode:** an on-stream slate covers the switch, so no gameplay is shown twice.
-- **Go live** instantly, or **after what's already buffered has aired**, so chat can catch up with you.
-- **No transcoding.** Video and audio pass through byte for byte, with almost no CPU use.
-- **Controls:** an OBS dock, a browser-source overlay (badge and slate), global hotkeys, a local HTTP/WebSocket API, and later a Stream Deck plugin.
-- **Private by design:** no accounts, no telemetry, no servers of our own. Your stream key stays in your OS keychain.
+- **Add delay instantly** when a stream sniper shows up. Viewers briefly see the last few seconds again, and nothing new leaks.
+- **Mask mode:** an on-stream slate covers the change, so no gameplay is shown twice.
+- **Go live** at once, or **after what's buffered has aired**, so chat can catch up.
+- **Starts and ends like streaming straight to Twitch.** Stop streaming in OBS and the delayed rest airs, then the broadcast ends. If OBS crashes or loses its connection, stream-delay keeps the broadcast open for 30 s so OBS can pick up where it left off. **End stream** cuts it off at once without airing the buffer.
+- **Rides out network trouble.** If the connection to Twitch drops, stream-delay reconnects at once and continues from its buffer, so viewers miss nothing.
+- **No re-encoding.** Video and audio pass through byte for byte, with almost no CPU use.
+- **Control it your way:** an OBS dock, a browser-source overlay (delay badge and slate), global hotkeys, a tray menu, the command line, and an HTTP/WebSocket API for Stream Deck, Streamer.bot and scripts.
+- **Private:** no accounts, no telemetry, no servers of our own. Your stream key stays in your OS keychain.
 
-## How it works (short version)
+It works with any encoder that can stream RTMP (OBS, Streamlabs, vMix, hardware encoders).
 
-Everything OBS sends goes into a rolling buffer, indexed by keyframe. The output to Twitch reads from a cursor into that buffer. Changing the delay moves the cursor to a keyframe and rewrites timestamps so they keep increasing, which means the connection to Twitch never drops. See [How delay changes work](docs/PLAN.md#how-delay-changes-work-the-core-idea).
+## Get started
 
-## Try it
+1. **Install** the desktop app from the [latest release](https://github.com/commitandpray67/stream-delay/releases/latest): the `.exe` or `.msi` on Windows, the `.dmg` on macOS, or the AppImage, `.deb` or `.rpm` on Linux. The installers aren't code-signed yet, so Windows and macOS warn on first launch; [Installing](https://commitandpray67.github.io/stream-delay/install.html) shows how to get past that.
+2. **Add your stream key** on the dashboard's **Setup** tab, which opens on first launch.
+3. **Point OBS at stream-delay.** The Setup tab can do it for you through obs-websocket (and import the key OBS already has). Or, in OBS, go to **Settings → Stream → Custom…**, set the server to `rtmp://127.0.0.1:1935/live`, and use any stream key.
+4. **Add the dock and overlay** to OBS with the links on the Setup tab, and set OBS's keyframe interval to 2 s.
+5. **Start streaming** as usual, and change the delay from the dock, the tray or a hotkey.
 
-Build from source (Rust stable, Node 20+ with pnpm):
+The [quick start](https://commitandpray67.github.io/stream-delay/quick-start.html) walks through each step.
+
+> v0.1.0 has Windows and Linux installers and the Docker image. The macOS app and the standalone `streamdelayd` downloads come with the next release; until then, build them [from source](#build-from-source).
+
+## Servers, Docker and second PCs
+
+`streamdelayd` is the same relay without the desktop window. The dashboard, dock and overlay work the same.
 
 ```sh
-pnpm -C ui install && pnpm -C ui build   # web UI, embedded into the binary
+streamdelayd run                  # prints the OBS server address and the dashboard, dock and overlay links
+streamdelayd delay 30             # control a running instance
+streamdelayd live --after-air
+streamdelayd end
+```
+
+With Docker:
+
+```sh
+docker run -d --name stream-delay --restart unless-stopped \
+  -p 1935:1935 -p 127.0.0.1:7788:7788 -v stream-delay:/data \
+  -e STREAMDELAY_INGEST_KEY=choose-a-secret \
+  ghcr.io/commitandpray67/stream-delay
+```
+
+To run stream-delay on another computer than OBS, see [Installing: headless and two-PC setups](https://commitandpray67.github.io/stream-delay/install.html#headless-servers-second-pc-advanced-users).
+
+## How it works
+
+Everything OBS sends goes into a rolling buffer, indexed by keyframe. The output to Twitch reads from a cursor into that buffer. Changing the delay moves the cursor to a keyframe and rewrites timestamps so they keep increasing, so the connection to Twitch never drops. See [How delay changes work](docs/PLAN.md#how-delay-changes-work-the-core-idea) and [the design notes](https://commitandpray67.github.io/stream-delay/design.html).
+
+## Build from source
+
+You need Rust (stable) and Node.js 22 with pnpm.
+
+```sh
+pnpm -C ui install && pnpm -C ui build   # the web UI, embedded into the binary
 cargo run --release -p streamdelayd -- run
 ```
 
-`streamdelayd run` prints the OBS server address and links for the dashboard, OBS dock and overlay:
-
-1. Open the **dashboard** link. Under **Setup**, choose Twitch and paste your stream key (add `?bandwidthtest=true` to test privately).
-2. In OBS: **Settings → Stream → Custom…**, Server `rtmp://127.0.0.1:1935/live`, any stream key. Or let the Setup page configure OBS for you through obs-websocket.
-3. Add the **dock** URL under **Docks → Custom Browser Docks** and the **overlay** URL as a Browser source.
-4. Start streaming, then change the delay from the dock, the dashboard, hotkeys or the CLI (`streamdelayd delay 30`, `streamdelayd live --after-air`).
-
-**Desktop app:** [`apps/desktop`](apps/desktop) wraps the same core in a tray app with global hotkeys, autostart and installers for Windows, macOS and Linux.
-
-**Server or second PC:** run the container (`docker run -p 1935:1935 -p 127.0.0.1:7788:7788 -e STREAMDELAY_INGEST_KEY=… ghcr.io/commitandpray67/stream-delay`) or `streamdelayd run --ingest 0.0.0.0:1935 --ingest-key … --allow-lan`.
-
-The HTTP/WebSocket API (for Stream Deck, Streamer.bot, scripts) is documented in [`docs/API.md`](docs/API.md).
+The desktop app is in [`apps/desktop`](apps/desktop), which explains how to build it. [CONTRIBUTING.md](CONTRIBUTING.md) covers tests, fuzzing and the code layout.
 
 ## Roadmap
 
-1. **M0:** foundations and CI.
-2. **M1:** transparent RTMP/RTMPS relay.
-3. **M2:** delay engine.
-4. **M3:** dock, overlay and API.
-5. **M4:** desktop app and installers.
-6. **M5:** hardening, diagnostics and the user guide. Next: public beta, then **v1.0**.
-7. **Later:** Stream Deck, per-destination multistream delay, long disk-backed delays, and scene-based automation.
+- **Done:** the RTMP/RTMPS relay, the delay engine, dock, overlay and API, the desktop app and installers, and hardening. v0.1.0 is the first public beta.
+- **Next:** testing on real streams, signed installers for Windows and macOS, then **v1.0**.
+- **Later:** a Stream Deck plugin, per-destination delay for multistreaming, long disk-backed delays, and scene-based automation.
 
 Details are in [`docs/PLAN.md`](docs/PLAN.md#roadmap-rough-effort-for-one-experienced-developer).
 
-## Contributing
+## Contributing and security
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Design decisions are recorded in [`docs/adr/`](docs/adr/).
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Design decisions are recorded in [`docs/adr/`](docs/adr/). Please report security problems privately, as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-[GPL-3.0-or-later](LICENSE). stream-delay is not affiliated with InstantDelay, Twitch or OBS Project.
+[GPL-3.0-or-later](LICENSE). stream-delay is not affiliated with Twitch or the OBS Project.
