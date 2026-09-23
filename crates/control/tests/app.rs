@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use streamdelay_config::{Config, MemorySecrets, SecretStore, secret};
+use streamdelay_config::{Config, MemorySecrets, ObsBackup, SecretStore, secret};
 use streamdelay_control::{App, AppOptions, Overrides};
 
 fn overrides(ingest: &str) -> Overrides {
@@ -107,5 +107,43 @@ async fn key_in_saved_destination_url_moves_to_the_secret_store() {
     assert!(!app.needs_setup());
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains(KEY), "key still in config.toml");
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn saved_obs_settings_move_out_of_the_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut c = Config::default();
+    c.api.token = "0123456789abcdef".into();
+    c.obs.backup = Some(ObsBackup {
+        service_type: "rtmp_custom".into(),
+        obs: None,
+        settings_json: Some(
+            r#"{"server":"rtmp://ingest.example.net/live","use_auth":true,"password":"hunter2-secret"}"#
+                .into(),
+        ),
+    });
+    c.save(&path).unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    secrets
+        .set(secret::OBS_BACKUP_KEY, "custom-key-5150")
+        .unwrap();
+    let app = App::start(AppOptions {
+        config_path: Some(path.clone()),
+        secrets: secrets.clone(),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("hunter2-secret"),
+        "password still in config.toml"
+    );
+    assert!(text.contains("rtmp_custom"), "the backup must be kept");
+    let saved = secrets.get(secret::OBS_BACKUP).unwrap();
+    assert!(saved.contains("hunter2-secret") && saved.contains("custom-key-5150"));
+    assert_eq!(secrets.get(secret::OBS_BACKUP_KEY), None);
     app.shutdown().await;
 }

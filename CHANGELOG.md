@@ -21,6 +21,14 @@ All notable changes to stream-delay are listed here. The format follows
   settings file with the older change.
 - Links (dashboard, dock, overlay, OBS server) were broken when stream-delay
   listened on an IPv6 address.
+- **End stream was undone when OBS reconnected by itself.** After a dropped
+  connection OBS reconnects automatically, which resumed the broadcast. Now only
+  stopping and starting the stream in OBS (or **Resume broadcasting**) does.
+- `POST /api/v1/live` sent without a `Content-Type` header went live at once even
+  when the body asked to air the buffer first. The body is now always read, and
+  an invalid one is refused.
+- *Allow control from other devices* took partial effect as soon as it was saved;
+  like the listening address, it now applies at the next start.
 
 ### Security
 
@@ -28,6 +36,20 @@ All notable changes to stream-delay are listed here. The format follows
   constant time, so a network-reachable ingest key can't be guessed quickly.
 - The dashboard removes its access token from the address bar once it has
   remembered it, so it doesn't show on stream or in screenshots.
+- The backup of OBS's stream settings is kept in the keychain instead of the
+  settings file: for a custom server it could include the server's password,
+  which also showed in the settings API and diagnostics. Existing backups are
+  moved at startup.
+- The saved OBS WebSocket password is only sent to the OBS it was saved for, and
+  OBS's original settings (with the stream key) are only restored to the OBS
+  they came from. Before, connecting to another address sent it the saved
+  password, and restoring would hand it the stream key.
+- Importing the Twitch key from OBS checks that the destination really is
+  Twitch, not just that its address mentions `twitch.tv`.
+- Dock and overlay links no longer see the encoder's network address.
+- *Download diagnostics* uses a single-use link, so the dashboard's access token
+  no longer ends up in the browser's download history.
+- The events WebSocket accepts messages of at most 64 KiB.
 - Web pages can no longer be framed by other sites, and responses send
   `nosniff` and `Referrer-Policy: no-referrer`.
 - Release builds: the update signing key and Apple credentials are only

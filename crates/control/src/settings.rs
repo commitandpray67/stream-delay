@@ -51,6 +51,10 @@ pub(crate) fn public_config(st: &AppState) -> PublicConfig {
     config.ingest.key = None;
     // Keys are moved out of the URL when it is saved; never show one regardless.
     config.destination.url = split_url_key(&config.destination.url).0;
+    // Only there until moved to the secret store; may hold a server password.
+    if let Some(backup) = &mut config.obs.backup {
+        backup.settings_json = None;
+    }
     let key_set = st.key_override(&config.destination.url).is_some()
         || st
             .shared

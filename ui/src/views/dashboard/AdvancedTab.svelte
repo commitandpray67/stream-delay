@@ -1,6 +1,6 @@
 <script lang="ts">
   import CopyField from "../../components/CopyField.svelte";
-  import { getToken, updateConfig } from "../../lib/api";
+  import { diagnosticsLink, updateConfig } from "../../lib/api";
   import { adminConfig } from "../../lib/live.svelte";
   import type { HotkeyConfig } from "../../lib/types";
 
@@ -9,6 +9,7 @@
   let allowLan = $state(false);
   let message = $state("");
   let error = $state("");
+  let diagnosticsError = $state("");
 
   $effect(() => {
     const c = pc?.config;
@@ -17,6 +18,22 @@
       allowLan = c.api.allow_lan;
     }
   });
+
+  /** Downloads through a single-use link, so the token never ends up in a URL. */
+  async function downloadDiagnostics() {
+    diagnosticsError = "";
+    try {
+      const { url } = await diagnosticsLink();
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "";
+      document.body.append(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      diagnosticsError = (err as Error).message;
+    }
+  }
 
   async function save(e: Event) {
     e.preventDefault();
@@ -70,9 +87,8 @@
         state and recent log lines. Stream keys, passwords and the API token are removed.
       </p>
       <div class="row">
-        <a class="button" href={`/api/v1/diagnostics?token=${encodeURIComponent(getToken())}`} download>
-          Download diagnostics
-        </a>
+        <button type="button" onclick={downloadDiagnostics}>Download diagnostics</button>
+        {#if diagnosticsError}<span class="error" role="alert">{diagnosticsError}</span>{/if}
       </div>
     </section>
 

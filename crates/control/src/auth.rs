@@ -104,13 +104,7 @@ pub(crate) fn check_origin(
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let allow_lan = state
-        .shared
-        .config
-        .read()
-        .map(|c| c.api.allow_lan)
-        .unwrap_or(false);
-    if !allow_lan && !is_loopback_host(host, state.shared.port) {
+    if !state.shared.allow_lan && !is_loopback_host(host, state.shared.port) {
         return Err((StatusCode::MISDIRECTED_REQUEST, "unexpected Host header"));
     }
     if let Some(origin) = headers.get(header::ORIGIN) {

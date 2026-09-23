@@ -19,13 +19,16 @@ This uses obs-websocket, which is built into OBS 28 and newer.
    - **Add the overlay to my current scene:** adds a browser source for the delay
      badge and the Mask slate.
 4. Click **Set up OBS automatically**. stream-delay saves a backup of OBS's stream
-   settings and points OBS at itself.
+   settings (in your OS keychain, as they include the stream key) and points OBS
+   at itself.
 
 OBS must not be streaming while you do this; stream-delay refuses rather than
 interrupt a live stream.
 
 **Undo:** **Restore my original OBS settings** puts back exactly what OBS had
-before, including the Twitch service and key.
+before, including the Twitch service and key. It only restores to the OBS the
+backup came from: if you have since connected stream-delay to another OBS,
+connect it back first.
 
 ## By hand
 

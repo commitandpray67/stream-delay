@@ -5,7 +5,9 @@ it is built to be safe by default:
 
 - **Your stream key** is stored in the OS keychain (Credential Manager, Keychain,
   or Secret Service), or in a file only your user can read if there is no keychain.
-  The API never returns it, and it is removed from logs and diagnostics.
+  The API never returns it, and it is removed from logs and diagnostics. The
+  backup of OBS's stream settings made by the OBS setup, which holds the key and
+  any server password, is stored the same way.
 - **The control API and web pages listen on `127.0.0.1` only**, unless you enable
   LAN access.
 - **Every API call needs a random token** created on first run. Only the
@@ -14,7 +16,9 @@ it is built to be safe by default:
   dock or overlay link cannot reveal or redirect your stream key. Still, don't
   show them on stream.
 - **Your stream key only goes where you set it:** if you change the
-  destination to a different server, the saved key is forgotten.
+  destination to a different server, the saved key is forgotten. Likewise the
+  saved OBS WebSocket password is only ever sent to the OBS it was entered for,
+  and OBS's original settings are only restored to the OBS they came from.
 - **Web pages you visit can't control your stream:** requests must name this
   computer in the `Host` header (which blocks DNS rebinding) and cross-origin
   browser requests are refused.

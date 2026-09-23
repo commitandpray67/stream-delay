@@ -46,6 +46,11 @@ pub(crate) struct Shared {
     pub secrets: Arc<dyn SecretStore>,
     /// Accepted API tokens, derived from `config.api.token` at startup.
     pub tokens: auth::Tokens,
+    /// Requests may name any host (LAN access). Like the listening address, this
+    /// changes at the next start, not when the setting is saved.
+    pub allow_lan: bool,
+    /// Single-use codes for downloading diagnostics; see [`diagnostics`].
+    pub download_codes: diagnostics::Codes,
     /// Destination key given on the command line or environment (not persisted).
     pub key_override: Option<String>,
     /// The destination URL `key_override` was given for; see [`AppState::key_override`].
@@ -124,6 +129,8 @@ pub(crate) fn state(
         shared: Arc::new(Shared {
             relay,
             tokens: auth::Tokens::new(&config.api.token),
+            allow_lan: config.api.allow_lan,
+            download_codes: Default::default(),
             config: RwLock::new(config),
             config_path,
             save_lock: Mutex::new(()),

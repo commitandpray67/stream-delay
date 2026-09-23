@@ -283,6 +283,49 @@ async fn connections_that_never_publish_are_closed() {
     relay.shutdown().await;
 }
 
+/// Waits until the relay sees no encoder.
+async fn until_encoder_gone(relay: &streamdelay_relay::RelayHandle) {
+    for _ in 0..100 {
+        if !relay.state().ingest.connected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the encoder connection was not noticed closing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_encoder_reconnecting_by_itself_does_not_undo_end_stream() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(1)).await;
+    relay.end_stream().await.unwrap();
+
+    // The connection drops and OBS reconnects on its own: still ended.
+    p.crash();
+    until_encoder_gone(&relay).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    assert!(relay.state().ended, "a reconnect resumed the broadcast");
+    assert_eq!(log.lock().unwrap().connections, 1);
+
+    // Stopping and starting the stream in OBS is a deliberate new stream.
+    p.stop().await;
+    until_encoder_gone(&relay).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    assert!(!relay.state().ended, "a new stream from OBS must broadcast");
+    p.stream_for(Duration::from_secs(2)).await;
+    assert_eq!(log.lock().unwrap().connections, 2);
+    p.stop().await;
+    relay.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn end_stream_discards_the_buffer_and_resume_starts_fresh() {
     let (sink, log, _kill) = start_sink().await;

@@ -69,7 +69,8 @@ takes two clicks (the second within 3 seconds); it is also in the tray menu, the
 API and the command line, and can have a hotkey (none by default).
 
 OBS can keep streaming to stream-delay; nothing goes out until you press
-**Resume broadcasting** or stop and start streaming in OBS. Resuming starts a new
+**Resume broadcasting** or stop and start streaming in OBS. If OBS loses its
+connection and reconnects by itself, the stream stays ended. Resuming starts a new
 broadcast from what OBS sends from then on, with your current delay.
 
 ## Without the rolling buffer

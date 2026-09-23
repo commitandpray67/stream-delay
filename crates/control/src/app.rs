@@ -119,6 +119,11 @@ impl App {
                 Err(e) => warn!("could not move the stream key out of the destination URL: {e}"),
             }
         }
+        if crate::obs_routes::migrate_backup(&mut config, opts.secrets.as_ref())
+            && let Some(p) = &opts.config_path
+        {
+            config.save(p)?;
+        }
         // As saved, without this run's overrides.
         let saved = config.clone();
 
@@ -219,6 +224,8 @@ impl App {
             shared: Arc::new(Shared {
                 relay,
                 tokens: Tokens::new(&config.api.token),
+                allow_lan: config.api.allow_lan,
+                download_codes: Default::default(),
                 config: RwLock::new(config),
                 config_path: opts.config_path,
                 save_lock: std::sync::Mutex::new(()),
@@ -357,6 +364,11 @@ pub(crate) fn different_server(old: &str, new: &str) -> bool {
         })
     };
     a != b && (service(&a).is_none() || service(&a) != service(&b))
+}
+
+/// True when `url` is a valid address on the same server or service as `known`.
+pub(crate) fn same_server(known: &str, url: &str) -> bool {
+    RtmpUrl::parse(url).is_ok() && !different_server(known, url)
 }
 
 pub(crate) fn engine_config(c: &Config) -> EngineConfig {

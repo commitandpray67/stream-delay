@@ -47,6 +47,9 @@ pub(crate) enum Event {
         conn: u64,
         /// Why the connection ended, if it failed.
         error: Option<String>,
+        /// The encoder stopped on purpose (it unpublished), rather than losing or
+        /// dropping the connection.
+        unpublished: bool,
     },
     EgressConnected {
         reply: oneshot::Sender<u64>,
@@ -73,6 +76,9 @@ struct Core {
     /// Key and connect properties of the most recent publisher (for passthrough).
     last_publisher: Option<(String, Vec<(String, Amf0Value)>)>,
     ingest_ended: Option<Instant>,
+    /// The last encoder session ended with the encoder stopping on purpose (or
+    /// there was none), so the next one is a deliberate new stream.
+    encoder_stopped: bool,
     egress_ctl: mpsc::UnboundedSender<EgressCtl>,
     media_tx: mpsc::UnboundedSender<(u64, OutMsg)>,
     counters: Arc<Counters>,
@@ -130,6 +136,7 @@ pub(crate) async fn run(
         publisher: None,
         last_publisher: None,
         ingest_ended: None,
+        encoder_stopped: true,
         egress_ctl,
         media_tx,
         counters,
@@ -261,11 +268,17 @@ impl Core {
                     self.state.ingest.peer = Some(peer.to_string());
                     self.state.ingest.app = Some(app);
                     self.state.ingest.last_error = None;
-                    // Starting a new stream in the encoder is the natural way to
-                    // go live again after "end stream".
+                    // Stopping and starting the stream in the encoder is the
+                    // natural way to go live again after "end stream". An encoder
+                    // reconnecting by itself after its connection dropped (OBS does
+                    // this automatically) is not: that stays ended.
                     if self.state.ended {
-                        self.state.ended = false;
-                        info!("new encoder stream; broadcasting again");
+                        if self.encoder_stopped {
+                            self.state.ended = false;
+                            info!("new encoder stream; broadcasting again");
+                        } else {
+                            info!("encoder reconnected; the stream stays ended until resumed");
+                        }
                     }
                 } else if let Err(e) = &result {
                     self.state.ingest.last_error = Some(e.clone());
@@ -288,7 +301,11 @@ impl Core {
                     self.engine.ingest_metadata(now, payload);
                 }
             }
-            Event::IngestClosed { conn, error } => {
+            Event::IngestClosed {
+                conn,
+                error,
+                unpublished,
+            } => {
                 if let Some(e) = error {
                     // Shown in the dashboard and dock, so a failing encoder
                     // connection is visible without reading logs.
@@ -297,6 +314,7 @@ impl Core {
                 }
                 if self.is_publisher(conn) {
                     self.publisher = None;
+                    self.encoder_stopped = unpublished;
                     self.engine.ingest_end(now);
                     self.ingest_ended = Some(Instant::now());
                     self.state.ingest.connected = false;

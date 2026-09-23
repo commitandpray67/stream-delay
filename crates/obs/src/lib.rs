@@ -116,15 +116,6 @@ impl StreamSettings {
                 .and_then(Value::as_str)
                 .is_some_and(|s| s.trim_end_matches('/') == server.trim_end_matches('/'))
     }
-
-    /// Settings with the key removed, safe to store in the config file.
-    pub fn without_key(&self) -> Value {
-        let mut v = self.settings.clone();
-        if let Some(obj) = v.as_object_mut() {
-            obj.remove("key");
-        }
-        v
-    }
 }
 
 /// Snapshot of OBS for the wizard.
@@ -294,7 +285,6 @@ mod tests {
         };
         assert_eq!(twitch.twitch_key(), Some("live_123"));
         assert_eq!(twitch.server().as_deref(), Some("Twitch (auto)"));
-        assert!(twitch.without_key().get("key").is_none());
 
         let ours = StreamSettings {
             service_type: "rtmp_custom".into(),

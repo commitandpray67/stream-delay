@@ -552,3 +552,79 @@ async fn end_stream_resume_and_buffer_setting() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["app"], "stream-delay");
 }
+
+#[tokio::test]
+async fn go_live_reads_its_body_whatever_the_content_type() {
+    let app = app().await;
+    let live = |body: &'static str| {
+        authed("POST", "/api/v1/live")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    assert_eq!(send(&app, live("")).await.0, StatusCode::OK);
+    // Without a Content-Type header, as some integrations send it.
+    assert_eq!(
+        send(&app, live(r#"{"when":"after-air"}"#)).await.0,
+        StatusCode::OK
+    );
+    // Must never be taken for an empty body, which means "now".
+    let (s, body) = send(&app, live(r#"{"when":"later"}"#)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("invalid"));
+}
+
+#[tokio::test]
+async fn diagnostics_download_links_work_once() {
+    use streamdelay_control::{Scope, scoped_token};
+    let app = app_with_secrets("-diaglink").await;
+    let (s, body) = send(
+        &app,
+        authed("POST", "/api/v1/diagnostics/link")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let url = body["url"].as_str().unwrap().to_string();
+    assert!(!url.contains(TOKEN));
+    // Opened as a plain link: no token.
+    let resp = app
+        .clone()
+        .oneshot(req("GET", &url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment")
+    );
+    let again = req("GET", &url).body(Body::empty()).unwrap();
+    assert_eq!(send(&app, again).await.0, StatusCode::NOT_FOUND);
+    let guess = req("GET", "/diagnostics/0123456789abcdef0123456789abcdef")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, guess).await.0, StatusCode::NOT_FOUND);
+    // Dock links cannot make one.
+    let control = scoped_token(TOKEN, Scope::Control);
+    let r = with_token("POST", "/api/v1/diagnostics/link", &control)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn allowing_lan_access_waits_for_a_restart() {
+    let app = app_with_secrets("-lan").await;
+    let (s, body) = put_config(&app, r#"{"allow_lan":true}"#).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["restart_required"], true);
+    let r = Request::builder()
+        .uri("/api/v1/state")
+        .header(header::HOST, format!("attacker.example:{PORT}"))
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.0, StatusCode::MISDIRECTED_REQUEST);
+}

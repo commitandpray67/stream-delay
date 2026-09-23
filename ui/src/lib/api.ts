@@ -88,6 +88,8 @@ export const setDelay = (seconds: number, mode?: DelayMode) =>
 export const goLive = (when: GoLiveWhen) => api<Ack>("POST", "/api/v1/live", { when });
 export const applyPreset = (index: number) => api<Ack>("POST", `/api/v1/presets/${index}`);
 export const cancel = () => api<Ack>("POST", "/api/v1/cancel");
+/** A single-use link that downloads the diagnostics file without the token. */
+export const diagnosticsLink = () => api<{ url: string }>("POST", "/api/v1/diagnostics/link");
 export const endStream = () => api<RelayState>("POST", "/api/v1/stream/end");
 export const resumeStream = () => api<RelayState>("POST", "/api/v1/stream/resume");
 export const getState = () => api<RelayState>("GET", "/api/v1/state");

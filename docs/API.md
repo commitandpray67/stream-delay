@@ -12,6 +12,8 @@ Every `/api` request needs a token. The install's admin token is generated on fi
 | Dock | `control` | `GET /api/v1/state`, the events WebSocket, and the delay control endpoints below. |
 | Overlay | `read` | `GET /api/v1/state` and the events WebSocket. |
 
+The state seen with dock and overlay tokens leaves out the encoder's address (`ingest.peer` is `null`).
+
 A valid token without enough scope gets `403 Forbidden`; a missing or wrong token gets `401 Unauthorized`. For a Stream Deck or another controller, use the dock link's token. The derived tokens stay the same as long as the admin token does.
 
 Pass the token in one of these ways:
@@ -20,7 +22,7 @@ Pass the token in one of these ways:
 - `X-Stream-Delay-Token: <token>`
 - `?token=<token>` (for browser sources and WebSockets, which cannot set headers)
 
-Requests must also use a loopback `Host` (`127.0.0.1`, `localhost` or `[::1]` with the right port), and browser requests from another origin are refused. Both checks stop malicious web pages from controlling your stream. LAN access can be enabled in settings; the token is still required.
+Requests must also use a loopback `Host` (`127.0.0.1`, `localhost` or `[::1]` with the right port), and browser requests from another origin are refused. Both checks stop malicious web pages from controlling your stream. LAN access can be enabled in settings (it takes effect at the next start); the token is still required.
 
 Run `streamdelayd urls` to print links that already contain their tokens.
 
@@ -29,7 +31,7 @@ Run `streamdelayd urls` to print links that already contain their tokens.
 | Method and path | Body | Effect |
 |---|---|---|
 | `PUT /api/v1/delay` | `{"seconds": 30, "mode": "rewind" \| "mask"}` | Set the delay. `mode` defaults to the configured default. `0` goes live. |
-| `POST /api/v1/live` | `{"when": "now" \| "after-air"}` | Drop the delay at the next keyframe, or after everything buffered so far has aired. |
+| `POST /api/v1/live` | `{"when": "now" \| "after-air"}` | Drop the delay at the next keyframe, or after everything buffered so far has aired. No body means `now`. A body is read as JSON whatever its `Content-Type`, and an invalid one is refused with `400`. |
 | `POST /api/v1/presets/{index}` | none | Apply a configured preset (0-based). |
 | `POST /api/v1/cancel` | none | Cancel a pending change (for example a mask in progress). |
 | `POST /api/v1/stream/end` | none | End the broadcast now. Everything still in the delay buffer is thrown away and never airs. Nothing is sent until `resume` or a new encoder stream. Returns the state. |
@@ -91,6 +93,8 @@ resumes. `phase` is one of the following:
 - `{"type": "config", "config": {...}}` on connect and whenever settings change. With the dashboard token this is the same body as `GET /api/v1/config` (with `"scope": "admin"`). Dock and overlay tokens get only what those pages display: `{"scope": "control" | "read", "config": {"delay": {...}, "overlay": {...}}, "urls": {"obs_server": "..."}, "version": "..."}`.
 - `{"type": "state", "state": {...}}` on connect and whenever the state changes (up to 4 times per second).
 
+The server ignores what clients send, apart from closing the socket; messages over 64 KiB close the connection.
+
 ## Settings
 
 | Method and path | Body | Effect |
@@ -105,9 +109,9 @@ resumes. `phase` is one of the following:
 | Method and path | Body | Effect |
 |---|---|---|
 | `GET /api/v1/obs/status` | none | Whether OBS is reachable, streaming, and already pointed at stream-delay. |
-| `POST /api/v1/obs/connect` | `{"host": "127.0.0.1", "port": 4455, "password": "..."}` | Test and save the obs-websocket connection. |
-| `POST /api/v1/obs/configure` | `{"import_key": true, "add_overlay": true}` | Back up OBS's stream settings, point OBS at stream-delay, and optionally import the Twitch key and add the overlay. |
-| `POST /api/v1/obs/restore` | none | Put OBS's original stream settings back. |
+| `POST /api/v1/obs/connect` | `{"host": "127.0.0.1", "port": 4455, "password": "..."}` | Test and save the obs-websocket connection. An empty password keeps the saved one, but only for the same host and port: the saved password is never sent to another address, and is forgotten once another OBS is connected without one. |
+| `POST /api/v1/obs/configure` | `{"import_key": true, "add_overlay": true}` | Back up OBS's stream settings (to the keychain, as they hold the stream key and any server password), point OBS at stream-delay, and optionally import the Twitch key and add the overlay. |
+| `POST /api/v1/obs/restore` | none | Put OBS's original stream settings back. Only works with the OBS they were read from (`409 Conflict` otherwise). |
 
 ## Health check
 
@@ -120,6 +124,7 @@ ports.
 | Method and path | Body | Effect |
 |---|---|---|
 | `GET /api/v1/diagnostics` | none | A JSON file for bug reports: version, OS, settings, state and the last 2000 log lines. Stream keys (including one in the destination URL), the ingest key, passwords, all API tokens, `live_…` keys, `token=` values and your home directory path are removed. Sent as a download (`Content-Disposition: attachment`). |
+| `POST /api/v1/diagnostics/link` | none | `{"url": "/diagnostics/<code>"}`: a link that downloads the same file once, within a minute, without a token. For browsers, which keep the address of every download. |
 
 The dashboard's **Advanced** tab has a *Download diagnostics* button, and
 `streamdelayd diagnostics -o diagnostics.json` saves the same file from a running

@@ -1,9 +1,9 @@
 //! Configuration for stream-delay.
 //!
 //! Settings live in `config.toml` in the platform config directory. Secrets (stream
-//! key, OBS password, the OBS settings backup's key) never go into that file: they
-//! are stored in the OS keychain, or in a private `secrets.toml` when no keychain is
-//! available (headless Linux, containers).
+//! key, OBS password, the backup of OBS's stream settings) never go into that file:
+//! they are stored in the OS keychain, or in a private `secrets.toml` when no
+//! keychain is available (headless Linux, containers).
 
 mod secrets;
 
@@ -22,6 +22,10 @@ pub use streamdelay_engine::DelayMode;
 pub mod secret {
     pub const DESTINATION_KEY: &str = "destination-key";
     pub const OBS_PASSWORD: &str = "obs-password";
+    /// OBS's stream service settings (JSON) from before stream-delay changed them.
+    pub const OBS_BACKUP: &str = "obs-backup";
+    /// The stream key of a backup made by an older version, which kept the other
+    /// settings in the config file.
     pub const OBS_BACKUP_KEY: &str = "obs-backup-key";
 }
 
@@ -261,12 +265,18 @@ impl Default for ObsConfig {
     }
 }
 
-/// OBS stream service settings, minus the stream key (stored as a secret).
+/// A backup of OBS's stream settings. The settings themselves (server, stream key,
+/// any server password) are kept in the secret store as [`secret::OBS_BACKUP`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObsBackup {
     pub service_type: String,
-    /// JSON object of settings with the `key` field removed.
-    pub settings_json: String,
+    /// The OBS they were read from (`host:port`); they are only put back there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obs: Option<String>,
+    /// Settings as older versions saved them, without the stream key. Moved into
+    /// the secret store at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

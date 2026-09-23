@@ -24,6 +24,10 @@ struct FakeObs {
     settings: Value,
     streaming: bool,
     inputs: Vec<String>,
+    /// Asks clients for a password (any is accepted).
+    auth: bool,
+    /// The authentication each client sent.
+    auth_seen: Vec<Option<String>>,
 }
 
 type Shared = Arc<Mutex<FakeObs>>;
@@ -33,7 +37,10 @@ async fn ws(State(obs): State<Shared>, up: WebSocketUpgrade) -> Response {
 }
 
 async fn serve(obs: Shared, mut socket: WebSocket) {
-    let hello = json!({"op": 0, "d": {"obsWebSocketVersion": "5.5.2", "rpcVersion": 1}});
+    let mut hello = json!({"op": 0, "d": {"obsWebSocketVersion": "5.5.2", "rpcVersion": 1}});
+    if obs.lock().unwrap().auth {
+        hello["d"]["authentication"] = json!({"challenge": "challenge", "salt": "salt"});
+    }
     socket
         .send(Message::Text(hello.to_string().into()))
         .await
@@ -42,7 +49,11 @@ async fn serve(obs: Shared, mut socket: WebSocket) {
         let Message::Text(text) = msg else { continue };
         let v: Value = serde_json::from_str(&text).unwrap();
         let reply = match v["op"].as_u64() {
-            Some(1) => json!({"op": 2, "d": {"negotiatedRpcVersion": 1}}),
+            Some(1) => {
+                let auth = v["d"]["authentication"].as_str().map(String::from);
+                obs.lock().unwrap().auth_seen.push(auth);
+                json!({"op": 2, "d": {"negotiatedRpcVersion": 1}})
+            }
             Some(6) => {
                 let d = &v["d"];
                 let ty = d["requestType"].as_str().unwrap().to_string();
@@ -117,17 +128,36 @@ fn respond(obs: &Shared, ty: &str, data: &Value) -> Value {
     }
 }
 
-async fn setup() -> (axum::Router, Shared, Arc<Secrets>, tempfile::TempDir) {
+/// Starts a fake OBS with these stream settings; returns it and its port.
+async fn spawn_obs(service_type: &str, settings: Value) -> (Shared, u16) {
     let obs: Shared = Arc::new(Mutex::new(FakeObs {
-        service_type: "rtmp_common".into(),
-        settings: json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+        service_type: service_type.into(),
+        settings,
         streaming: false,
         inputs: vec![],
+        auth: false,
+        auth_seen: vec![],
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let obs_port = listener.local_addr().unwrap().port();
+    let port = listener.local_addr().unwrap().port();
     let app = Router::new().route("/", get(ws)).with_state(obs.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (obs, port)
+}
+
+async fn setup() -> (axum::Router, Shared, Arc<Secrets>, tempfile::TempDir) {
+    setup_with(
+        "rtmp_common",
+        json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+    )
+    .await
+}
+
+async fn setup_with(
+    service_type: &str,
+    settings: Value,
+) -> (axum::Router, Shared, Arc<Secrets>, tempfile::TempDir) {
+    let (obs, obs_port) = spawn_obs(service_type, settings).await;
 
     let relay = streamdelay_relay::start(RelayConfig {
         ingest_bind: "127.0.0.1:0".parse().unwrap(),
@@ -208,15 +238,18 @@ async fn configure_imports_key_adds_overlay_and_restores() {
     assert!(!r.to_string().contains("live_987_secret"));
     let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
     assert_eq!(cfg["destination_key_set"], true);
-    assert!(
-        cfg["config"]["obs"]["backup"]["settings_json"]
-            .as_str()
-            .unwrap()
-            .contains("Twitch")
+    // The backup, key included, is a secret.
+    assert_eq!(
+        cfg["config"]["obs"]["backup"]["service_type"],
+        "rtmp_common"
     );
+    assert!(cfg["config"]["obs"]["backup"]["settings_json"].is_null());
+    assert!(!cfg.to_string().contains("live_987_secret"));
     assert!(
-        !cfg.to_string().contains("live_987_secret"),
-        "backup must not contain the key"
+        secrets
+            .get(secret::OBS_BACKUP)
+            .unwrap()
+            .contains("live_987_secret")
     );
 
     // Running the wizard again is harmless.
@@ -226,10 +259,111 @@ async fn configure_imports_key_adds_overlay_and_restores() {
 
     let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
     assert_eq!(s, StatusCode::OK, "{r}");
+    {
+        let o = obs.lock().unwrap();
+        assert_eq!(o.service_type, "rtmp_common");
+        assert_eq!(o.settings["service"], "Twitch");
+        assert_eq!(o.settings["key"], "live_987_secret");
+    }
+    assert_eq!(secrets.get(secret::OBS_BACKUP), None);
+}
+
+#[tokio::test]
+async fn custom_server_credentials_stay_out_of_settings_and_diagnostics() {
+    let custom = json!({
+        "server": "rtmp://ingest.example.net/live", "key": "custom-key-5150",
+        "use_auth": true, "username": "streamer", "password": "hunter2-secret",
+    });
+    let (app, obs, _secrets, _dir) = setup_with("rtmp_custom", custom.clone()).await;
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["imported_key"], false, "not a Twitch key");
+
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    let (s, diag) = call(&app, "GET", "/api/v1/diagnostics", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        cfg["config"]["obs"]["backup"]["service_type"],
+        "rtmp_custom"
+    );
+    assert_eq!(
+        diag["settings"]["config"]["obs"]["backup"]["service_type"],
+        "rtmp_custom"
+    );
+    for text in [cfg.to_string(), diag.to_string()] {
+        assert!(!text.contains("hunter2-secret"), "{text}");
+        assert!(!text.contains("custom-key-5150"), "{text}");
+    }
+
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
     let o = obs.lock().unwrap();
-    assert_eq!(o.service_type, "rtmp_common");
-    assert_eq!(o.settings["service"], "Twitch");
-    assert_eq!(o.settings["key"], "live_987_secret");
+    assert_eq!(o.service_type, "rtmp_custom");
+    assert_eq!(o.settings, custom);
+}
+
+#[tokio::test]
+async fn saved_password_and_backup_stay_with_their_obs() {
+    let (app, home, secrets, _dir) = setup().await;
+    home.lock().unwrap().auth = true;
+    let home_port = {
+        let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+        cfg["config"]["obs"]["port"].as_u64().unwrap()
+    };
+    let connect = |port: u64, password: &str| json!({"host": "127.0.0.1", "port": port, "password": password});
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/connect",
+        Some(connect(home_port, "obs-pass-1234")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let sent = home.lock().unwrap().auth_seen.clone();
+    assert!(
+        sent.iter().all(|a| a.is_some() && *a == sent[0]),
+        "{sent:?}"
+    );
+
+    // Another OBS (or whatever listens there) gets neither the saved password...
+    let (other, other_port) = spawn_obs(
+        "rtmp_common",
+        json!({"service": "YouTube - RTMPS", "server": "x", "key": "yt"}),
+    )
+    .await;
+    other.lock().unwrap().auth = true;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/connect",
+        Some(connect(u64::from(other_port), "")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(other.lock().unwrap().auth_seen, vec![None]);
+    // ...which belonged to the previous OBS and is forgotten...
+    assert_eq!(secrets.get(secret::OBS_PASSWORD), None);
+    assert_eq!(r["password_saved"], false);
+    // ...nor the backed-up settings of the first one.
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("connect to that OBS"));
+    assert_eq!(other.lock().unwrap().settings["key"], "yt");
+
+    // Back at the first OBS, the settings go back where they came from.
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/connect",
+        Some(connect(home_port, "obs-pass-1234")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(home.lock().unwrap().settings["key"], "live_987_secret");
 }
 
 #[tokio::test]

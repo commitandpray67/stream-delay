@@ -3,20 +3,27 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
-use axum::http::header;
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use streamdelay_config::secret;
+use subtle::ConstantTimeEq;
 
 use crate::AppState;
 use crate::auth::Scope;
+use crate::routes::ApiError;
 use crate::settings::public_config;
+
+/// How long a download link from `POST /api/v1/diagnostics/link` works.
+const CODE_TTL: Duration = Duration::from_secs(60);
+/// Codes outstanding at once; older ones stop working.
+const MAX_CODES: usize = 8;
 
 /// Recent log lines kept in memory for the bundle.
 const LOG_LINES: usize = 2000;
@@ -98,8 +105,64 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogRing {
     }
 }
 
+/// Unused download codes and when they expire.
+#[derive(Default)]
+pub(crate) struct Codes(Mutex<Vec<(String, Instant)>>);
+
+impl Codes {
+    fn issue(&self) -> String {
+        let code = streamdelay_config::new_token();
+        let mut codes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        codes.retain(|(_, expires)| *expires > now);
+        if codes.len() >= MAX_CODES {
+            codes.remove(0);
+        }
+        codes.push((code.clone(), now + CODE_TTL));
+        code
+    }
+
+    /// Uses up `code`; true if it was valid.
+    fn redeem(&self, code: &str) -> bool {
+        let mut codes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        codes.retain(|(_, expires)| *expires > now);
+        let found = codes
+            .iter()
+            .position(|(c, _)| bool::from(c.as_bytes().ct_eq(code.as_bytes())));
+        found.map(|i| codes.remove(i)).is_some()
+    }
+}
+
 pub(crate) fn routes() -> Router<AppState> {
-    Router::new().route("/api/v1/diagnostics", get(diagnostics))
+    Router::new()
+        .route("/api/v1/diagnostics", get(diagnostics))
+        .route("/api/v1/diagnostics/link", post(link))
+}
+
+/// Served without a token: the single-use code in the path stands in for it, so
+/// the dashboard can offer a plain download link without putting its token in a
+/// URL (downloads remember where they came from).
+pub(crate) fn download_routes() -> Router<AppState> {
+    Router::new().route("/diagnostics/{code}", get(download))
+}
+
+async fn link(State(st): State<AppState>) -> Json<Value> {
+    let code = st.shared.download_codes.issue();
+    Json(json!({ "url": format!("/diagnostics/{code}") }))
+}
+
+async fn download(
+    State(st): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !st.shared.download_codes.redeem(&code) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "this download link has expired; download again from the dashboard".into(),
+        ));
+    }
+    Ok(diagnostics(State(st)).await)
 }
 
 /// Replaces every known secret, Twitch-style key and URL token in `text`.
@@ -161,6 +224,7 @@ fn known_secrets(st: &AppState) -> Vec<String> {
     .iter()
     .filter_map(|name| s.get(name))
     .collect();
+    v.extend(crate::obs_routes::backup_secrets(s.as_ref()));
     v.extend(st.shared.key_override.clone());
     let c = st.config();
     v.extend(c.ingest.key);

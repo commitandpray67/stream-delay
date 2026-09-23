@@ -70,7 +70,8 @@ On the streaming PC, run stream-delay with `--ingest 0.0.0.0:1935 --ingest-key â
 (or the Docker image). In OBS on the gaming PC, use
 `rtmp://<streaming-pc-ip>:1935/live` and the ingest key. If you leave out
 `--ingest-key`, one is generated; `streamdelayd urls` and the Setup tab show it. To control it from
-another device, enable *Allow control from other devices* on the Advanced tab.
+another device, enable *Allow control from other devices* on the Advanced tab and
+restart stream-delay.
 
 ## Where things are stored
 
@@ -78,7 +79,7 @@ another device, enable *Allow control from other devices* on the Advanced tab.
 |---|---|---|---|
 | Settings | `~/.config/stream-delay/config.toml` | `~/Library/Application Support/dev.stream-delay.stream-delay/config.toml` | `%APPDATA%\stream-delay\stream-delay\config\config.toml` |
 | Desktop app log | `logs/stream-delay.log` next to the settings file | same | same |
-| Stream key, OBS password | OS keychain (Secret Service) | Keychain | Credential Manager |
+| Stream key, OBS password, OBS settings backup | OS keychain (Secret Service) | Keychain | Credential Manager |
 
 If no keychain is available (or with `--no-keychain`), secrets go to a file next
 to the settings that only your user can read.

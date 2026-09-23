@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path, Request, State};
 use axum::http::StatusCode;
@@ -85,6 +86,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(read)
         .merge(control)
         .merge(admin)
+        .merge(diagnostics::download_routes())
         .merge(ui::routes())
         .layer(middleware::from_fn_with_state(state.clone(), auth::guard))
         // Outermost, so refusals from the guard carry the headers too.
@@ -92,8 +94,20 @@ pub(crate) fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn get_state(State(st): State<AppState>) -> impl IntoResponse {
-    Json(st.relay().state())
+async fn get_state(
+    State(st): State<AppState>,
+    Extension(scope): Extension<Scope>,
+) -> impl IntoResponse {
+    Json(visible_state(st.relay().state(), scope))
+}
+
+/// The state as a link with `scope` may see it: the encoder's network address is
+/// for the dashboard only.
+fn visible_state(mut state: RelayState, scope: Scope) -> RelayState {
+    if scope < Scope::Admin {
+        state.ingest.peer = None;
+    }
+    state
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,11 +140,16 @@ fn default_when() -> GoLiveWhen {
     GoLiveWhen::Now
 }
 
-async fn go_live(
-    State(st): State<AppState>,
-    body: Option<Json<LiveBody>>,
-) -> Result<Json<Ack>, ApiError> {
-    let when = body.map_or(GoLiveWhen::Now, |b| b.when);
+async fn go_live(State(st): State<AppState>, body: Bytes) -> Result<Json<Ack>, ApiError> {
+    // No body means now. A body is read whatever Content-Type it is sent with:
+    // asking to air the buffer first must never go live at once instead.
+    let when = if body.trim_ascii().is_empty() {
+        GoLiveWhen::Now
+    } else {
+        serde_json::from_slice::<LiveBody>(&body)
+            .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?
+            .when
+    };
     Ok(Json(st.relay().go_live(when).await?))
 }
 
@@ -183,14 +202,21 @@ async fn events(
     Extension(scope): Extension<Scope>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| stream_events(st, scope, socket))
+    // Clients only ever send pings and close frames.
+    ws.max_message_size(MAX_WS_MESSAGE)
+        .max_frame_size(MAX_WS_MESSAGE)
+        .on_upgrade(move |socket| stream_events(st, scope, socket))
 }
+
+/// Largest WebSocket message accepted from a client.
+const MAX_WS_MESSAGE: usize = 64 * 1024;
 
 async fn stream_events(st: AppState, scope: Scope, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut state = st.relay().subscribe();
     let mut config = st.shared.config_tx.subscribe();
-    let state_msg = |s: &streamdelay_relay::RelayState| {
+    let state_msg = |s: &RelayState| {
+        let s = visible_state(s.clone(), scope);
         Message::Text(json!({ "type": "state", "state": s }).to_string().into())
     };
     let config_msg = |st: &AppState| {
@@ -232,6 +258,26 @@ async fn stream_events(st: AppState, scope: Scope, socket: WebSocket) {
         };
         if tx.send(msg).await.is_err() {
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_dashboard_sees_the_encoder_address() {
+        let mut state = RelayState::default();
+        state.ingest.peer = Some("192.168.1.20:50123".into());
+        assert!(
+            visible_state(state.clone(), Scope::Admin)
+                .ingest
+                .peer
+                .is_some()
+        );
+        for scope in [Scope::Control, Scope::Read] {
+            assert_eq!(visible_state(state.clone(), scope).ingest.peer, None);
         }
     }
 }

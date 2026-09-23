@@ -91,7 +91,11 @@ pub(crate) async fn listen(
                             Some(e.to_string())
                         }
                     };
-                    let _ = events.send(Event::IngestClosed { conn: id, error });
+                    let _ = events.send(Event::IngestClosed {
+                        conn: id,
+                        error,
+                        unpublished: false,
+                    });
                     drop(slot);
                     drop(ip_slot);
                 });
@@ -282,7 +286,11 @@ async fn handle(
                         info!(%peer, "encoder stopped publishing");
                         publishing = false;
                         deadline = Some(Instant::now() + publish_timeout);
-                        let _ = events.send(Event::IngestClosed { conn, error: None });
+                        let _ = events.send(Event::IngestClosed {
+                            conn,
+                            error: None,
+                            unpublished: true,
+                        });
                     }
                 }
             }
