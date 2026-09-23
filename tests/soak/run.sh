@@ -128,7 +128,10 @@ if trend > max_trend:
     sys.exit(f"FAIL: memory still rising late in the run ({trend:+.1f} MB, limit {max_trend} MB)")
 PY
 reconnects=$(api GET /api/v1/state | python3 -c 'import json,sys; print(json.load(sys.stdin)["egress"]["reconnects"])')
-errors=$(grep -cv '^\s*$' "$OUT/sink.log" || true)
+# ffmpeg reports the end of the connection as an I/O error; that happens when
+# the relay ends the broadcast after the encoder stops (already once the delay
+# has aired, if it is short). Dropped connections show up as reconnects instead.
+errors=$(grep -v 'Input/output error' "$OUT/sink.log" | grep -cv '^\s*$' || true)
 echo "  destination reconnects: $reconnects, decoder errors: $errors"
 if [[ "$reconnects" != 0 ]]; then echo "FAIL: the destination connection dropped"; exit 1; fi
 if [[ "$errors" != 0 ]]; then head -20 "$OUT/sink.log"; echo "FAIL: decode errors"; exit 1; fi
