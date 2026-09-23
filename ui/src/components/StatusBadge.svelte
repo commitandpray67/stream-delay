@@ -6,11 +6,20 @@
   let {
     snap,
     ended = false,
+    ending = false,
     large = false,
-  }: { snap: Snapshot | null; ended?: boolean; large?: boolean } = $props();
+  }: { snap: Snapshot | null; ended?: boolean; ending?: boolean; large?: boolean } = $props();
 
-  const phase = $derived(ended ? "ended" : (snap?.phase ?? "offline"));
-  const delay = $derived(formatDelay(snap?.effective_ms ?? 0));
+  const phase = $derived(ended ? "ended" : ending ? "ending" : (snap?.phase ?? "offline"));
+  // Once settled, the delay asked for: a keyframe can stretch the exact one by a
+  // second or so, which would look like the wrong preset took effect.
+  const delay = $derived(
+    formatDelay(
+      snap && snap.phase === "delayed" && snap.target_ms > 0 && !snap.history_short
+        ? snap.target_ms
+        : (snap?.effective_ms ?? 0),
+    ),
+  );
   const label = $derived(t(`phase.${phase}`, { delay }));
   const hint = $derived(t(`hint.${phase}`, { delay }));
 </script>

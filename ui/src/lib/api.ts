@@ -90,7 +90,13 @@ export const applyPreset = (index: number) => api<Ack>("POST", `/api/v1/presets/
 export const cancel = () => api<Ack>("POST", "/api/v1/cancel");
 /** A single-use link that downloads the diagnostics file without the token. */
 export const diagnosticsLink = () => api<{ url: string }>("POST", "/api/v1/diagnostics/link");
-export const endStream = () => api<RelayState>("POST", "/api/v1/stream/end");
+/** "now" cuts the broadcast off without airing the buffer; "after-air" airs it first. */
+export const endStream = (when: GoLiveWhen) => api<RelayState>("POST", "/api/v1/stream/end", { when });
+/** Throws away what has not aired yet; the broadcast carries on with the same delay. */
+export const dumpBuffer = (mode: DelayMode) => api<Ack>("POST", "/api/v1/stream/dump", { mode });
+/** Runs the desktop app's updater, or answers with the releases page. */
+export const checkUpdates = () =>
+  api<{ checking: boolean; releases?: string }>("POST", "/api/v1/updates/check");
 export const resumeStream = () => api<RelayState>("POST", "/api/v1/stream/resume");
 export const getState = () => api<RelayState>("GET", "/api/v1/state");
 export const getConfig = () => api<PublicConfig>("GET", "/api/v1/config");

@@ -9,7 +9,7 @@ describe("format", () => {
     expect(formatDelay(125_000)).toBe("2:05");
   });
   it("labels presets", () => {
-    expect(formatSecondsLabel(0)).toBe("Live");
+    expect(formatSecondsLabel(0)).toBe("0 s");
     expect(formatSecondsLabel(15)).toBe("15 s");
     expect(formatSecondsLabel(120)).toBe("2 min");
     expect(formatSecondsLabel(90)).toBe("90 s");

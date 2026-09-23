@@ -1,6 +1,6 @@
 <script lang="ts">
   import CopyField from "../../components/CopyField.svelte";
-  import { diagnosticsLink, updateConfig } from "../../lib/api";
+  import { checkUpdates, diagnosticsLink, updateConfig } from "../../lib/api";
   import { adminConfig } from "../../lib/live.svelte";
   import type { HotkeyConfig } from "../../lib/types";
 
@@ -10,6 +10,19 @@
   let message = $state("");
   let error = $state("");
   let diagnosticsError = $state("");
+  let updates = $state<{ message: string; releases?: string; error?: boolean } | null>(null);
+
+  async function updateCheck() {
+    updates = { message: "Checking…" };
+    try {
+      const r = await checkUpdates();
+      updates = r.checking
+        ? { message: "Checking for updates. The app asks before installing one." }
+        : { message: "This copy doesn't update itself. The latest release is on GitHub:", releases: r.releases };
+    } catch (err) {
+      updates = { message: (err as Error).message, error: true };
+    }
+  }
 
   $effect(() => {
     const c = pc?.config;
@@ -57,12 +70,14 @@
       </p>
       <label class="inline"><input type="checkbox" bind:checked={hotkeys.enabled} /> Enable global hotkeys</label>
       <div class="cols">
-        <label>Go live now <input bind:value={hotkeys.go_live} /></label>
-        <label>Air up to now, then go live <input bind:value={hotkeys.go_live_after_air} /></label>
-        <label>End stream (empty = no hotkey) <input bind:value={hotkeys.end_stream} /></label>
+        <label>Remove delay now <input bind:value={hotkeys.go_live} /></label>
+        <label>Remove delay after it airs <input bind:value={hotkeys.go_live_after_air} /></label>
+        <label>Dump buffer <input bind:value={hotkeys.dump} placeholder="none" /></label>
+        <label>End stream (after the buffer airs) <input bind:value={hotkeys.end_stream_after_air} placeholder="none" /></label>
+        <label>End stream now <input bind:value={hotkeys.end_stream} placeholder="none" /></label>
         {#each pc.config.delay.presets as p, i (i)}
           <label>
-            Preset {i + 1} ({p.seconds <= 0 ? "live" : `${p.seconds} s`})
+            Preset {i + 1} ({p.seconds <= 0 ? "no delay" : `${p.seconds} s`})
             <input bind:value={hotkeys.presets[i]} />
           </label>
         {/each}
@@ -79,6 +94,22 @@
         {#if error}<span class="error" role="alert">{error}</span>{/if}
       </div>
     </form>
+
+    <section class="panel stack">
+      <h2>Updates</h2>
+      <p class="muted small">You have stream-delay {pc.version}.</p>
+      <div class="row">
+        <button type="button" onclick={updateCheck}>Check for updates</button>
+        {#if updates}
+          <span class={updates.error ? "error" : "muted small"} role={updates.error ? "alert" : undefined}>
+            {updates.message}
+            {#if updates.releases}
+              <a href={updates.releases} target="_blank" rel="noreferrer">latest release</a>
+            {/if}
+          </span>
+        {/if}
+      </div>
+    </section>
 
     <section class="panel stack">
       <h2>Diagnostics</h2>

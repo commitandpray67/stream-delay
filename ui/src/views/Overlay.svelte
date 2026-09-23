@@ -3,30 +3,23 @@
   // Add it to your scenes at the canvas size (for example 1920x1080).
   import { formatDelay } from "../lib/format";
   import { live } from "../lib/live.svelte";
+  import { badgeDelay, DelayAnnouncer } from "../lib/overlay";
 
   const params = new URLSearchParams(location.search);
   // ?preview=mask or ?preview=badge renders a static preview (settings page).
   const preview = params.get("preview");
 
   const overlay = $derived(live.config?.config.overlay);
-  const snap = $derived(live.state?.delay);
-  const masked = $derived(preview === "mask" || (snap?.mask_visible ?? false));
-  const showBadge = $derived(
-    !!overlay?.badge && (preview === "badge" || (!!snap && snap.phase === "delayed")),
-  );
+  const masked = $derived(preview === "mask" || (live.state?.delay.mask_visible ?? false));
+  const badge = $derived(preview === "badge" ? 30 : preview ? null : badgeDelay(live.state));
 
   let popup = $state("");
-  let lastPhase = "";
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const announcer = new DelayAnnouncer();
   $effect(() => {
-    const phase = snap?.phase ?? "";
-    if (!overlay?.popup || !phase || phase === lastPhase) return;
-    const first = lastPhase === "";
-    lastPhase = phase;
-    if (first) return;
-    if (phase === "delayed") popup = `Stream delay: ${formatDelay(snap!.effective_ms)}`;
-    else if (phase === "live") popup = "Stream delay off";
-    else return;
+    const message = announcer.update(live.state);
+    if (!message || !overlay?.popup || preview) return;
+    popup = message;
     clearTimeout(timer);
     timer = setTimeout(() => (popup = ""), 3500);
   });
@@ -47,9 +40,9 @@
         <div class="spinner" aria-hidden="true"></div>
       </div>
     {/if}
-    {#if showBadge && !masked}
+    {#if overlay.badge && badge !== null && !masked}
       <div class="badge {overlay.badge_position}">
-        ⏱ {formatDelay(preview === "badge" ? 30_000 : (snap?.effective_ms ?? 0))} delay
+        ⏱ {formatDelay(badge * 1000)} delay
       </div>
     {/if}
     {#if popup && !masked}

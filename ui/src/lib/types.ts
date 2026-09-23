@@ -54,6 +54,8 @@ export interface RelayState {
   };
   /** The broadcast was ended with "End stream"; nothing is sent until resumed. */
   ended: boolean;
+  /** "End stream" was asked for: the broadcast ends once what is buffered has aired. */
+  ending: boolean;
 }
 
 export interface Preset {
@@ -94,6 +96,8 @@ export interface HotkeyConfig {
   go_live: string;
   go_live_after_air: string;
   end_stream: string;
+  end_stream_after_air: string;
+  dump: string;
   presets: string[];
 }
 
@@ -116,6 +120,8 @@ export interface LimitedConfig {
   config: { delay: DelayConfig; overlay: OverlayConfig };
   urls: { obs_server: string };
   version: string;
+  /** The script the server's web UI starts from; a page running another is out of date. */
+  ui_build: string | null;
 }
 
 /** The full settings, sent only to dashboard (admin) links. */

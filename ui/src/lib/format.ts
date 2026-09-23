@@ -8,7 +8,7 @@ export function formatDelay(ms: number): string {
 }
 
 export function formatSecondsLabel(seconds: number): string {
-  if (seconds <= 0) return "Live";
+  if (seconds <= 0) return "0 s";
   if (seconds < 60 || seconds % 60 !== 0) return `${seconds} s`;
   return `${seconds / 60} min`;
 }
@@ -24,9 +24,10 @@ export function formatBytes(n: number): string {
   return `${n} B`;
 }
 
-export function phaseTone(phase: Phase | "ended"): "live" | "delayed" | "busy" | "ended" | "off" {
+export function phaseTone(phase: Phase | "ending" | "ended"): "live" | "delayed" | "busy" | "ended" | "off" {
   switch (phase) {
     case "ended":
+    case "ending":
       return "ended";
     case "live":
       return "live";
