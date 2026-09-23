@@ -181,8 +181,8 @@ impl Core {
                 if let Ok(ack) = &r {
                     info!(?cmd, ?ack, "delay command");
                 }
-                let _ = reply.send(r);
                 self.publish_state();
+                let _ = reply.send(r);
             }
             Control::SetDestination(dest) => {
                 self.state.egress.destination = dest.as_ref().map(redacted);
@@ -210,8 +210,9 @@ impl Core {
                 }
                 self.state.ended = true;
                 info!("stream ended by the streamer; buffered content discarded");
-                let _ = reply.send(());
+                // Publish before replying, so callers read the new state.
                 self.publish_state();
+                let _ = reply.send(());
             }
             Control::SetKeepHistory(keep) => {
                 info!(keep, "rolling buffer setting changed");
@@ -223,8 +224,8 @@ impl Core {
                     self.state.ended = false;
                     info!("resuming the broadcast");
                 }
-                let _ = reply.send(());
                 self.publish_state();
+                let _ = reply.send(());
             }
             Control::Shutdown(_) => unreachable!("handled by the caller"),
         }
