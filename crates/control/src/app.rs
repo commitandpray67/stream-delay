@@ -8,10 +8,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::Serialize;
+use streamdelay_config::DelayConfig;
 use streamdelay_config::{Config, ConfigError, KeyMode, SecretStore, secret};
 use streamdelay_relay::{
-    Destination, DestinationKey, EngineConfig, GoLiveWhen, RelayConfig, RelayError, RelayHandle,
-    RtmpUrl,
+    Ack, DelayMode, Destination, DestinationKey, EngineConfig, GoLiveWhen, RelayConfig, RelayError,
+    RelayHandle, RtmpUrl,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -274,6 +275,8 @@ impl App {
                 config_tx,
                 port: api_addr.port(),
                 restart_required: AtomicBool::new(false),
+                overlays: watch::channel(0).0,
+                update_check: RwLock::new(None),
             }),
         };
         let router = routes::router(state.clone());
@@ -308,6 +311,17 @@ impl App {
         urls(&self.state)
     }
 
+    /// Makes the dashboard's "Check for updates" run `check` (the desktop app's
+    /// updater). Without it, the dashboard links to the releases page.
+    pub fn on_update_check(&self, check: impl Fn() + Send + Sync + 'static) {
+        *self
+            .state
+            .shared
+            .update_check
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(check));
+    }
+
     /// True until a stream key (or passthrough) is configured.
     pub fn needs_setup(&self) -> bool {
         let c = self.config();
@@ -332,8 +346,25 @@ impl App {
         Ok(())
     }
 
+    /// Throws away what has not aired yet, the way the settings say (used by
+    /// hotkeys and the tray menu).
+    pub async fn dump(&self) -> Result<Ack, RelayError> {
+        let mode = dump_mode(&self.config().delay, None);
+        self.relay().dump(mode).await
+    }
+
     pub async fn shutdown(&self) {
         self.relay().shutdown().await;
+    }
+}
+
+/// How a dump covers the stream: as asked, else the default mode. Without the
+/// rolling buffer there is nothing to replay, so the slate covers it.
+pub(crate) fn dump_mode(delay: &DelayConfig, asked: Option<DelayMode>) -> DelayMode {
+    if delay.keep_buffer {
+        asked.unwrap_or(delay.default_mode)
+    } else {
+        DelayMode::Mask
     }
 }
 

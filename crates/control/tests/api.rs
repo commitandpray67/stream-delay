@@ -638,3 +638,75 @@ async fn grace_period_is_bounded() {
     let (s, body) = put_config(&app, r#"{"grace_seconds": 60}"#).await;
     assert_eq!(s, StatusCode::OK, "{body}");
 }
+
+#[tokio::test]
+async fn end_after_air_dump_and_update_checks() {
+    use streamdelay_control::{Scope, scoped_token};
+    let app = app_with_secrets("-dump").await;
+    let control = scoped_token(TOKEN, Scope::Control);
+    let post = |path: &str, token: &str, body: &'static str| {
+        with_token("POST", path, token)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    // Read whatever the Content-Type: "after air" must never end at once, so a
+    // body that does not parse is refused rather than taken as "now".
+    let (s, _) = send(
+        &app,
+        post("/api/v1/stream/end", &control, r#"{"when":"later"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        send(
+            &app,
+            authed("GET", "/api/v1/state").body(Body::empty()).unwrap()
+        )
+        .await
+        .1["ended"],
+        false
+    );
+    // Nothing is buffered, so it ends at once.
+    let (s, body) = send(
+        &app,
+        post("/api/v1/stream/end", &control, r#"{"when":"after-air"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["ended"], true);
+    assert_eq!(body["ending"], false);
+    send(&app, post("/api/v1/stream/resume", &control, "")).await;
+
+    // Dock links may dump; there is nothing to throw away yet.
+    let (s, body) = send(&app, post("/api/v1/stream/dump", &control, "")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (s, _) = send(
+        &app,
+        post("/api/v1/stream/dump", &control, r#"{"mode":"mask"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(
+        &app,
+        post("/api/v1/stream/dump", &control, r#"{"mode":"sideways"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let read = scoped_token(TOKEN, Scope::Read);
+    let (s, _) = send(&app, post("/api/v1/stream/dump", &read, "")).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // Without the desktop app's updater, the dashboard gets the releases page.
+    let (s, _) = send(&app, post("/api/v1/updates/check", &control, "")).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, body) = send(&app, post("/api/v1/updates/check", TOKEN, "")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["checking"], false);
+    assert!(
+        body["releases"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://github.com/")
+    );
+}

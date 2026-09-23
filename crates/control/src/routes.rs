@@ -1,10 +1,11 @@
 //! HTTP and WebSocket routes for delay control.
 
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path, Request, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -14,6 +15,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError, RelayState};
+use tokio::sync::watch;
 
 use crate::auth::{self, Scope};
 use crate::{AppState, diagnostics, obs_routes, settings, ui};
@@ -58,6 +60,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/v1/live", post(go_live))
         .route("/api/v1/cancel", post(cancel))
         .route("/api/v1/stream/end", post(end_stream))
+        .route("/api/v1/stream/dump", post(dump))
         .route("/api/v1/stream/resume", post(resume))
         .route("/api/v1/presets/{index}", post(preset))
         .route_layer(middleware::from_fn(|r: Request, n: Next| {
@@ -67,6 +70,7 @@ pub(crate) fn router(state: AppState) -> Router {
     let admin = settings::routes()
         .merge(diagnostics::routes())
         .merge(obs_routes::routes())
+        .route("/api/v1/updates/check", post(check_updates))
         .route_layer(middleware::from_fn(|r: Request, n: Next| {
             auth::require(Scope::Admin, r, n)
         }));
@@ -140,23 +144,71 @@ fn default_when() -> GoLiveWhen {
     GoLiveWhen::Now
 }
 
-async fn go_live(State(st): State<AppState>, body: Bytes) -> Result<Json<Ack>, ApiError> {
-    // No body means now. A body is read whatever Content-Type it is sent with:
-    // asking to air the buffer first must never go live at once instead.
-    let when = if body.trim_ascii().is_empty() {
-        GoLiveWhen::Now
-    } else {
-        serde_json::from_slice::<LiveBody>(&body)
-            .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?
-            .when
-    };
-    Ok(Json(st.relay().go_live(when).await?))
+/// `{"when": ...}` from a request body; no body means now. A body is read
+/// whatever Content-Type it is sent with: asking for the buffer to air first must
+/// never act at once instead.
+fn when(body: &Bytes) -> Result<GoLiveWhen, ApiError> {
+    if body.trim_ascii().is_empty() {
+        return Ok(GoLiveWhen::Now);
+    }
+    Ok(serde_json::from_slice::<LiveBody>(body)
+        .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?
+        .when)
 }
 
-/// Ends the broadcast now; nothing buffered airs.
-async fn end_stream(State(st): State<AppState>) -> Result<Json<RelayState>, ApiError> {
-    st.relay().end_stream().await?;
+async fn go_live(State(st): State<AppState>, body: Bytes) -> Result<Json<Ack>, ApiError> {
+    Ok(Json(st.relay().go_live(when(&body)?).await?))
+}
+
+/// Ends the broadcast: now, without airing what is buffered, or with
+/// `{"when": "after-air"}` once what stream-delay has received so far has aired.
+async fn end_stream(State(st): State<AppState>, body: Bytes) -> Result<Json<RelayState>, ApiError> {
+    match when(&body)? {
+        GoLiveWhen::Now => st.relay().end_stream().await?,
+        GoLiveWhen::AfterAir => st.relay().end_stream_after_air().await?,
+    }
     Ok(Json(st.relay().state()))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DumpBody {
+    /// Defaults to the configured default mode.
+    mode: Option<DelayMode>,
+}
+
+/// Throws away what has not aired yet and keeps broadcasting with the same delay:
+/// viewers see the last stretch again (Rewind), or the slate while the delay
+/// builds back up (Mask, or when there is not enough history to replay).
+async fn dump(State(st): State<AppState>, body: Bytes) -> Result<Json<Ack>, ApiError> {
+    let body = if body.trim_ascii().is_empty() {
+        DumpBody::default()
+    } else {
+        serde_json::from_slice::<DumpBody>(&body)
+            .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?
+    };
+    let mode = crate::app::dump_mode(&st.config().delay, body.mode);
+    Ok(Json(st.relay().dump(mode).await?))
+}
+
+/// Where releases are published.
+const RELEASES: &str = "https://github.com/commitandpray67/stream-delay/releases/latest";
+
+/// Runs the desktop app's updater, which asks before installing anything. Other
+/// builds answer with the releases page instead.
+async fn check_updates(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let check = st
+        .shared
+        .update_check
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    match check {
+        Some(check) => {
+            check();
+            Json(json!({ "checking": true }))
+        }
+        None => Json(json!({ "checking": false, "releases": RELEASES })),
+    }
 }
 
 async fn resume(State(st): State<AppState>) -> Result<Json<RelayState>, ApiError> {
@@ -193,28 +245,57 @@ async fn preset(
     Ok(Json(ack))
 }
 
-/// Pushes `{"type":"state","state":{...}}` whenever the state changes and
-/// `{"type":"config","config":{...}}` on connect and whenever settings change. The
-/// config is the full settings for dashboard links, and only what the dock and
-/// overlay display for other links.
+#[derive(Debug, Default, Deserialize)]
+struct EventsQuery {
+    /// `overlay` for the overlay page in OBS, which is then counted.
+    role: Option<String>,
+}
+
+/// Pushes `{"type":"state","state":{...}}` whenever the state changes,
+/// `{"type":"config","config":{...}}` on connect and whenever settings change, and
+/// `{"type":"overlays","count":n}` on connect and whenever an overlay page
+/// connects or leaves. The config is the full settings for dashboard links, and
+/// only what the dock and overlay display for other links.
 async fn events(
     State(st): State<AppState>,
     Extension(scope): Extension<Scope>,
+    Query(query): Query<EventsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let overlay = query.role.as_deref() == Some("overlay");
     // Clients only ever send pings and close frames.
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| stream_events(st, scope, socket))
+        .on_upgrade(move |socket| stream_events(st, scope, overlay, socket))
+}
+
+/// Counts a connected overlay page for as long as it lives.
+struct Counted(watch::Sender<usize>);
+
+impl Counted {
+    fn new(count: &watch::Sender<usize>) -> Self {
+        count.send_modify(|n| *n += 1);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 /// Largest WebSocket message accepted from a client.
 const MAX_WS_MESSAGE: usize = 64 * 1024;
 
-async fn stream_events(st: AppState, scope: Scope, socket: WebSocket) {
+async fn stream_events(st: AppState, scope: Scope, overlay: bool, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
+    let _counted = overlay.then(|| Counted::new(&st.shared.overlays));
     let mut state = st.relay().subscribe();
     let mut config = st.shared.config_tx.subscribe();
+    let mut overlays = st.shared.overlays.subscribe();
+    let overlays_msg =
+        |n: usize| Message::Text(json!({ "type": "overlays", "count": n }).to_string().into());
     let state_msg = |s: &RelayState| {
         let s = visible_state(s.clone(), scope);
         Message::Text(json!({ "type": "state", "state": s }).to_string().into())
@@ -234,6 +315,10 @@ async fn stream_events(st: AppState, scope: Scope, socket: WebSocket) {
     if tx.send(initial).await.is_err() {
         return;
     }
+    let count = *overlays.borrow_and_update();
+    if tx.send(overlays_msg(count)).await.is_err() {
+        return;
+    }
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     loop {
         let msg = tokio::select! {
@@ -250,6 +335,13 @@ async fn stream_events(st: AppState, scope: Scope, socket: WebSocket) {
                 config.mark_unchanged();
                 config_msg(&st)
             }
+            changed = overlays.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let count = *overlays.borrow_and_update();
+                overlays_msg(count)
+            }
             incoming = rx.next() => match incoming {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
                 _ => continue,
@@ -265,6 +357,18 @@ async fn stream_events(st: AppState, scope: Scope, socket: WebSocket) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_pages_are_counted_while_connected() {
+        let (count, rx) = watch::channel(0);
+        let a = Counted::new(&count);
+        let b = Counted::new(&count);
+        assert_eq!(*rx.borrow(), 2);
+        drop(a);
+        assert_eq!(*rx.borrow(), 1);
+        drop(b);
+        assert_eq!(*rx.borrow(), 0);
+    }
 
     #[test]
     fn only_the_dashboard_sees_the_encoder_address() {

@@ -64,7 +64,15 @@ pub(crate) struct Shared {
     /// Port clients use in the Host header.
     pub port: u16,
     pub restart_required: AtomicBool,
+    /// Overlay pages connected (see the events route): how many there are tells
+    /// the dock whether the Mask slate can cover the stream.
+    pub overlays: watch::Sender<usize>,
+    /// Set by the desktop app: checks for an update and offers to install it.
+    pub update_check: RwLock<Option<UpdateCheck>>,
 }
+
+/// See [`App::on_update_check`].
+pub(crate) type UpdateCheck = Arc<dyn Fn() + Send + Sync>;
 
 impl AppState {
     pub(crate) fn config(&self) -> Config {
@@ -237,6 +245,8 @@ pub(crate) fn state(
             config_tx,
             port,
             restart_required: AtomicBool::new(false),
+            overlays: watch::channel(0).0,
+            update_check: RwLock::new(None),
         }),
     }
 }

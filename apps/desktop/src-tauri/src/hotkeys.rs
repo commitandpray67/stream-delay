@@ -13,6 +13,8 @@ enum Action {
     GoLive,
     GoLiveAfterAir,
     EndStream,
+    EndStreamAfterAir,
+    Dump,
     Preset(usize),
 }
 
@@ -30,6 +32,8 @@ pub fn register(app: &AppHandle, config: &Config) {
         (h.go_live.clone(), Action::GoLive),
         (h.go_live_after_air.clone(), Action::GoLiveAfterAir),
         (h.end_stream.clone(), Action::EndStream),
+        (h.end_stream_after_air.clone(), Action::EndStreamAfterAir),
+        (h.dump.clone(), Action::Dump),
     ];
     let presets = config.delay.presets.len();
     bindings.extend(
@@ -67,6 +71,8 @@ fn run(app: &AppHandle, action: Action) {
             Action::GoLive => core.relay().go_live(GoLiveWhen::Now).await.map(|_| ()),
             Action::GoLiveAfterAir => core.relay().go_live(GoLiveWhen::AfterAir).await.map(|_| ()),
             Action::EndStream => core.relay().end_stream().await,
+            Action::EndStreamAfterAir => core.relay().end_stream_after_air().await,
+            Action::Dump => core.dump().await.map(|_| ()),
             Action::Preset(i) => core.apply_preset(i).await,
         };
         if let Err(e) = result {

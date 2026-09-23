@@ -75,11 +75,25 @@ fn obs_id(host: &str, port: u16) -> String {
     }
 }
 
-/// True for an OBS on this computer.
-fn is_local(host: &str) -> bool {
+/// True for an OBS on this computer: `localhost`, a loopback address, or one of
+/// this computer's own network addresses (OBS's WebSocket settings show the
+/// computer's LAN address, so that is what people often enter).
+async fn is_local(host: &str) -> bool {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let ips: Vec<IpAddr> = match host.parse::<IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => match tokio::net::lookup_host((host, 0)).await {
+            Ok(addrs) => addrs.map(|a| a.ip()).collect(),
+            Err(_) => return false,
+        },
+    };
+    // Binding only works to an address this computer has.
+    ips.into_iter().any(|ip| {
+        ip.is_loopback() || (!ip.is_unspecified() && std::net::UdpSocket::bind((ip, 0)).is_ok())
+    })
 }
 
 /// This computer's address as seen from `host`: the one the OS sends from to
@@ -100,16 +114,17 @@ async fn local_ip_towards(host: &str, port: u16) -> Option<IpAddr> {
 /// The server address the OBS in `c` should stream to. For an OBS on another
 /// computer, `127.0.0.1` would be that computer itself.
 async fn server_for_obs(st: &AppState, c: &Config) -> Result<String, ApiError> {
-    if is_local(&c.obs.host) {
+    if is_local(&c.obs.host).await {
         return Ok(urls(st).obs_server);
     }
     let ingest = st.relay().ingest_addr();
     let ip = if ingest.ip().is_loopback() {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "OBS runs on another computer, but stream-delay only accepts streams from this \
-             one. Start stream-delay with --ingest 0.0.0.0:1935 (see Two-PC setups in the \
-             user guide), or set up OBS by hand."
+            "The OBS address on this tab belongs to another computer, but stream-delay only \
+             accepts streams from this one. If OBS runs on this computer, enter 127.0.0.1 as \
+             its address. If it really runs on another computer, start stream-delay with \
+             --ingest 0.0.0.0:1935 (see Two-PC setups in the user guide)."
                 .into(),
         ));
     } else if ingest.ip().is_unspecified() {
@@ -465,6 +480,19 @@ mod tests {
     use streamdelay_config::MemorySecrets;
 
     use super::*;
+
+    #[tokio::test]
+    async fn an_obs_at_this_computers_own_address_is_local() {
+        for host in ["localhost", "127.0.0.1", "[::1]", " 127.0.0.2 "] {
+            assert!(is_local(host).await, "{host}");
+        }
+        // A documentation address no computer has.
+        assert!(!is_local("192.0.2.1").await);
+        // This computer's LAN address, if it has a route to one.
+        if let Some(own) = local_ip_towards("192.0.2.1", 4455).await {
+            assert!(is_local(&own.to_string()).await, "{own}");
+        }
+    }
 
     #[test]
     fn old_backups_move_to_the_secret_store() {

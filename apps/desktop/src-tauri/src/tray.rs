@@ -44,19 +44,22 @@ fn status_text(state: &RelayState) -> String {
     if state.ended {
         return "Stream ended: nothing is being sent".into();
     }
+    if state.ending {
+        return "Ending the stream once the buffer has aired…".into();
+    }
     match d.phase {
         Phase::Offline => "Offline: waiting for OBS".into(),
-        Phase::Live => "Live (no delay)".into(),
+        Phase::Live => "No delay".into(),
         Phase::Delayed => format!("Delayed {secs} s"),
         Phase::Adding => "Adding delay…".into(),
-        Phase::GoingLive => "Going live…".into(),
+        Phase::GoingLive => "Removing delay…".into(),
         Phase::Reducing => "Changing delay…".into(),
     }
 }
 
 fn preset_label(seconds: f64) -> String {
     if seconds <= 0.0 {
-        "Go live now".into()
+        "No delay".into()
     } else if seconds >= 60.0 && seconds % 60.0 == 0.0 {
         format!("Delay {} min", seconds / 60.0)
     } else {
@@ -83,15 +86,29 @@ fn build_menu(app: &AppHandle, core: &App) -> tauri::Result<(Menu<Wry>, TrayItem
     menu.append(&MenuItem::with_id(
         app,
         "after-air",
-        "Air up to now, then go live",
+        "Remove the delay once the buffer has aired",
         true,
         None::<&str>,
     )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
         app,
+        "dump",
+        "Dump the buffer (what has not aired never does)",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "end-after-air",
+        "End stream once the buffer has aired",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
         "end-stream",
-        "End stream now (buffer is not aired)",
+        "End stream now (the buffer never airs)",
         true,
         None::<&str>,
     )?)?;
@@ -257,6 +274,20 @@ fn on_menu(app: &AppHandle, id: &str) {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = core.relay().end_stream().await {
                     warn!("end stream failed: {e}");
+                }
+            });
+        }
+        "end-after-air" => {
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = core.relay().end_stream_after_air().await {
+                    warn!("end stream failed: {e}");
+                }
+            });
+        }
+        "dump" => {
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = core.dump().await {
+                    warn!("dump failed: {e}");
                 }
             });
         }

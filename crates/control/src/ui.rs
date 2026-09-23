@@ -1,6 +1,8 @@
 //! Serves the web UI (dashboard, OBS dock, overlay) embedded at build time from
 //! `ui/dist`. Build it with `pnpm -C ui build` before `cargo build`.
 
+use std::sync::LazyLock;
+
 use axum::Router;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
@@ -54,12 +56,27 @@ pub(crate) async fn security_headers(mut r: Response) -> Response {
     r
 }
 
+/// The script the embedded web UI starts from. Vite puts a hash of its content in
+/// the name, so a page running another one was loaded from another version (OBS
+/// keeps docks and browser sources open across app updates) and reloads itself.
+pub(crate) fn ui_build() -> Option<&'static str> {
+    static BUILD: LazyLock<Option<String>> = LazyLock::new(|| {
+        let index = Assets::get("index.html")?;
+        let html = std::str::from_utf8(&index.data).ok()?;
+        let start = html.find("/assets/index-")?;
+        let len = html[start..].find(".js")? + 3;
+        Some(html[start..start + len].to_string())
+    });
+    BUILD.as_deref()
+}
+
 async fn index() -> Response {
     match Assets::get("index.html") {
         Some(f) => {
             let mut r = Html(f.data.into_owned()).into_response();
+            // Never kept: a stored copy would run an old version after an update.
             r.headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             r
         }
         None => Html(MISSING).into_response(),

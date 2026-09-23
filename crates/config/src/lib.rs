@@ -288,6 +288,10 @@ pub struct HotkeyConfig {
     /// Ends the broadcast without airing the buffer. Unassigned by default so it
     /// can't be pressed by accident.
     pub end_stream: String,
+    /// Ends the broadcast once what is buffered has aired. Unassigned by default.
+    pub end_stream_after_air: String,
+    /// Throws away what has not aired yet. Unassigned by default.
+    pub dump: String,
     /// One shortcut per delay preset, in order. Empty strings are unassigned.
     pub presets: Vec<String>,
 }
@@ -299,6 +303,8 @@ impl Default for HotkeyConfig {
             go_live: "CmdOrCtrl+Alt+Shift+L".into(),
             go_live_after_air: "CmdOrCtrl+Alt+Shift+A".into(),
             end_stream: String::new(),
+            end_stream_after_air: String::new(),
+            dump: String::new(),
             presets: (1..=5)
                 .map(|i| format!("CmdOrCtrl+Alt+Shift+{i}"))
                 .collect(),

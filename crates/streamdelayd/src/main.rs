@@ -60,10 +60,22 @@ enum Cmd {
         #[command(flatten)]
         api: ApiArgs,
     },
-    /// End the broadcast now on a running instance. Nothing still in the delay
-    /// buffer airs. Resume with `streamdelayd resume` or by restarting the stream
-    /// in OBS.
+    /// End the broadcast on a running instance: now, without airing what is still
+    /// in the delay buffer, or with --after-air once it has aired. Resume with
+    /// `streamdelayd resume` or by restarting the stream in OBS.
     End {
+        /// Air what stream-delay has received so far, then end.
+        #[arg(long)]
+        after_air: bool,
+        #[command(flatten)]
+        api: ApiArgs,
+    },
+    /// Throw away what has not aired yet and keep broadcasting with the same
+    /// delay: viewers see the last stretch again, or the overlay slate.
+    Dump {
+        /// Cover it with the overlay slate instead of replaying.
+        #[arg(long)]
+        mask: bool,
         #[command(flatten)]
         api: ApiArgs,
     },
@@ -220,11 +232,29 @@ fn main() -> Result<()> {
                 serde_json::json!({ "when": when }),
             )?)
         }
-        Cmd::End { api } => {
+        Cmd::End { after_air, api } => {
             let (url, token) = api.resolve(&cli.config)?;
-            client::post(&url, &token, "/api/v1/stream/end", serde_json::json!({}))?;
-            println!("Stream ended. Nothing buffered will air.");
+            let when = if after_air { "after-air" } else { "now" };
+            let state = client::post(
+                &url,
+                &token,
+                "/api/v1/stream/end",
+                serde_json::json!({ "when": when }),
+            )?;
+            if state["ending"] == true {
+                println!("The stream ends once what is buffered has aired.");
+            } else {
+                println!("Stream ended. Nothing buffered will air.");
+            }
             Ok(())
+        }
+        Cmd::Dump { mask, api } => {
+            let (url, token) = api.resolve(&cli.config)?;
+            let mut body = serde_json::json!({});
+            if mask {
+                body["mode"] = "mask".into();
+            }
+            client::print(client::post(&url, &token, "/api/v1/stream/dump", body)?)
         }
         Cmd::Resume { api } => {
             let (url, token) = api.resolve(&cli.config)?;

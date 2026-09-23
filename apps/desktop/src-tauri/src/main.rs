@@ -73,6 +73,9 @@ fn main() {
             }
             if updater_configured(&handle) {
                 tray::check_for_updates(handle.clone(), false);
+                // The dashboard's "Check for updates" button.
+                let updates = handle.clone();
+                core.on_update_check(move || tray::check_for_updates(updates.clone(), true));
             }
             Ok(())
         })

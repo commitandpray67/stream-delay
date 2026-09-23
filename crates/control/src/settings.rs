@@ -42,6 +42,8 @@ pub(crate) struct PublicConfig {
     services: Vec<ServiceInfo>,
     restart_required: bool,
     version: &'static str,
+    /// See [`crate::ui::ui_build`].
+    ui_build: Option<&'static str>,
 }
 
 pub(crate) fn public_config(st: &AppState) -> PublicConfig {
@@ -73,6 +75,7 @@ pub(crate) fn public_config(st: &AppState) -> PublicConfig {
             .collect(),
         restart_required: st.shared.restart_required.load(Ordering::Relaxed),
         version: env!("CARGO_PKG_VERSION"),
+        ui_build: crate::ui::ui_build(),
     }
 }
 
@@ -83,6 +86,7 @@ pub(crate) struct LimitedConfig {
     config: LimitedSettings,
     urls: LimitedUrls,
     version: &'static str,
+    ui_build: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +112,7 @@ pub(crate) fn limited_config(st: &AppState, scope: Scope) -> LimitedConfig {
             obs_server: urls(st).obs_server,
         },
         version: env!("CARGO_PKG_VERSION"),
+        ui_build: crate::ui::ui_build(),
     }
 }
 
