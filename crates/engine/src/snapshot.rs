@@ -146,11 +146,18 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         _ => 0,
     };
     let offline = !e.ingest_active && (e.drained() || !o.connected);
-    let effective = if o.started { o.delay } else { o.target };
+    // A dump's replay runs further behind for a moment; what counts is the delay
+    // it continues with.
+    let effective = match o.pending {
+        Pending::Replay { delay, .. } if o.started => delay,
+        _ if o.started => o.delay,
+        _ => o.target,
+    };
     let phase = match o.pending {
-        Pending::Mask { .. } => Phase::Adding,
+        Pending::Mask { .. } | Pending::Dump { .. } => Phase::Adding,
         Pending::GoLiveNow { .. } | Pending::AfterAir { .. } => Phase::GoingLive,
         Pending::Reduce { .. } => Phase::Reducing,
+        Pending::Replay { .. } => Phase::Delayed,
         Pending::None if offline => Phase::Offline,
         Pending::None if effective < 500 * MS => Phase::Live,
         Pending::None => Phase::Delayed,

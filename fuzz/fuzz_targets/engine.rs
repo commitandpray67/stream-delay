@@ -3,7 +3,7 @@
 //! End stream, the rolling buffer switched on and off, and a slow destination.
 //! Invariants: output timestamps never go backwards within a connection; after
 //! End stream nothing is left buffered, and nothing is sent until the destination
-//! connects again.
+//! connects again; nothing after an end mark is sent.
 #![no_main]
 
 use arbitrary::Arbitrary;
@@ -29,6 +29,12 @@ enum Op {
     KeepHistory(bool),
     /// A poll with little room in the queue to the destination.
     PollBudget(u16),
+    /// Throw away what has not aired (replaying, or under the slate).
+    Dump { mask: bool },
+    /// End the broadcast after what has arrived so far.
+    EndAfter,
+    /// Start a new broadcast after the end mark.
+    RestartAfterEnd,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -47,6 +53,7 @@ fuzz_target!(|input: Input| {
         keep_history,
     });
     let mut connected = true;
+    let mut end_mark: Option<u64> = None;
     let mut now: u64 = 1_000_000_000;
     let mut ts: i64 = 0;
     let mut out: Vec<OutMsg> = Vec::new();
@@ -56,8 +63,11 @@ fuzz_target!(|input: Input| {
     let header = Bytes::from_static(&[0x17, 0x00, 0, 0, 0, 1]);
     e.ingest(now, Kind::Video, 0, header);
 
-    let check = |out: &mut Vec<OutMsg>, last: &mut [Option<u32>; 3]| {
+    let check = |out: &mut Vec<OutMsg>, last: &mut [Option<u32>; 3], end_mark: Option<u64>| {
         for m in out.drain(..) {
+            if let (Some(mark), Some(seq)) = (end_mark, m.seq) {
+                assert!(seq <= mark, "sent {seq} after the end mark {mark}");
+            }
             let i = match m.kind {
                 Kind::Audio => 0,
                 Kind::Video => 1,
@@ -114,16 +124,34 @@ fuzz_target!(|input: Input| {
             Op::Discard => {
                 e.discard();
                 connected = false;
+                end_mark = None;
                 assert!(!e.has_buffered(), "End stream left content buffered");
             }
             Op::KeepHistory(keep) => e.set_keep_history(keep),
             Op::PollBudget(bytes) => {
                 let _ = e.poll_budget(now, &mut out, usize::from(bytes));
             }
+            Op::Dump { mask } => {
+                let mode = if mask { DelayMode::Mask } else { DelayMode::Rewind };
+                let _ = e.command(now, Command::Dump(mode));
+            }
+            Op::EndAfter => {
+                if let Some(seq) = e.last_seq() {
+                    e.end_after(seq);
+                    end_mark = Some(seq);
+                }
+            }
+            Op::RestartAfterEnd => {
+                if e.end_reached() {
+                    e.restart_after_end();
+                    connected = false;
+                    end_mark = None;
+                }
+            }
         }
         let _ = e.poll(now, &mut out);
         assert!(connected || out.is_empty(), "sent {} messages while not connected", out.len());
-        check(&mut out, &mut last);
+        check(&mut out, &mut last, end_mark);
         let _ = e.snapshot(now);
     }
 });

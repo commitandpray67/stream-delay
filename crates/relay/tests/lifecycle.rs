@@ -453,3 +453,274 @@ async fn a_refused_stream_key_is_reported_and_retries_stop_with_the_stream() {
     assert_eq!(log.lock().unwrap().published, 0);
     relay.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_stream_after_air_airs_up_to_the_click_and_nothing_after() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    relay.set_delay(2_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(3)).await;
+    let last = p.frame - 1;
+    let clicked = Instant::now();
+    relay.end_stream_after_air().await.unwrap();
+    let state = relay.state();
+    assert!(state.ending && !state.ended, "{state:?}");
+    // OBS keeps streaming; none of that may air.
+    p.stream_for(Duration::from_secs(4)).await;
+    wait_until("the broadcast ended", Duration::from_secs(3), || {
+        log.lock().unwrap().unpublished == 1
+    })
+    .await;
+    let state = relay.state();
+    assert!(state.ended && !state.ending, "{state:?}");
+    {
+        let l = log.lock().unwrap();
+        let ids = aired(&l);
+        assert_eq!(ids[0], 0);
+        assert_consecutive(&ids);
+        let end = *ids.last().unwrap();
+        assert!(
+            end <= last,
+            "frame {end} was sent after End stream (at {last})"
+        );
+        assert!(
+            end + 10 >= last,
+            "the end was cut short: {end}, clicked at {last}"
+        );
+        let ended_at = l.media.last().unwrap().at;
+        assert!(
+            ended_at.saturating_duration_since(clicked) < Duration::from_millis(2_600),
+            "the end aired late"
+        );
+    }
+    // Still streaming, and still ended.
+    p.stream_for(Duration::from_secs(2)).await;
+    let l = log.lock().unwrap();
+    assert_eq!(l.connections, 1, "a broadcast started after End stream");
+    assert_eq!(l.published, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_stream_after_air_can_be_taken_back_before_the_end_airs() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(4)).await;
+    let last = p.frame - 1;
+    relay.end_stream_after_air().await.unwrap();
+    p.stream_for(Duration::from_secs(1)).await;
+    relay.resume().await.unwrap();
+    let state = relay.state();
+    assert!(!state.ending && !state.ended, "{state:?}");
+    p.stream_for(Duration::from_secs(4)).await;
+    let l = log.lock().unwrap();
+    assert_eq!(l.unpublished, 0, "the broadcast ended anyway");
+    assert_eq!(l.connections, 1);
+    let ids = aired(&l);
+    assert_consecutive(&ids);
+    assert!(
+        *ids.last().unwrap() > last + 30,
+        "the stream stopped airing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restarting_in_obs_while_the_end_airs_starts_a_new_broadcast_after_it() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(10)).await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(3)).await;
+    let last = p.frame - 1;
+    p.stop().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // OBS starts streaming again before the first stream's end has aired.
+    let mut next = Publisher::connect(relay.ingest_addr(), "x").await;
+    next.base = 100_000;
+    next.stream_for(Duration::from_secs(6)).await;
+    {
+        let l = log.lock().unwrap();
+        // The first broadcast gets its whole stream, then ends: continuing it
+        // would leave it without data while OBS was stopped.
+        assert_eq!(l.unpublished, 1, "the first broadcast did not end");
+        assert_eq!(
+            l.connections, 2,
+            "the new stream did not get a new broadcast"
+        );
+        assert_eq!(l.published, 2);
+        let on = |conn: usize| -> Vec<u32> {
+            l.media
+                .iter()
+                .filter(|m| m.conn == conn && m.kind == MediaKind::Video)
+                .filter_map(|m| frame_of(&m.payload))
+                .collect()
+        };
+        let first = on(0);
+        assert_eq!(first[0], 0);
+        assert_consecutive(&first);
+        assert_eq!(
+            *first.last().unwrap(),
+            last,
+            "the first stream's end did not air"
+        );
+        let second = on(1);
+        assert!(second.len() > 30, "the new stream barely aired: {second:?}");
+        assert_eq!(
+            second[0], 100_000,
+            "the new broadcast must start with the new stream"
+        );
+        assert_consecutive(&second);
+        let start = l
+            .media
+            .iter()
+            .find(|m| m.conn == 1 && m.kind == MediaKind::Video)
+            .unwrap();
+        assert!(
+            start
+                .at
+                .saturating_duration_since(next.captured_at(100_000))
+                >= Duration::from_millis(2_950),
+            "the new broadcast started without the delay"
+        );
+    }
+    assert!(!relay.state().ended);
+    next.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dump_needs_a_delay() {
+    let (sink, _log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_millis(500)).await;
+    // Live: there is nothing to throw away.
+    let refused = relay.dump(DelayMode::Rewind).await;
+    assert!(
+        matches!(
+            refused,
+            Err(streamdelay_relay::RelayError::Engine(
+                streamdelay_relay::EngineError::NothingToDump
+            ))
+        ),
+        "{refused:?}"
+    );
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dump_replays_what_aired_and_never_airs_what_had_not() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    relay.set_delay(2_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(6)).await;
+    let dumped = Instant::now();
+    let ack = relay.dump(DelayMode::Rewind).await.unwrap();
+    assert_eq!(ack.target_ms, 2_000);
+    assert!(!relay.state().delay.mask_visible, "a replay needs no slate");
+    p.stream_for(Duration::from_secs(5)).await;
+    {
+        let l = log.lock().unwrap();
+        assert_eq!(l.connections, 1, "the broadcast must continue");
+        assert_eq!(l.unpublished, 0);
+        assert_monotonic(&l);
+        let ids = aired(&l);
+        for &id in &ids {
+            let captured = p.captured_at(id);
+            assert!(
+                captured + Duration::from_millis(1_800) <= dumped || captured >= dumped,
+                "frame {id}, which had not aired at the dump, aired"
+            );
+        }
+        for m in l.media.iter().filter(|m| m.kind == MediaKind::Video) {
+            if let Some(id) = frame_of(&m.payload) {
+                let age = m.at.saturating_duration_since(p.captured_at(id));
+                assert!(
+                    age >= Duration::from_millis(1_950),
+                    "frame {id} aired after {age:?}"
+                );
+            }
+        }
+        let replayed = ids
+            .iter()
+            .filter(|&&id| ids.iter().filter(|&&x| x == id).count() > 1);
+        assert!(replayed.count() > 30, "nothing was replayed");
+        let after: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|&id| p.captured_at(id) >= dumped)
+            .collect();
+        assert!(after.len() > 30, "the stream did not carry on: {after:?}");
+        assert_eq!(after[0] % 30, 0, "the stream must carry on from a keyframe");
+        assert_consecutive(&after);
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mask_dump_throws_away_what_has_not_aired_under_the_slate() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    relay.set_delay(3_000, DelayMode::Mask).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(5)).await;
+    let dumped = Instant::now();
+    relay.dump(DelayMode::Mask).await.unwrap();
+    assert!(
+        relay.state().delay.mask_visible,
+        "the slate must go up at once"
+    );
+    p.stream_for(Duration::from_secs(6)).await;
+    let state = relay.state();
+    assert!(!state.delay.mask_visible, "the slate stayed up");
+    assert!(state.delay.effective_ms >= 2_900, "{:?}", state.delay);
+    {
+        let l = log.lock().unwrap();
+        assert_eq!(l.connections, 1, "the broadcast must continue");
+        assert_eq!(l.unpublished, 0);
+        for id in aired(&l) {
+            let captured = p.captured_at(id);
+            assert!(
+                captured + Duration::from_millis(2_700) <= dumped || captured >= dumped,
+                "frame {id}, which had not aired at the dump, aired"
+            );
+        }
+        let after: Vec<u32> = aired(&l)
+            .into_iter()
+            .filter(|&id| p.captured_at(id) >= dumped)
+            .collect();
+        assert!(after.len() > 30, "the stream did not carry on: {after:?}");
+        assert_eq!(after[0] % 30, 0, "the stream must carry on from a keyframe");
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_stream_after_air_with_no_delay_ends_at_once_and_cleanly() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    let last = p.frame - 1;
+    relay.end_stream_after_air().await.unwrap();
+    p.stream_for(Duration::from_secs(1)).await;
+    wait_until("the broadcast ended", Duration::from_secs(1), || {
+        log.lock().unwrap().unpublished == 1
+    })
+    .await;
+    assert!(relay.state().ended);
+    let l = log.lock().unwrap();
+    let ids = aired(&l);
+    assert_consecutive(&ids);
+    let end = *ids.last().unwrap();
+    assert!(
+        end <= last && end + 10 >= last,
+        "ended at {end}, clicked at {last}"
+    );
+}

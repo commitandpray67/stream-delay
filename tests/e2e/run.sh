@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end check: ffmpeg (encoder) -> streamdelayd -> ffmpeg (RTMP server, recording).
 #
-# While the stream runs, the script adds, removes and changes the delay through the
-# API. Then it verifies the recording: timestamps always increase, the video decodes
+# While the stream runs, the script adds, removes and changes the delay and dumps
+# the buffer through the API. Then it verifies the recording: timestamps always increase, the video decodes
 # without errors across every splice, and the delay changes are visible in the timing.
 #
 # Requires: ffmpeg, ffprobe, curl, python3, and a built streamdelayd
@@ -50,8 +50,9 @@ enc=$!
 pids+=($enc)
 
 sleep 8;  echo "t=8   rewind to 5 s:";        api PUT /api/v1/delay '{"seconds":5}'
-sleep 10; echo "t=18  go live now:";          api POST /api/v1/live '{"when":"now"}'
-sleep 6;  echo "t=24  mask to 4 s:";          api PUT /api/v1/delay '{"seconds":4,"mode":"mask"}'
+sleep 6;  echo "t=14  dump (replay):";        api POST /api/v1/stream/dump '{"mode":"rewind"}'
+sleep 6;  echo "t=20  go live now:";          api POST /api/v1/live '{"when":"now"}'
+sleep 4;  echo "t=24  mask to 4 s:";          api PUT /api/v1/delay '{"seconds":4,"mode":"mask"}'
 sleep 8;  echo "t=32  state:";                api GET /api/v1/state | python3 -c 'import json,sys; s=json.load(sys.stdin)["delay"]; print(" phase", s["phase"], "effective", s["effective_ms"], "ms, splices", s["output"]["splices"])'
 echo "t=32  go live after it airs:"; api POST /api/v1/live '{"when":"after-air"}'
 wait $enc || true

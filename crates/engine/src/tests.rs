@@ -217,6 +217,9 @@ impl Sim {
             }
             Command::SetDelay { ms, .. } if ms * MS < self.floor => self.floor = ms * MS,
             Command::GoLive(_) | Command::Cancel => self.floor = 0,
+            // Under the slate, what it covers airs at once while the delay builds
+            // back up; a replay keeps the delay.
+            Command::Dump(_) if self.e.snapshot(self.now).mask_visible => self.floor = 0,
             _ => {}
         }
         self.floor_log.push((self.sent.len(), self.floor));
@@ -629,6 +632,309 @@ fn extended_output_timestamps_do_not_break_monotonicity() {
     s.check_invariants();
 }
 
+#[test]
+fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(30 * SEC);
+    let dumped_at = s.now;
+    let n = s.sent.len();
+    let ack = s.cmd(Command::Dump(DelayMode::Mask));
+    assert!(ack.pending);
+    assert_eq!(ack.target_ms, 20_000);
+    let snap = s.snapshot();
+    assert!(snap.mask_visible, "the slate must go up at once");
+    assert_eq!(snap.phase, Phase::Adding);
+    // Only what the slate covers airs, starting within a keyframe interval: the
+    // destination keeps getting data.
+    s.advance(3 * SEC);
+    let first = s
+        .media_sent_in(n..s.sent.len())
+        .next()
+        .expect("nothing aired after the dump");
+    assert!(first.1.at - dumped_at <= 3 * SEC);
+    assert!(first.2.keyframe);
+    s.advance(20 * SEC);
+    let snap = s.snapshot();
+    assert!(
+        !snap.mask_visible,
+        "the slate stays up after the delay is back"
+    );
+    assert_eq!(snap.phase, Phase::Delayed);
+    assert!((20_000..=22_100).contains(&snap.effective_ms), "{snap:?}");
+    for (_, sent, i) in s.media_sent_in(n..s.sent.len()) {
+        assert!(
+            i.arrival >= dumped_at + 500 * MS,
+            "content from before the dump (or before the slate was up) aired at {}",
+            sent.at
+        );
+    }
+    // A rewind can no longer reach what was dumped.
+    s.cmd(Command::SetDelay {
+        ms: 60_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(10 * SEC);
+    assert!(
+        s.media_sent_in(n..s.sent.len())
+            .all(|(_, _, i)| i.arrival >= dumped_at),
+        "a rewind aired dumped content"
+    );
+    s.check_invariants_in(n..s.sent.len());
+}
+
+#[test]
+fn dump_needs_a_delay() {
+    let mut s = live_sim();
+    assert_eq!(
+        s.e.command(s.now, Command::Dump(DelayMode::Rewind)),
+        Err(EngineError::NothingToDump)
+    );
+    // Before anything airs, a dump just empties the buffer.
+    let mut s = Sim::new(config());
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.connect();
+    s.advance(5 * SEC);
+    let dumped_at = s.now;
+    s.cmd(Command::Dump(DelayMode::Mask));
+    assert!(!s.snapshot().mask_visible);
+    s.advance(20 * SEC);
+    assert!(s.media_sent().all(|(_, i)| i.arrival >= dumped_at));
+    assert!(s.media_sent().next().is_some());
+}
+
+/// Ids of what is waiting to air: recorded after the last thing sent. (What an
+/// earlier change skipped is not waiting; a rewind may still show it.)
+fn unaired(s: &Sim) -> std::collections::HashSet<u32> {
+    let last = s.media_sent().last().map(|(_, i)| i.arrival);
+    s.inputs
+        .iter()
+        .filter(|(_, i)| last.is_none_or(|t| i.arrival > t))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+#[test]
+fn a_rewind_dump_replays_what_aired_and_skips_what_had_not() {
+    let mut s = Sim::new(config());
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.connect();
+    s.advance(60 * SEC);
+    let dumped_at = s.now;
+    let dumped = unaired(&s);
+    assert!(dumped.len() > 500, "nothing was waiting to air");
+    let n = s.sent.len();
+    let ack = s.cmd(Command::Dump(DelayMode::Rewind));
+    assert_eq!((ack.target_ms, ack.effective_ms), (20_000, 20_000));
+    let snap = s.snapshot();
+    assert!(!snap.mask_visible, "a replay needs no slate");
+    assert_eq!(snap.phase, Phase::Delayed);
+    assert_eq!(snap.effective_ms, 20_000);
+    s.advance(40 * SEC);
+    let after: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
+    assert!(
+        after
+            .iter()
+            .all(|(_, _, i)| !dumped.contains(&id_of_input(&s, i))),
+        "dumped content aired"
+    );
+    // The delay never drops, and viewers keep getting a picture.
+    for (_, sent, i) in &after {
+        assert!(
+            sent.at - i.arrival >= 20 * SEC,
+            "aired after {} us",
+            sent.at - i.arrival
+        );
+    }
+    let video: Vec<Time> = after
+        .iter()
+        .filter(|(_, _, i)| i.kind == Kind::Video)
+        .map(|(_, sent, _)| sent.at)
+        .collect();
+    assert!(
+        video[0] - dumped_at < 100 * MS,
+        "the replay did not start at once"
+    );
+    for w in video.windows(2) {
+        assert!(
+            w[1] - w[0] <= 2_100 * MS,
+            "no picture for {} us",
+            w[1] - w[0]
+        );
+    }
+    // First a replay, then what was recorded after the dump, from a keyframe.
+    assert!(after[0].2.arrival < dumped_at - 20 * SEC);
+    let first_new = after
+        .iter()
+        .find(|(_, _, i)| i.arrival >= dumped_at && i.kind == Kind::Video)
+        .expect("the stream did not continue");
+    assert!(first_new.2.keyframe);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed);
+    assert!((20_000..=22_100).contains(&snap.effective_ms), "{snap:?}");
+    s.check_invariants_in(n..s.sent.len());
+    // A rewind cannot reach what was dumped either.
+    let m = s.sent.len();
+    s.cmd(Command::SetDelay {
+        ms: 60_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(10 * SEC);
+    assert!(
+        s.media_sent_in(m..s.sent.len())
+            .all(|(_, _, i)| !dumped.contains(&id_of_input(&s, &i))),
+        "a rewind aired dumped content"
+    );
+}
+
+/// The id `i` was recorded under.
+fn id_of_input(s: &Sim, i: &InputInfo) -> u32 {
+    *s.inputs
+        .iter()
+        .find(|(_, x)| {
+            x.arrival == i.arrival
+                && x.kind == i.kind
+                && x.index == i.index
+                && x.session == i.session
+        })
+        .expect("known input")
+        .0
+}
+
+#[test]
+fn a_rewind_dump_uses_the_slate_without_enough_history() {
+    // Not enough of the stream yet to replay the delay's worth before the dump.
+    let mut s = Sim::new(config());
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.connect();
+    s.advance(30 * SEC);
+    s.cmd(Command::Dump(DelayMode::Rewind));
+    assert!(s.snapshot().mask_visible);
+    // No rolling buffer at all.
+    let mut s = Sim::new(EngineConfig {
+        keep_history: false,
+        ..config()
+    });
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.connect();
+    s.advance(60 * SEC);
+    let dumped = unaired(&s);
+    let n = s.sent.len();
+    s.cmd(Command::Dump(DelayMode::Rewind));
+    assert!(s.snapshot().mask_visible);
+    s.advance(20 * SEC);
+    assert!(
+        s.media_sent_in(n..s.sent.len())
+            .all(|(_, _, i)| !dumped.contains(&id_of_input(&s, &i)))
+    );
+}
+
+#[test]
+fn a_dump_while_ending_ends_at_once() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(20 * SEC);
+    s.e.end_after(s.e.last_seq().unwrap());
+    let n = s.sent.len();
+    s.cmd(Command::Dump(DelayMode::Rewind));
+    assert!(s.e.end_reached());
+    s.advance(10 * SEC);
+    assert_eq!(s.media_sent_in(n..s.sent.len()).count(), 0);
+}
+
+#[test]
+fn an_end_mark_sends_up_to_it_and_nothing_after() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(20 * SEC);
+    let marked_at = s.now;
+    let mark = s.e.last_seq().unwrap();
+    s.e.end_after(mark);
+    assert!(!s.e.end_reached());
+    s.advance(8 * SEC);
+    assert!(!s.e.end_reached(), "ended before the rest aired");
+    s.advance(5 * SEC);
+    assert!(s.e.end_reached());
+    s.advance(10 * SEC);
+    let sent: Vec<_> = s.media_sent().map(|(_, i)| i).collect();
+    assert!(
+        sent.iter().all(|i| i.arrival <= marked_at),
+        "content after the mark aired"
+    );
+    let last_video = sent.iter().rev().find(|i| i.kind == Kind::Video).unwrap();
+    assert!(
+        marked_at - last_video.arrival < 100 * MS,
+        "the end of the stream did not air"
+    );
+}
+
+#[test]
+fn a_new_broadcast_after_an_end_mark_starts_with_what_came_after_it() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(20 * SEC);
+    s.stop_encoder();
+    s.advance(3 * SEC);
+    // The encoder starts a new stream while the old one's tail is still airing.
+    let mark = s.e.last_seq().unwrap();
+    s.e.end_after(mark);
+    s.start_encoder(0);
+    let new_session = s.session;
+    s.advance(8 * SEC);
+    assert!(s.e.end_reached());
+    s.e.restart_after_end();
+    let n = s.sent.len();
+    s.connect();
+    s.advance(20 * SEC);
+    let fresh: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
+    assert!(!fresh.is_empty());
+    assert!(
+        fresh.iter().all(|(_, _, i)| i.session == new_session),
+        "the old stream aired in the new broadcast"
+    );
+    // From its first keyframe, with the delay, and timestamps from 0.
+    let first = fresh
+        .iter()
+        .find(|(_, _, i)| i.kind == Kind::Video)
+        .unwrap();
+    assert_eq!(first.2.index, 0);
+    assert!(first.1.at - first.2.arrival >= 10 * SEC);
+    // A rewind cannot reach the old stream either.
+    s.cmd(Command::SetDelay {
+        ms: 60_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(5 * SEC);
+    assert!(
+        s.media_sent_in(n..s.sent.len())
+            .all(|(_, _, i)| i.session == new_session)
+    );
+}
+
 #[derive(Debug, Clone)]
 enum Op {
     Wait(u64),
@@ -640,6 +946,7 @@ enum Op {
     DropOutput,
     EncoderRestart,
     Cancel,
+    Dump(DelayMode),
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -653,6 +960,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::DropOutput),
         1 => Just(Op::EncoderRestart),
         1 => Just(Op::Cancel),
+        1 => prop_oneof![Just(DelayMode::Rewind), Just(DelayMode::Mask)].prop_map(Op::Dump),
     ]
 }
 
@@ -677,6 +985,10 @@ proptest! {
         s.jitter = jitter;
         s.connect();
         s.advance(5 * SEC);
+        // (index into `sent`, what had not aired) for each dump.
+        let mut dumps = Vec::new();
+        // Where each destination connection starts in `sent`.
+        let mut connections = vec![0];
         for op in ops {
             match op {
                 Op::Wait(ms) => s.advance(ms * MS),
@@ -686,11 +998,23 @@ proptest! {
                 Op::AfterAir => { s.cmd(Command::GoLive(GoLiveWhen::AfterAir)); }
                 Op::Reduce(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Rewind }); }
                 Op::Cancel => { s.cmd(Command::Cancel); }
+                Op::Dump(mode) => {
+                    let waiting = unaired(&s);
+                    if s.e.command(s.now, Command::Dump(mode)).is_ok() {
+                        if s.snapshot().mask_visible {
+                            s.floor = 0;
+                        }
+                        s.floor_log.push((s.sent.len(), s.floor));
+                        dumps.push((s.sent.len(), waiting));
+                    }
+                    s.poll();
+                }
                 Op::DropOutput => {
                     let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
                     s.e.output_disconnected(s.now, last);
                     s.advance(1_500 * MS);
                     // Restart invariant tracking for the new connection.
+                    connections.push(s.sent.len());
                     s.connect();
                 }
                 Op::EncoderRestart => {
@@ -707,21 +1031,19 @@ proptest! {
             }
         }
         s.advance(5 * SEC);
-        check_split_by_connection(&s);
-    }
-}
-
-/// Invariants are per destination connection (timestamps restart at 0 on reconnect),
-/// so split the log wherever the output timestamp resets.
-fn check_split_by_connection(s: &Sim) {
-    let mut start = 0;
-    for (i, x) in s.sent.iter().enumerate() {
-        if i > start && x.msg.kind == Kind::Data && x.msg.seq.is_none() && x.msg.timestamp == 0 {
-            s.check_invariants_in(start..i);
-            start = i;
+        connections.push(s.sent.len());
+        for w in connections.windows(2) {
+            s.check_invariants_in(w[0]..w[1]);
+        }
+        // Nothing that had not aired by a dump ever airs after it.
+        for (index, waiting) in dumps {
+            for x in &s.sent[index..] {
+                if let Some(id) = id_of(&x.msg.payload) {
+                    prop_assert!(!waiting.contains(&id), "dumped content aired at {}", x.at);
+                }
+            }
         }
     }
-    s.check_invariants_in(start..s.sent.len());
 }
 
 #[test]

@@ -162,12 +162,16 @@ pub struct RelayState {
     /// The streamer ended the broadcast with "end stream". Nothing is sent until
     /// they resume or the encoder starts a new stream.
     pub ended: bool,
+    /// "End stream" was asked for after what is buffered has aired: the broadcast
+    /// ends once it has (then `ended` is set).
+    pub ending: bool,
 }
 
 pub(crate) enum Control {
     Command(Command, oneshot::Sender<Result<Ack, EngineError>>),
     SetDestination(Option<Destination>),
     EndStream(oneshot::Sender<()>),
+    EndAfterAir(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
     SetKeepHistory(bool),
     Shutdown(oneshot::Sender<()>),
@@ -214,8 +218,27 @@ impl RelayHandle {
         rx.await.map_err(|_| RelayError::Closed)
     }
 
+    /// Ends the broadcast once what has been sent to stream-delay so far has
+    /// aired. Nothing sent after this airs; the stream then counts as ended, as
+    /// after [`RelayHandle::end_stream`].
+    pub async fn end_stream_after_air(&self) -> Result<(), RelayError> {
+        let (tx, rx) = oneshot::channel();
+        self.control
+            .send(Control::EndAfterAir(tx))
+            .map_err(|_| RelayError::Closed)?;
+        rx.await.map_err(|_| RelayError::Closed)
+    }
+
+    /// Throws away what has not aired yet and keeps the broadcast going with the
+    /// same delay (see [`Command::Dump`]). While a broadcast is ending, it ends
+    /// at once instead.
+    pub async fn dump(&self, mode: DelayMode) -> Result<Ack, RelayError> {
+        self.command(Command::Dump(mode)).await
+    }
+
     /// Starts broadcasting again after [`RelayHandle::end_stream`], from content
-    /// received from now on and with the current delay.
+    /// received from now on and with the current delay. Before the end has aired,
+    /// cancels [`RelayHandle::end_stream_after_air`] instead.
     pub async fn resume(&self) -> Result<(), RelayError> {
         let (tx, rx) = oneshot::channel();
         self.control

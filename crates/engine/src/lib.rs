@@ -122,6 +122,12 @@ pub enum Command {
     GoLive(GoLiveWhen),
     /// Cancels a pending change.
     Cancel,
+    /// Throws away everything that has not aired yet, keeping the broadcast going
+    /// with the same delay. Rewind: viewers see the last stretch of the stream
+    /// again (as when adding delay), then it continues with what was recorded
+    /// after the dump. Mask, or not enough history for that: the overlay slate
+    /// covers the stream while the delay builds back up.
+    Dump(DelayMode),
 }
 
 /// Outcome of a command.
@@ -139,6 +145,8 @@ pub struct Ack {
 pub enum EngineError {
     #[error("requested delay of {requested_ms} ms exceeds the maximum of {max_ms} ms")]
     TooLarge { requested_ms: u64, max_ms: u64 },
+    #[error("there is no delay, so nothing is waiting to air")]
+    NothingToDump,
 }
 
 struct Entry {
@@ -161,6 +169,7 @@ struct Entry {
     nal_offset: Option<usize>,
 }
 
+#[derive(Clone)]
 struct HeaderRec {
     seq: u64,
     kind: Kind,
@@ -197,6 +206,26 @@ enum Pending {
         started: Time,
         anchor: Option<u64>,
     },
+    /// Everything recorded before `started` was thrown away; the output waits for
+    /// a keyframe recorded under the slate, then builds `delay` back up behind it.
+    Dump {
+        delay: u64,
+        started: Time,
+    },
+    /// What had not aired was thrown away and the output replays what aired
+    /// before it. Nothing from `from` on airs until the first keyframe there is
+    /// `delay` old; the output continues from it.
+    Replay {
+        from: u64,
+        delay: u64,
+    },
+}
+
+impl Pending {
+    /// The overlay slate is up for this change.
+    fn covers(&self) -> bool {
+        matches!(self, Pending::Mask { .. } | Pending::Dump { .. })
+    }
 }
 
 struct Output {
@@ -225,6 +254,8 @@ struct Output {
     pending: Pending,
     mask_visible: bool,
     history_short: bool,
+    /// Nothing after this sequence number is sent (see [`Engine::end_after`]).
+    end_mark: Option<u64>,
     splices: u64,
     dropped: u64,
     sent_bytes: u64,
@@ -281,6 +312,7 @@ impl Engine {
                 pending: Pending::None,
                 mask_visible: false,
                 history_short: false,
+                end_mark: None,
                 splices: 0,
                 dropped: 0,
                 sent_bytes: 0,
@@ -481,7 +513,8 @@ impl Engine {
         o.delay = o.target;
         o.history_short = false;
         o.gate = None;
-        if matches!(o.pending, Pending::Mask { .. }) {
+        o.end_mark = None;
+        if o.pending.covers() {
             o.mask_visible = false;
         }
         o.pending = Pending::None;
@@ -561,13 +594,101 @@ impl Engine {
         !self.ring.is_empty()
     }
 
+    /// The newest sequence number received, if any.
+    pub fn last_seq(&self) -> Option<u64> {
+        self.next_seq.checked_sub(1)
+    }
+
+    /// Sends what arrived up to `seq` (inclusive), and nothing after it: the end
+    /// of a broadcast. [`Engine::end_reached`] tells when it has all been sent.
+    pub fn end_after(&mut self, seq: u64) {
+        self.out.end_mark = Some(seq);
+    }
+
+    /// Forgets the mark set with [`Engine::end_after`]: the output carries on.
+    pub fn cancel_end(&mut self) {
+        self.out.end_mark = None;
+    }
+
+    /// True once everything up to the mark set with [`Engine::end_after`] has been
+    /// handed over (or skipped by a delay change).
+    pub fn end_reached(&self) -> bool {
+        self.out.end_mark.is_some_and(|m| self.out.next_seq > m)
+    }
+
+    /// Ends the broadcast at the end mark and prepares a new one for what arrived
+    /// after it: the output starts again, with the target delay, from the first
+    /// keyframe after the mark. What came before the mark is dropped, so the new
+    /// broadcast cannot rewind into the old one.
+    pub fn restart_after_end(&mut self) {
+        let from = self.out.end_mark.map_or(self.next_seq, |m| m + 1);
+        self.drop_before(from);
+        self.output_reset();
+        self.out.next_seq = from.max(self.base_seq);
+    }
+
+    /// Drops everything before `seq`.
+    fn drop_before(&mut self, seq: u64) {
+        while self.ring.front().is_some_and(|f| f.seq < seq) {
+            let f = self.ring.pop_front().expect("front exists");
+            self.bytes -= f.payload.len();
+            self.base_seq = f.seq + 1;
+            if self.syncs.front() == Some(&f.seq) {
+                self.syncs.pop_front();
+            }
+        }
+        if self.ring.is_empty() {
+            self.base_seq = self.base_seq.max(seq.min(self.next_seq));
+        }
+    }
+
     // ----- commands -------------------------------------------------------------
 
     pub fn command(&mut self, now: Time, cmd: Command) -> Result<Ack, EngineError> {
         match cmd {
+            // A dump's replay is not a change to cancel: its delay is the target.
+            Command::Cancel if matches!(self.out.pending, Pending::Replay { .. }) => {}
             Command::Cancel => {
                 self.set_pending(Pending::None);
                 self.out.target = self.out.delay;
+            }
+            Command::Dump(mode) => {
+                if !self.out.started {
+                    // Nothing has aired yet: throwing the buffer away is enough.
+                    self.drop_buffer();
+                    return Ok(self.ack());
+                }
+                if self.out.end_mark.is_some() || !self.ingest_active {
+                    // The broadcast is ending (or the encoder has stopped, so
+                    // nothing follows): it ends now, without the rest.
+                    self.drop_buffer();
+                    self.set_pending(Pending::None);
+                    return Ok(self.ack());
+                }
+                // Back to the delay asked for; while it is being removed, keep
+                // the protection that was in effect.
+                let delay = if self.out.target > 0 {
+                    self.out.target
+                } else {
+                    self.out.delay
+                };
+                // Live (as the snapshot counts it): what is in flight airs before
+                // anyone could react.
+                if delay < 500 * MS {
+                    return Err(EngineError::NothingToDump);
+                }
+                self.out.history_short = false;
+                self.out.target = delay;
+                if mode == DelayMode::Rewind && self.replay_instead(now, delay) {
+                    return Ok(self.ack());
+                }
+                // Gone for good, including what a rewind could reach.
+                self.drop_buffer();
+                self.set_pending(Pending::Dump {
+                    delay,
+                    started: now,
+                });
+                self.out.mask_visible = true;
             }
             Command::GoLive(when) => {
                 self.out.target = 0;
@@ -627,16 +748,20 @@ impl Engine {
     }
 
     fn ack(&self) -> Ack {
+        let effective = match self.out.pending {
+            Pending::Replay { delay, .. } => delay,
+            _ => self.out.delay,
+        };
         Ack {
             target_ms: self.out.target / MS,
-            effective_ms: self.out.delay / MS,
+            effective_ms: effective / MS,
             pending: self.out.pending != Pending::None,
             history_short: self.out.history_short,
         }
     }
 
     fn set_pending(&mut self, p: Pending) {
-        if matches!(self.out.pending, Pending::Mask { .. }) {
+        if self.out.pending.covers() {
             self.out.mask_visible = false;
         }
         self.out.pending = p;
@@ -659,6 +784,59 @@ impl Engine {
                 self.splice_to(k, delay);
             }
         }
+    }
+
+    /// For a dump: throws away what has not aired and replays the stretch that
+    /// aired before it, which lasts until what is recorded from now on is `delay`
+    /// old. Returns false, changing nothing, if the buffer does not reach back
+    /// far enough.
+    fn replay_instead(&mut self, now: Time, delay: u64) -> bool {
+        if !self.config.keep_history {
+            return false;
+        }
+        let cut = self.out.next_seq.max(self.base_seq);
+        // When the first thing not aired yet was recorded.
+        let edge = self.entry(cut).map_or(now, |e| e.arrival);
+        // At least `delay` before it, so the replay keeps the delay too.
+        let Some(k) = self.newest_sync_arrived_by(edge.checked_sub(delay)) else {
+            return false;
+        };
+        // Cut the rest off the buffer. What is recorded next reuses its sequence
+        // numbers: nothing refers to them, since none of it was ever sent.
+        let keep = (cut - self.base_seq) as usize;
+        for e in self.ring.drain(keep..) {
+            self.bytes -= e.payload.len();
+        }
+        self.syncs.retain(|&s| s < cut);
+        self.next_seq = cut;
+        self.split_session(cut);
+        self.set_pending(Pending::Replay { from: cut, delay });
+        let arrival = self.entry(k).map_or(now, |e| e.arrival);
+        self.splice_to(k, now.saturating_sub(arrival));
+        true
+    }
+
+    /// Records what arrives from `seq` on as a new session of the same encoder,
+    /// so the output restarts there at a keyframe, as after a reconnect: what
+    /// came right before it is gone.
+    fn split_session(&mut self, seq: u64) {
+        let Some(current) = self.sessions.last() else {
+            return;
+        };
+        let mut next = Session {
+            id: self.next_session,
+            headers: current.headers.clone(),
+            metadata: current.metadata.clone(),
+            has_video: current.has_video,
+            last_video_ts: current.last_video_ts,
+            frame_ms: current.frame_ms,
+        };
+        // Decoder configuration recorded in the cut part is still needed.
+        for h in &mut next.headers {
+            h.seq = h.seq.min(seq.saturating_sub(1));
+        }
+        self.next_session += 1;
+        self.sessions.push(next);
     }
 
     fn newest_sync_arrived_by(&self, t: Option<Time>) -> Option<u64> {
@@ -748,6 +926,38 @@ impl Engine {
                     }
                     return;
                 }
+                Pending::Dump { delay, started } => {
+                    // The first keyframe recorded once the slate is surely up.
+                    let from = started + self.config.mask_margin_ms * MS;
+                    let Some(anchor) = self
+                        .syncs
+                        .iter()
+                        .find(|&&s| self.entry(s).is_some_and(|e| e.arrival >= from))
+                        .copied()
+                    else {
+                        return;
+                    };
+                    let arrival = self.entry(anchor).map_or(now, |e| e.arrival);
+                    // What the slate covers airs now, and the delay builds back up
+                    // behind it as in mask mode (the slate stays up).
+                    self.splice_to(anchor, now.saturating_sub(arrival));
+                    self.out.pending = Pending::Mask {
+                        delay,
+                        started,
+                        anchor: Some(anchor),
+                    };
+                }
+                Pending::Replay { from, delay } => {
+                    let Some(k) = self.syncs.iter().copied().find(|&s| s >= from) else {
+                        return;
+                    };
+                    let arrival = self.entry(k).map_or(now, |e| e.arrival);
+                    if now >= arrival + delay {
+                        self.splice_to(k, now - arrival);
+                        self.out.pending = Pending::None;
+                    }
+                    return;
+                }
             }
         }
     }
@@ -778,9 +988,22 @@ impl Engine {
         let mut wake = None;
         let mut emitted = 0usize;
         loop {
+            // After a dump, nothing airs until a keyframe recorded under the slate.
+            if matches!(self.out.pending, Pending::Dump { .. }) {
+                break;
+            }
+            // Nor, after a replay, until the keyframe it continues from is due.
+            if let Pending::Replay { from, .. } = self.out.pending
+                && self.out.next_seq >= from
+            {
+                break;
+            }
             if self.out.next_seq < self.base_seq {
                 self.out.next_seq = self.base_seq;
                 self.out.need_sync = true;
+            }
+            if self.out.end_mark.is_some_and(|m| self.out.next_seq > m) {
+                break;
             }
             if let Some(cs) = self.out.current_session
                 && !self.out.need_sync
@@ -821,6 +1044,13 @@ impl Engine {
                     }
                     break;
                 };
+                if let Some(m) = self.out.end_mark
+                    && k > m
+                {
+                    // Nothing decodable is left before the end: skip to it.
+                    self.out.next_seq = m + 1;
+                    break;
+                }
                 let arrival = self.entry(k).map(|e| e.arrival).unwrap_or(now);
                 if now < arrival + self.out.delay {
                     wake = Some(arrival + self.out.delay);
@@ -828,6 +1058,9 @@ impl Engine {
                 }
                 let delay = self.out.delay.max(now - arrival);
                 self.splice_to(k, delay);
+                if self.out.end_mark.is_some_and(|m| self.out.next_seq > m) {
+                    break;
+                }
             }
             let Some(e) = self.entry(self.out.next_seq) else {
                 break;

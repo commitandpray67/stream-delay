@@ -5,3 +5,6 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc fb0fe046ef2d3beac3cc113289c52abcdc2a14e9f4f503be156c5ac3235cf4cc # shrinks to ops = [DropOutput, Rewind(3), Reduce(3), Wait(100)], audio = false, jitter = 0
+cc f69af53bccd33f3f63f3ca14ff1539ea9addb823b5ddd03ea3daf209f0d81792 # shrinks to ops = [Reduce(1), GoLive, Wait(4000), Mask(4), Dump(Rewind), Wait(100)], audio = false, jitter = 0, keep_history = true
+cc 5b65844caaa46c6fd546b8c9b36c4f96137a88dbca9ef84c6bcd718d72aafaa1 # shrinks to ops = [Wait(1647), Rewind(5), AfterAir, Wait(2377), Wait(3240), Dump(Rewind), Rewind(1), Wait(1500), Wait(1365)], audio = false, jitter = 3909, keep_history = true
+cc 3819ca7ffe531c133f28b479b43436e851a129b29197984fb089cbd7c20a7c91 # shrinks to ops = [Wait(5698), DropOutput, Dump(Rewind), EncoderRestart, Dump(Rewind), Rewind(11), Wait(1389), Wait(5370), DropOutput, Rewind(13)], audio = false, jitter = 0, keep_history = true

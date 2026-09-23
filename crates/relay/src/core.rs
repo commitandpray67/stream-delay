@@ -137,6 +137,12 @@ struct Core {
     egress_running: bool,
     /// When the egress was last started.
     egress_started: Instant,
+    /// The encoder started a new stream while the previous one's end was still
+    /// airing: that broadcast ends at the engine's end mark, then a new one starts.
+    restart_after_end: bool,
+    /// When a broadcast ending at the end mark ends regardless, if the destination
+    /// stops taking data meanwhile.
+    end_deadline: Option<Instant>,
     generation: u64,
     state: RelayState,
     state_tx: watch::Sender<RelayState>,
@@ -197,6 +203,8 @@ pub(crate) async fn run(
         counters,
         egress_running: false,
         egress_started: now,
+        restart_after_end: false,
+        end_deadline: None,
         generation: 0,
         state_tx,
         last_written_total: 0,
@@ -296,9 +304,34 @@ impl Core {
                     self.egress_running = false;
                     let _ = self.egress_ctl.send(EgressCtl::Abort);
                 }
+                self.clear_end();
                 self.state.ended = true;
                 info!("stream ended by the streamer; buffered content discarded");
                 // Publish before replying, so callers read the new state.
+                self.publish_state();
+                let _ = reply.send(());
+            }
+            Control::EndAfterAir(reply) => {
+                if !self.state.ended && !self.state.ending {
+                    // Nothing is left to air, or nothing can. While connected, even
+                    // with nothing buffered, the end waits for what is still queued
+                    // for the destination.
+                    let nothing_to_air = self.config.destination.is_none()
+                        || (self.engine.drained() && !self.egress_running);
+                    match self.engine.last_seq() {
+                        Some(mark) if !nothing_to_air => {
+                            self.engine.end_after(mark);
+                            self.state.ending = true;
+                            self.end_deadline = Some(self.end_deadline_from_now());
+                            info!("the stream ends once what is buffered has aired");
+                        }
+                        _ => {
+                            self.finish_stream();
+                            self.state.ended = true;
+                            info!("stream ended by the streamer; nothing was left to air");
+                        }
+                    }
+                }
                 self.publish_state();
                 let _ = reply.send(());
             }
@@ -312,8 +345,14 @@ impl Core {
                     // The encoder may have kept sending while ended. None of that
                     // may air: the new broadcast starts from what arrives from now.
                     self.engine.discard();
+                    self.clear_end();
                     self.state.ended = false;
                     info!("resuming the broadcast");
+                } else if self.state.ending && !self.restart_after_end {
+                    // Changed their mind before the end aired: keep broadcasting.
+                    self.engine.cancel_end();
+                    self.clear_end();
+                    info!("the stream keeps going; End stream was cancelled");
                 }
                 self.publish_state();
                 let _ = reply.send(());
@@ -335,7 +374,27 @@ impl Core {
                 reply,
             } => {
                 let result = self.accept_publisher(&app, &key);
+                // The previous stream was stopped on purpose, so this is a new one.
+                let new_stream = self.ingest_ended.is_some() && self.encoder_stopped;
                 if result.is_ok() {
+                    if new_stream && self.egress_running && !self.state.ended {
+                        // The previous stream's end is still airing. Its broadcast
+                        // ends once it has, and this stream gets a new one, as when
+                        // streaming straight to the destination. Continuing the old
+                        // broadcast would leave it without data for as long as the
+                        // encoder was stopped, which destinations take badly.
+                        if !self.state.ending
+                            && !self.restart_after_end
+                            && let Some(mark) = self.engine.last_seq()
+                        {
+                            self.engine.end_after(mark);
+                            self.end_deadline = Some(self.end_deadline_from_now());
+                        }
+                        self.restart_after_end = true;
+                        info!(
+                            "new encoder stream; it starts a new broadcast once the previous one has aired"
+                        );
+                    }
                     if let Some(old) = self.publisher.take() {
                         // The encoder reconnected while its old connection still
                         // looked open: close that one and carry on with this one.
@@ -531,6 +590,52 @@ impl Core {
         }
         self.engine.discard();
         self.ingest_ended = None;
+        self.clear_end();
+    }
+
+    /// Forgets a pending end at the engine's end mark.
+    fn clear_end(&mut self) {
+        self.state.ending = false;
+        self.restart_after_end = false;
+        self.end_deadline = None;
+    }
+
+    /// When a broadcast told to end at the end mark ends anyway: once all of it
+    /// was due to air, plus the slack a slow destination gets.
+    fn end_deadline_from_now(&self) -> Instant {
+        Instant::now() + Duration::from_micros(self.engine.effective_delay()) + DRAIN_SLACK
+    }
+
+    /// Ends the broadcast at the engine's end mark once everything up to it has
+    /// been written. Returns true if it did.
+    fn end_at_mark(&mut self) -> bool {
+        if !self.state.ending && !self.restart_after_end {
+            return false;
+        }
+        let aired = self.engine.end_reached() && self.counters.backlog.load(Ordering::Relaxed) == 0;
+        let overdue = self.end_deadline.is_some_and(|d| Instant::now() >= d);
+        if !aired && !overdue {
+            return false;
+        }
+        if !aired {
+            warn!("the destination stopped taking data; ending the broadcast without the rest");
+        }
+        if self.restart_after_end {
+            info!("the previous stream has aired; ending its broadcast for the new one");
+            if self.egress_running {
+                self.egress_running = false;
+                let _ = self.egress_ctl.send(EgressCtl::Stop);
+            }
+            // Keeps what the new stream has sent; its broadcast starts when due.
+            self.engine.restart_after_end();
+            self.clear_end();
+        } else {
+            info!("everything up to End stream has aired; ending the broadcast");
+            self.finish_stream();
+            self.state.ended = true;
+        }
+        self.publish_state();
+        true
     }
 
     /// Runs the engine, forwards due messages and manages the egress connection.
@@ -565,6 +670,9 @@ impl Core {
             }
             return;
         };
+        if self.end_at_mark() {
+            return;
+        }
         let gone = self.encoder_gone();
         // OBS stopped the stream on purpose (rather than crashing or losing its
         // connection): there is no reconnect to wait for, so the broadcast ends as
