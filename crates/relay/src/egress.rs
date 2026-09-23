@@ -160,7 +160,7 @@ pub(crate) async fn run(
                     Some(EgressCtl::Start(t)) => Some(t),
                     Some(EgressCtl::Stop | EgressCtl::Abort) | None => {
                         info!("connection attempt cancelled");
-                        status(&events, EgressStatus::Idle, None);
+                        stopped(&events, &mut media, &counters);
                         None
                     }
                 };
@@ -195,7 +195,7 @@ pub(crate) async fn run(
             target = match end {
                 RunEnd::Retarget(t) => Some(t),
                 _ => {
-                    status(&events, EgressStatus::Idle, None);
+                    stopped(&events, &mut media, &counters);
                     None
                 }
             };
@@ -232,7 +232,7 @@ pub(crate) async fn run(
         match end {
             RunEnd::Stopped => {
                 target = None;
-                status(&events, EgressStatus::Idle, None);
+                stopped(&events, &mut media, &counters);
             }
             RunEnd::Retarget(t) => target = Some(t),
             RunEnd::Failed(f) => {
@@ -252,6 +252,21 @@ pub(crate) async fn run(
 
 fn status(events: &mpsc::UnboundedSender<Event>, s: EgressStatus, error: Option<String>) {
     let _ = events.send(Event::EgressStatus { status: s, error });
+}
+
+/// Reports that the egress has stopped, after dropping the media still queued
+/// for the connection that ended, so the backlog it reports is already empty.
+fn stopped(
+    events: &mpsc::UnboundedSender<Event>,
+    media: &mut mpsc::UnboundedReceiver<(u64, OutMsg)>,
+    counters: &Counters,
+) {
+    while let Ok((_, m)) = media.try_recv() {
+        counters
+            .backlog
+            .fetch_sub(m.payload.len() as u64, Ordering::Relaxed);
+    }
+    status(events, EgressStatus::Idle, None);
 }
 
 /// Sleeps `wait` before the next attempt. Returns the target to use next (None if
@@ -274,7 +289,7 @@ async fn wait_backoff(
             c = ctl.recv() => match c {
                 Some(EgressCtl::Start(t)) => return Some(t),
                 Some(EgressCtl::Stop | EgressCtl::Abort) | None => {
-                    status(events, EgressStatus::Idle, None);
+                    stopped(events, media, counters);
                     return None;
                 }
             },
@@ -528,5 +543,58 @@ async fn publish(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn stopping_leaves_no_backlog_behind() {
+        let (ctl_tx, mut ctl) = mpsc::unbounded_channel();
+        let (media_tx, mut media) = mpsc::unbounded_channel();
+        let (events, mut events_rx) = mpsc::unbounded_channel();
+        let counters = Counters::default();
+        // Media queued for a connection that has gone, and then a stop.
+        for i in 0..100u32 {
+            counters.backlog.fetch_add(1000, Ordering::Relaxed);
+            let m = OutMsg {
+                kind: Kind::Video,
+                timestamp: i,
+                payload: Bytes::from(vec![0u8; 1000]),
+                seq: Some(u64::from(i)),
+            };
+            media_tx.send((0, m)).unwrap();
+        }
+        ctl_tx.send(EgressCtl::Stop).unwrap();
+        let target = Target {
+            url: RtmpUrl::parse("rtmp://127.0.0.1/app").unwrap(),
+            key: "k".into(),
+            connect_props: Vec::new(),
+        };
+        let next = wait_backoff(
+            &mut ctl,
+            &mut media,
+            &events,
+            &counters,
+            target,
+            "unreachable",
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(next.is_none());
+        // Idle is reported with the queue already emptied, so the state published
+        // for it shows no backlog.
+        assert_eq!(counters.backlog.load(Ordering::Relaxed), 0);
+        let mut last = None;
+        while let Ok(ev) = events_rx.try_recv() {
+            if let Event::EgressStatus { status, .. } = ev {
+                last = Some(status);
+            }
+        }
+        assert_eq!(last, Some(EgressStatus::Idle));
     }
 }
