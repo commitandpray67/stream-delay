@@ -17,8 +17,8 @@ struct Assets;
 const MISSING: &str = r#"<!doctype html><meta charset="utf-8"><title>stream-delay</title>
 <body style="font-family:system-ui;background:#0e0e10;color:#efeff1;padding:2rem">
 <h1>stream-delay is running</h1>
-<p>The web interface was not included in this build. Run <code>pnpm -C ui install && pnpm -C ui build</code>
-and rebuild, or use the HTTP API directly.</p></body>"#;
+<p>The web interface was not included in this build. Run <code>pnpm -C ui install</code>, then
+<code>pnpm -C ui build</code>, then build stream-delay again; or use the HTTP API directly.</p></body>"#;
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()

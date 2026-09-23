@@ -10,7 +10,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use streamdelay_config::{Config, Secrets};
-use streamdelay_control::{App, AppOptions, Overrides, diagnostics};
+use streamdelay_control::{App, AppError, AppOptions, Overrides, diagnostics};
+use streamdelay_relay::RelayError;
 use tracing::info;
 use tracing_subscriber::prelude::*;
 
@@ -262,7 +263,7 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
             overrides,
         })
         .await
-        .context("starting stream-delay")?;
+        .map_err(startup_error)?;
         let urls = app.urls();
         println!(
             "OBS server:  {}  (Settings → Stream → Custom, any stream key)",
@@ -279,4 +280,22 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
         app.shutdown().await;
         Ok(())
     })
+}
+
+/// Adds what to do about the most common startup failure, a port in use.
+fn startup_error(e: AppError) -> anyhow::Error {
+    let in_use = matches!(
+        &e,
+        AppError::Bind { source, .. } | AppError::Relay(RelayError::Bind { source, .. })
+            if source.kind() == std::io::ErrorKind::AddrInUse
+    );
+    let err = anyhow::Error::new(e).context("starting stream-delay");
+    if in_use {
+        err.context(
+            "a port stream-delay needs is already in use. Is stream-delay (or its desktop app) \
+             already running? Close it, or choose other ports with --api and --ingest.",
+        )
+    } else {
+        err
+    }
 }
