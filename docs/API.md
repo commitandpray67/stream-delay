@@ -115,7 +115,7 @@ The server ignores what clients send, apart from closing the socket; messages ov
 
 ## Health check
 
-`GET /healthz` needs no token and returns `{"status": "ok", "app": "stream-delay", "version": "0.1.0"}`.
+`GET /healthz` needs no token and returns `{"status": "ok", "app": "stream-delay", "version": "0.2.0"}`.
 The desktop app uses it to tell when another copy of stream-delay already holds its
 ports.
 

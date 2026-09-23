@@ -35,8 +35,6 @@ It works with any encoder that can stream RTMP (OBS, Streamlabs, vMix, hardware 
 
 The [quick start](https://commitandpray67.github.io/stream-delay/quick-start.html) walks through each step.
 
-> v0.1.0 has Windows and Linux installers and the Docker image. The macOS app and the standalone `streamdelayd` downloads come with the next release; until then, build them [from source](#build-from-source).
-
 ## Servers, Docker and second PCs
 
 `streamdelayd` is the same relay without the desktop window. The dashboard, dock and overlay work the same.
@@ -76,7 +74,7 @@ The desktop app is in [`apps/desktop`](apps/desktop), which explains how to buil
 
 ## Roadmap
 
-- **Done:** the RTMP/RTMPS relay, the delay engine, dock, overlay and API, the desktop app and installers, and hardening. v0.1.0 is the first public beta.
+- **Done:** the RTMP/RTMPS relay, the delay engine, dock, overlay and API, the desktop app and installers, and hardening. Public betas since v0.1.0.
 - **Next:** testing on real streams, signed installers for Windows and macOS, then **v1.0**.
 - **Later:** a Stream Deck plugin, per-destination delay for multistreaming, long disk-backed delays, and scene-based automation.
 
