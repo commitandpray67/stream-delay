@@ -345,11 +345,11 @@ impl Publisher {
 }
 
 pub async fn start_relay(sink: SocketAddr, key: DestinationKey, grace: Duration) -> RelayHandle {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .try_init();
-    streamdelay_relay::start(RelayConfig {
+    start_relay_with(relay_config(sink, key, grace)).await
+}
+
+pub fn relay_config(sink: SocketAddr, key: DestinationKey, grace: Duration) -> RelayConfig {
+    RelayConfig {
         ingest_bind: "127.0.0.1:0".parse().unwrap(),
         destination: Some(Destination {
             url: format!("rtmp://{sink}/app"),
@@ -361,9 +361,15 @@ pub async fn start_relay(sink: SocketAddr, key: DestinationKey, grace: Duration)
         },
         encoder_grace: grace,
         ..Default::default()
-    })
-    .await
-    .unwrap()
+    }
+}
+
+pub async fn start_relay_with(config: RelayConfig) -> RelayHandle {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    streamdelay_relay::start(config).await.unwrap()
 }
 
 pub fn video_frames(log: &SinkLog) -> Vec<(Instant, u32, u32)> {

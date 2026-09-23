@@ -157,6 +157,14 @@ async fn setup_with(
     service_type: &str,
     settings: Value,
 ) -> (axum::Router, Shared, Arc<Secrets>, tempfile::TempDir) {
+    setup_with_config(service_type, settings, |_| {}).await
+}
+
+async fn setup_with_config(
+    service_type: &str,
+    settings: Value,
+    edit: impl FnOnce(&mut Config),
+) -> (axum::Router, Shared, Arc<Secrets>, tempfile::TempDir) {
     let (obs, obs_port) = spawn_obs(service_type, settings).await;
 
     let relay = streamdelay_relay::start(RelayConfig {
@@ -168,6 +176,7 @@ async fn setup_with(
     let mut config = Config::default();
     config.api.token = TOKEN.into();
     config.obs.port = obs_port;
+    edit(&mut config);
     let dir = tempfile::tempdir().unwrap();
     let secrets = Arc::new(Secrets::new(dir.path(), false));
     let router = streamdelay_control::router(relay, config, secrets.clone(), PORT);
@@ -364,6 +373,55 @@ async fn saved_password_and_backup_stay_with_their_obs() {
     let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
     assert_eq!(s, StatusCode::OK, "{r}");
     assert_eq!(home.lock().unwrap().settings["key"], "live_987_secret");
+}
+
+#[tokio::test]
+async fn an_earlier_stream_delay_address_does_not_replace_the_backup() {
+    let (app, obs, secrets, _dir) = setup().await;
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    // stream-delay's port changed since (the one it wanted was taken): OBS still
+    // streams to the old address.
+    let current = obs.lock().unwrap().settings["server"].clone();
+    obs.lock().unwrap().settings = json!({
+        "server": "rtmp://127.0.0.1:1/live", "key": "streamdelay", "use_auth": false,
+    });
+    let (_, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+    assert_eq!(status["configured"], false);
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(obs.lock().unwrap().settings["server"], current);
+    assert!(
+        secrets
+            .get(secret::OBS_BACKUP)
+            .unwrap()
+            .contains("live_987_secret"),
+        "the backup of OBS's own settings was replaced"
+    );
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(obs.lock().unwrap().settings["key"], "live_987_secret");
+}
+
+#[tokio::test]
+async fn an_obs_on_another_computer_is_not_pointed_at_itself() {
+    // stream-delay's RTMP input only listens on this computer (the default).
+    let (app, obs, _secrets, _dir) = setup_with_config(
+        "rtmp_common",
+        json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+        |c| c.obs.host = "192.0.2.10".into(),
+    )
+    .await;
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("--ingest 0.0.0.0:1935"),
+        "{r}"
+    );
+    assert_eq!(obs.lock().unwrap().service_type, "rtmp_common");
 }
 
 #[tokio::test]

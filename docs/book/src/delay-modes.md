@@ -101,10 +101,13 @@ work the same. The switch takes effect immediately.
 - **If the connection to Twitch drops,** stream-delay reconnects at once (then
   after ½, 1, 2 and 4 s, and every 5 s after that) and continues from where it
   was in the buffer, so viewers miss nothing; the delay grows by however long the
-  outage lasted. Press a preset to bring it back to the delay you want.
+  outage lasted. Press a preset to bring it back to the delay you want. A
+  connection that dies without either side noticing (after your computer switched
+  networks, say) counts as dropped once Twitch has taken no data for 20 s.
 - **When you click *Stop Streaming* in OBS,** stream-delay airs what is still
   buffered (the last D seconds) and then ends the Twitch broadcast cleanly. With
-  no delay, the broadcast ends right away.
+  no delay, the broadcast ends right away. A stream shorter than the delay (a
+  quick test, say) still airs in full, D seconds later.
 - **If OBS crashes or loses its connection,** stream-delay keeps Twitch connected
   for 30 s (configurable on the **Delay settings** tab) and keeps airing what is
   buffered. When OBS comes back in time, the stream continues from its first

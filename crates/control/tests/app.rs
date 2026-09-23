@@ -287,6 +287,23 @@ async fn command_line_settings_are_not_saved_with_dashboard_changes() {
     assert_eq!(running.destination.url, "rtmp://127.0.0.1:1/test");
     assert_eq!(running.delay.max_seconds, 60);
     assert_eq!(running.ingest.grace_seconds, 45);
+    // The dashboard saves whole sections, overridden values included; only what
+    // changed is saved.
+    let mut delay = serde_json::to_value(&running.delay).unwrap();
+    delay["presets"][1]["seconds"] = 7.into();
+    let body = serde_json::json!({ "delay": delay, "grace_seconds": 45, "allow_lan": false });
+    let (s, body) = http(&app, "PUT", "/api/v1/config", &body.to_string()).await;
+    assert_eq!(s, 200, "{body}");
+    let saved = Config::load_or_create(&path).unwrap();
+    assert_eq!(
+        saved.delay.presets[1].seconds, 7.0,
+        "the change was not saved"
+    );
+    assert_eq!(
+        saved.delay.max_seconds, 120,
+        "a command-line value was saved"
+    );
+    assert_eq!(app.config().delay.max_seconds, 60);
     // Setting an overridden value from the dashboard saves it.
     let body = serde_json::json!({ "destination": {
         "service": "custom", "url": "rtmp://127.0.0.1:2/other", "key_mode": "stored" } });

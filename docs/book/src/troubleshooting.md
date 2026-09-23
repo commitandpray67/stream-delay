@@ -14,7 +14,8 @@ before your real stream.
 - Check the server address in OBS against the one on the **Setup** tab. If port
   1935 was already in use (by another RTMP server or a second copy of
   stream-delay), the desktop app moves to 19350 or 29350 and shows the new address
-  there. Run the OBS setup again, or update OBS by hand.
+  there. Run the OBS setup again (it keeps the backup of your original OBS
+  settings), or update OBS by hand.
 - With an ingest key (Docker or two-PC setups), OBS must use that key. After five
   wrong keys, stream-delay ignores that computer for a minute.
 

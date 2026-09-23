@@ -19,7 +19,8 @@ All notable changes to stream-delay are listed here. The format follows
   later). Every second spent reconnecting added a second of delay. A refused
   stream (for example a wrong key) is still retried only every 10 s.
 - Settings given on the command line apply to that run only: changing settings
-  on the dashboard no longer writes them to `config.toml`.
+  on the dashboard saves just what was changed there, never the command-line
+  values, to `config.toml`.
 - The dock no longer has a separate **Go live now** button: its **Live** preset
   does the same, and the dock always shows it, even without a 0 s preset. The
   dashboard, tray menu and hotkeys keep both go-live actions.
@@ -38,7 +39,26 @@ All notable changes to stream-delay are listed here. The format follows
   stream-delay kept retrying forever, and once Twitch was reachable again it
   started a new broadcast with a leftover frame of the finished stream (which
   can notify followers). It now gives up once the grace period is over and
-  discards what never aired.
+  discards what never aired. A stream shorter than the delay still airs in
+  full, on schedule.
+- **A connection to Twitch that died without either side noticing** (after the
+  computer switched networks, for example) froze the broadcast until the
+  operating system gave up on it, which can take a quarter of an hour on macOS
+  and Linux. stream-delay now reconnects once Twitch has taken no data for 20 s,
+  and continues from the buffer.
+- **`docker stop` (and systemd) did not stop `streamdelayd` cleanly:** the
+  request was ignored, Docker killed it after 10 s, and Twitch was not told the
+  broadcast had ended. It now ends the broadcast and exits, like Ctrl+C.
+- **Running the OBS setup again after stream-delay's port changed** (as the
+  troubleshooting guide suggests) replaced the backup of your original OBS
+  settings with stream-delay's old address, so **Restore** could not bring them
+  back. The backup is now kept.
+- The OBS setup pointed an OBS on another computer at `127.0.0.1`, that is at
+  itself. It now gives OBS this computer's address, or explains that
+  stream-delay only accepts streams from this computer.
+- With a maximum delay below 120 s (for example `--max-delay 60`), the default
+  120 s preset failed when pressed and the delay settings could not be saved.
+  Presets longer than the maximum are now left out, with a warning in the log.
 - **End stream while stream-delay was still connecting to Twitch** let that
   connection finish and start the broadcast for a moment. The attempt is now
   dropped before the broadcast starts.

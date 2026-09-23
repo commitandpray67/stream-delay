@@ -60,6 +60,8 @@ docker run -d --name stream-delay --restart unless-stopped \
 docker logs stream-delay          # shows the dashboard link with its token
 ```
 
+`docker stop` ends a running broadcast cleanly, like Ctrl+C in a terminal.
+
 The container listens on all interfaces, so it requires an ingest key: OBS must
 stream with that key (Settings → Stream → Stream Key), and nobody else can
 publish to your relay. Set it with `STREAMDELAY_INGEST_KEY`; without it,

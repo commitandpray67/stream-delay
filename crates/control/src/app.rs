@@ -192,6 +192,21 @@ impl App {
         }
         crate::settings::validate_limits(&config.delay, config.ingest.grace_seconds)
             .map_err(AppError::Settings)?;
+        // Presets longer than the maximum (after a lower --max-delay, or a hand
+        // edit) could only fail, and would keep the dashboard from saving the
+        // delay settings.
+        let max = config.delay.max_seconds as f64;
+        let presets = config.delay.presets.len();
+        config.delay.presets.retain(|p| p.seconds <= max);
+        if config.delay.presets.len() < presets {
+            warn!("ignoring delay presets longer than the maximum delay of {max} s");
+        }
+        if config.delay.presets.is_empty() {
+            config.delay.presets.push(streamdelay_config::Preset {
+                seconds: 0.0,
+                mode: config.delay.default_mode,
+            });
+        }
         if config.api.token.chars().count() < MIN_TOKEN_LEN {
             return Err(AppError::WeakToken);
         }

@@ -317,11 +317,40 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
         if let Some(p) = &config_path {
             info!("settings file: {}", p.display());
         }
-        tokio::signal::ctrl_c().await?;
+        stop_requested().await?;
         info!("shutting down");
         app.shutdown().await;
         Ok(())
     })
+}
+
+/// Waits for Ctrl+C, or for the request to stop that service managers send:
+/// SIGTERM from `docker stop` and systemd (ignored otherwise, as the container's
+/// first process), or the console window closing on Windows. Stopping then ends
+/// the broadcast cleanly instead of being killed mid-stream.
+async fn stop_requested() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r,
+            _ = term.recv() => Ok(()),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let (mut brk, mut close, mut shutdown) = (ctrl_break()?, ctrl_close()?, ctrl_shutdown()?);
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r,
+            _ = brk.recv() => Ok(()),
+            _ = close.recv() => Ok(()),
+            _ = shutdown.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    tokio::signal::ctrl_c().await
 }
 
 /// Adds what to do about the most common startup failure, a port in use.

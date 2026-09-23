@@ -79,22 +79,23 @@ impl AppState {
     /// Changes are made and saved one at a time, so a slower save can never
     /// overwrite a newer change in the file.
     ///
-    /// `change` runs twice: on the settings in effect (its result is returned) and
-    /// on the saved ones. So command-line overrides stay in effect but never reach
-    /// the file, unless a change sets that setting itself.
+    /// Only the settings `change` actually changed are saved. The dashboard sends
+    /// whole sections, which include this run's command-line overrides; those stay
+    /// in effect but never reach the file, unless a change sets another value.
     pub(crate) fn change_config<R>(
         &self,
-        mut change: impl FnMut(&mut Config) -> R,
+        change: impl FnOnce(&mut Config) -> R,
     ) -> Result<(Config, R), ApiError> {
         let _saving = self
             .shared
             .save_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (config, r) = {
+        let (before, config, r) = {
             let mut c = self.shared.config.write().expect("config lock");
+            let before = c.clone();
             let r = change(&mut c);
-            (c.clone(), r)
+            (before, c.clone(), r)
         };
         let saved = {
             let mut s = self
@@ -102,7 +103,7 @@ impl AppState {
                 .saved
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            change(&mut s);
+            *s = with_changes(&s, &before, &config);
             s.clone()
         };
         if let Some(path) = &self.shared.config_path {
@@ -152,6 +153,52 @@ impl AppState {
             .key_override
             .as_deref()
             .filter(|_| !app::different_server(&self.shared.key_override_url, url))
+    }
+}
+
+/// `saved` with every setting that differs between `before` and `after` set as in
+/// `after`.
+fn with_changes(saved: &Config, before: &Config, after: &Config) -> Config {
+    let json = |c: &Config| serde_json::to_value(c);
+    let merged = match (json(saved), json(before), json(after)) {
+        (Ok(mut s), Ok(b), Ok(a)) => {
+            copy_changes(&mut s, &b, &a);
+            serde_json::from_value(s).map_err(|e| e.to_string())
+        }
+        (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => Err(e.to_string()),
+    };
+    merged.unwrap_or_else(|e| {
+        // Not expected; saving the whole change is better than losing it.
+        tracing::warn!("could not work out which settings changed: {e}");
+        after.clone()
+    })
+}
+
+fn copy_changes(
+    target: &mut serde_json::Value,
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) {
+    use serde_json::Value;
+    if before == after {
+        return;
+    }
+    match (target, before, after) {
+        (Value::Object(t), Value::Object(b), Value::Object(a)) => {
+            for (k, av) in a {
+                match (b.get(k), t.get_mut(k)) {
+                    (Some(bv), Some(tv)) => copy_changes(tv, bv, av),
+                    (Some(bv), None) if bv == av => {}
+                    _ => {
+                        t.insert(k.clone(), av.clone());
+                    }
+                }
+            }
+            for k in b.keys().filter(|k| !a.contains_key(*k)) {
+                t.remove(k);
+            }
+        }
+        (t, _, a) => *t = a.clone(),
     }
 }
 

@@ -200,6 +200,39 @@ async fn stopping_the_stream_airs_the_rest_then_ends_the_broadcast_cleanly() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_shorter_than_the_delay_still_airs() {
+    // A short test stream: it ends, and the grace period runs out, well before
+    // the relay would connect to air it (3 s before it is due).
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_millis(500)).await;
+    relay.set_delay(7_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_millis(1_500)).await;
+    let last = p.frame - 1;
+    let first_captured = p.captured_at(0);
+    p.stop().await;
+    wait_until("the broadcast ended", Duration::from_secs(15), || {
+        log.lock().unwrap().unpublished == 1
+    })
+    .await;
+    let l = log.lock().unwrap();
+    assert_eq!(l.connections, 1);
+    let ids = aired(&l);
+    assert_eq!(ids.first(), Some(&0), "the stream did not air: {ids:?}");
+    assert_consecutive(&ids);
+    assert_eq!(
+        *ids.last().unwrap(),
+        last,
+        "the end of the stream did not air"
+    );
+    let first = l.media.iter().find(|m| m.kind == MediaKind::Video).unwrap();
+    assert!(
+        first.at.saturating_duration_since(first_captured) >= Duration::from_millis(6_950),
+        "aired before the delay"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopping_in_obs_ends_the_broadcast_without_waiting_for_the_grace_period() {
     let (sink, log, _kill) = start_sink().await;
     let relay = start_relay(sink, key(), Duration::from_secs(10)).await;
@@ -347,6 +380,39 @@ async fn a_destination_down_at_the_end_is_given_up_and_nothing_airs_later() {
         );
     }
     next.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_stream_whose_destination_is_down_is_given_up_too() {
+    let dead = dead_address();
+    let relay = start_relay(dead, key(), Duration::from_millis(500)).await;
+    relay.set_delay(6_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(1)).await;
+    p.stop().await;
+    // Nothing is due yet, and the grace period runs out: the relay waits for the
+    // stream's turn to air, tries, and gives up once the destination has had the
+    // grace period to answer.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(relay.state().egress.status, EgressStatus::Idle);
+    wait_until("the relay tried", Duration::from_secs(8), || {
+        relay.state().egress.status == EgressStatus::Retrying
+    })
+    .await;
+    wait_until("the relay gave up", Duration::from_secs(8), || {
+        relay.state().egress.status == EgressStatus::Idle
+    })
+    .await;
+    let said = relay.state().egress.last_error.unwrap_or_default();
+    assert!(said.contains("could not be reached"), "{said}");
+    let (_, log, _kill) = start_sink_with(&dead.to_string(), SinkOptions::default()).await;
+    tokio::time::sleep(Duration::from_secs(6)).await; // longer than any retry backoff
+    assert_eq!(
+        log.lock().unwrap().connections,
+        0,
+        "a finished stream went live"
+    );
     relay.shutdown().await;
 }
 

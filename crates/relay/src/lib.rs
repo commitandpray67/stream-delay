@@ -75,6 +75,9 @@ pub struct RelayConfig {
     /// An encoder connection that has not started publishing within this time of
     /// connecting (handshake included) is closed.
     pub publish_timeout: Duration,
+    /// A destination connection that accepts no data at all for this long is
+    /// taken to be dead and replaced (the stream resumes from the buffer).
+    pub stall_timeout: Duration,
 }
 
 impl Default for RelayConfig {
@@ -87,6 +90,8 @@ impl Default for RelayConfig {
             engine: EngineConfig::default(),
             encoder_grace: Duration::from_secs(30),
             publish_timeout: Duration::from_secs(15),
+            // Congestion slows the upload down, but never stops it this long.
+            stall_timeout: Duration::from_secs(20),
         }
     }
 }

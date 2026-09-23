@@ -123,6 +123,7 @@ pub(crate) async fn run(
     mut media: mpsc::UnboundedReceiver<(u64, OutMsg)>,
     events: mpsc::UnboundedSender<Event>,
     counters: Arc<Counters>,
+    stall_timeout: Duration,
 ) {
     let mut target: Option<Target> = None;
     // Failed attempts in a row.
@@ -206,7 +207,15 @@ pub(crate) async fn run(
         let Ok(generation) = gen_rx.await else { return };
         let started = Instant::now();
         let (end, last_written) = publish(
-            stream, session, &aborter, generation, &mut ctl, &mut media, &events, &counters,
+            stream,
+            session,
+            &aborter,
+            generation,
+            stall_timeout,
+            &mut ctl,
+            &mut media,
+            &events,
+            &counters,
         )
         .await;
         // The socket closes once this second handle goes too; don't keep it open
@@ -381,16 +390,40 @@ enum Written {
 }
 
 /// Writes `data` unless a control message arrives first, so stopping never waits
-/// on a stalled destination.
+/// on a stalled destination. Fails if the destination takes none of it for
+/// `stall_timeout`: a connection that died without the network reporting it
+/// (after the computer switched networks, say) otherwise holds the stream until
+/// the OS gives up on it, which can take a quarter of an hour.
 async fn write_or_ctl(
     wr: &mut WriteHalf<BoxStream>,
     data: &[u8],
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
+    stall_timeout: Duration,
 ) -> Written {
+    let write = async {
+        let mut rest = data;
+        while !rest.is_empty() {
+            match tokio::time::timeout(stall_timeout, wr.write(rest)).await {
+                Ok(Ok(0)) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(Ok(n)) => rest = &rest[n..],
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "the destination took no data for {} s",
+                            stall_timeout.as_secs()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    };
     tokio::select! {
         biased;
         c = ctl.recv() => Written::Interrupted(c),
-        r = wr.write_all(data) => match r {
+        r = write => match r {
             Ok(()) => Written::Done,
             Err(e) => Written::Failed(e),
         },
@@ -403,6 +436,7 @@ async fn publish(
     mut session: ClientSession,
     aborter: &Aborter,
     generation: u64,
+    stall_timeout: Duration,
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
     media: &mut mpsc::UnboundedReceiver<(u64, OutMsg)>,
     events: &mpsc::UnboundedSender<Event>,
@@ -450,7 +484,7 @@ async fn publish(
                 }
                 let out = session.take_output();
                 if !out.is_empty() {
-                    match write_or_ctl(&mut wr, &out, ctl).await {
+                    match write_or_ctl(&mut wr, &out, ctl, stall_timeout).await {
                         Written::Done => {}
                         Written::Failed(e) => return (RunEnd::Failed(Failure::new(format!("write failed: {e}"))), last_written),
                         Written::Interrupted(c) => return (ended_by(c, aborter), last_written),
@@ -478,7 +512,7 @@ async fn publish(
                     }
                 }
                 let out = session.take_output();
-                let result = write_or_ctl(&mut wr, &out, ctl).await;
+                let result = write_or_ctl(&mut wr, &out, ctl, stall_timeout).await;
                 counters.backlog.fetch_sub(bytes, Ordering::Relaxed);
                 match result {
                     Written::Done => {}

@@ -233,8 +233,6 @@ async fn update_config(
             .map_err(secret_err)?;
         info!("destination server changed; the stored stream key was removed");
     }
-    // Runs on the settings in effect and on the saved ones (see `change_config`);
-    // what it reports comes from the settings in effect.
     let (new_config, (destination_changed, keep_buffer_changed, restart)) =
         st.change_config(|c| {
             let mut restart = false;

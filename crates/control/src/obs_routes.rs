@@ -1,5 +1,7 @@
 //! OBS setup wizard endpoints (obs-websocket).
 
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -8,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use streamdelay_config::{Config, KeyMode, ObsBackup, SERVICES, SecretStore, secret};
 use streamdelay_obs::{Obs, ObsError, ObsTarget, StreamSettings};
+use streamdelay_relay::RtmpUrl;
 use tracing::{info, warn};
 
 use crate::AppState;
-use crate::app::{same_server, urls};
+use crate::app::{LOCAL_KEY, same_server, urls};
 use crate::routes::ApiError;
 
 const OVERLAY_SOURCE: &str = "Stream Delay Overlay";
@@ -70,6 +73,78 @@ fn obs_id(host: &str, port: u16) -> String {
     } else {
         format!("{host}:{port}")
     }
+}
+
+/// True for an OBS on this computer.
+fn is_local(host: &str) -> bool {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// This computer's address as seen from `host`: the one the OS sends from to
+/// reach it. Nothing is sent.
+async fn local_ip_towards(host: &str, port: u16) -> Option<IpAddr> {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let to = tokio::net::lookup_host((host, port)).await.ok()?.next()?;
+    let any = if to.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    };
+    let socket = tokio::net::UdpSocket::bind(any).await.ok()?;
+    socket.connect(to).await.ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
+}
+
+/// The server address the OBS in `c` should stream to. For an OBS on another
+/// computer, `127.0.0.1` would be that computer itself.
+async fn server_for_obs(st: &AppState, c: &Config) -> Result<String, ApiError> {
+    if is_local(&c.obs.host) {
+        return Ok(urls(st).obs_server);
+    }
+    let ingest = st.relay().ingest_addr();
+    let ip = if ingest.ip().is_loopback() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "OBS runs on another computer, but stream-delay only accepts streams from this \
+             one. Start stream-delay with --ingest 0.0.0.0:1935 (see Two-PC setups in the \
+             user guide), or set up OBS by hand."
+                .into(),
+        ));
+    } else if ingest.ip().is_unspecified() {
+        local_ip_towards(&c.obs.host, c.obs.port)
+            .await
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "could not find this computer's address on the way to {}",
+                        c.obs.host
+                    ),
+                )
+            })?
+    } else {
+        ingest.ip()
+    };
+    Ok(format!(
+        "rtmp://{}/live",
+        SocketAddr::new(ip, ingest.port())
+    ))
+}
+
+/// True if OBS streams to a stream-delay already, for example at an earlier
+/// address of this one (its port changed): then OBS's settings are not the
+/// user's own, and backing them up would replace the backup that is.
+fn streams_to_stream_delay(s: &StreamSettings, ingest_key: &str) -> bool {
+    let key = s.settings.get("key").and_then(Value::as_str).unwrap_or("");
+    s.service_type == "rtmp_custom"
+        && s.settings
+            .get("server")
+            .and_then(Value::as_str)
+            .and_then(|u| RtmpUrl::parse(u).ok())
+            .is_some_and(|u| u.app == "live")
+        && (key == LOCAL_KEY || key == ingest_key)
 }
 
 /// Moves a backup made by an older version, which kept OBS's settings (all but
@@ -149,11 +224,13 @@ pub(crate) fn backup_secrets(secrets: &dyn SecretStore) -> Vec<String> {
 }
 
 async fn build_status(st: &AppState, obs: Result<Obs, ObsError>) -> ObsStatus {
+    let config = st.config();
     let mut s = ObsStatus {
-        has_backup: st.config().obs.backup.is_some(),
+        has_backup: config.obs.backup.is_some(),
         password_saved: st.shared.secrets.get(secret::OBS_PASSWORD).is_some(),
         ..Default::default()
     };
+    let server = server_for_obs(st, &config).await.ok();
     let result = match obs {
         Ok(obs) => obs.info().await,
         Err(e) => Err(e),
@@ -163,7 +240,7 @@ async fn build_status(st: &AppState, obs: Result<Obs, ObsError>) -> ObsStatus {
             s.reachable = true;
             s.version = Some(info.version);
             s.streaming = info.streaming;
-            s.configured = info.stream.points_to(&urls(st).obs_server);
+            s.configured = server.is_some_and(|server| info.stream.points_to(&server));
             s.current_server = info.stream.server();
         }
         Err(e) => s.error = Some(e.to_string()),
@@ -254,7 +331,7 @@ struct ConfigureResult {
 /// Changes and saves the settings, and updates open pages.
 fn change(
     st: &AppState,
-    f: impl FnMut(&mut streamdelay_config::Config),
+    f: impl FnOnce(&mut streamdelay_config::Config),
 ) -> Result<streamdelay_config::Config, ApiError> {
     let (config, ()) = st.change_config(f)?;
     st.shared.config_tx.send_replace(config.clone());
@@ -266,6 +343,7 @@ async fn configure(
     Json(body): Json<ConfigureBody>,
 ) -> Result<Json<ConfigureResult>, ApiError> {
     let config = st.config();
+    let server = server_for_obs(&st, &config).await?;
     let obs = Obs::connect(&target(&st, &config)).await?;
     let info = obs.info().await?;
     if info.streaming {
@@ -275,7 +353,14 @@ async fn configure(
     let mut messages = Vec::new();
     let mut imported_key = false;
 
-    if !info.stream.points_to(&links.obs_server) {
+    if info.stream.points_to(&server) {
+        messages.push("OBS already streams through stream-delay.".to_string());
+    } else if streams_to_stream_delay(&info.stream, &links.obs_key) {
+        // An earlier address of stream-delay: keep the backup of OBS's own settings.
+        obs.stream_to(&server, &links.obs_key).await?;
+        info!("OBS now streams to {server} (it streamed to an earlier address)");
+        messages.push("OBS now streams to stream-delay's current address.".to_string());
+    } else {
         // Back up OBS's settings. They hold the stream key and maybe a server
         // password, so they are a secret, not part of the config file.
         let backup = ObsBackup {
@@ -315,11 +400,9 @@ async fn configure(
             st.relay().set_destination(st.destination(&config))?;
         }
 
-        obs.stream_to(&links.obs_server, &links.obs_key).await?;
-        info!("OBS now streams to {}", links.obs_server);
+        obs.stream_to(&server, &links.obs_key).await?;
+        info!("OBS now streams to {server}");
         messages.push("OBS now streams through stream-delay.".to_string());
-    } else {
-        messages.push("OBS already streams through stream-delay.".to_string());
     }
 
     let mut overlay_added = false;

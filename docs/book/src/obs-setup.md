@@ -25,6 +25,12 @@ This uses obs-websocket, which is built into OBS 28 and newer.
 OBS must not be streaming while you do this; stream-delay refuses rather than
 interrupt a live stream.
 
+If OBS runs on another computer, stream-delay has to accept streams from your
+network first (see [Two-PC setups](install.md#two-pc-setups)); the wizard then
+gives OBS this computer's address. Running the setup again later (for example
+after stream-delay had to change its port) updates OBS and keeps the backup of
+your original settings.
+
 **Undo:** **Restore my original OBS settings** puts back exactly what OBS had
 before, including the Twitch service and key. It only restores to the OBS the
 backup came from: if you have since connected stream-delay to another OBS,

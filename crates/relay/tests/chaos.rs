@@ -376,6 +376,56 @@ async fn slow_destination_shows_backlog_then_recovers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_destination_connection_that_goes_silent_is_replaced() {
+    // The network path dies without either side hearing about it (no reset, no
+    // close): only a watchdog notices.
+    let (sink, log, _kill) = start_sink().await;
+    let proxy = FaultProxy::start(sink).await;
+    let mut config = relay_config(
+        proxy.addr,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(10),
+    );
+    config.stall_timeout = Duration::from_secs(1);
+    let relay = start_relay_with(config).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_sized(Duration::from_secs(1), 50_000).await;
+    proxy.stall(true);
+    // Enough data to fill every socket buffer on the way, so writes block.
+    let stalled = Instant::now();
+    while relay.state().egress.reconnects == 0 && stalled.elapsed() < Duration::from_secs(8) {
+        p.stream_sized(Duration::from_millis(250), 200_000).await;
+    }
+    let state = relay.state();
+    assert_eq!(state.egress.reconnects, 1, "the dead connection was kept");
+    assert!(
+        state
+            .egress
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("took no data")),
+        "{:?}",
+        state.egress.last_error
+    );
+    // The network comes back: the stream continues on a new connection.
+    proxy.stall(false);
+    proxy.reset_all();
+    p.stream_sized(Duration::from_secs(4), 50_000).await;
+    {
+        let l = log.lock().unwrap();
+        assert!(
+            l.media
+                .iter()
+                .any(|m| m.conn >= 1 && m.kind == MediaKind::Video),
+            "nothing aired after the stall"
+        );
+        check_connections(&l);
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_dropped_destination_connection_is_retried_at_once() {
     let (sink, log, _kill) = start_sink().await;
     let proxy = FaultProxy::start(sink).await;

@@ -135,6 +135,8 @@ struct Core {
     media_tx: mpsc::UnboundedSender<(u64, OutMsg)>,
     counters: Arc<Counters>,
     egress_running: bool,
+    /// When the egress was last started.
+    egress_started: Instant,
     generation: u64,
     state: RelayState,
     state_tx: watch::Sender<RelayState>,
@@ -162,6 +164,7 @@ pub(crate) async fn run(
         media_rx,
         events_tx.clone(),
         counters.clone(),
+        config.stall_timeout,
     ));
 
     let now = Instant::now();
@@ -193,6 +196,7 @@ pub(crate) async fn run(
         media_tx,
         counters,
         egress_running: false,
+        egress_started: now,
         generation: 0,
         state_tx,
         last_written_total: 0,
@@ -562,18 +566,25 @@ impl Core {
         let stopped =
             self.publisher.is_none() && self.ingest_ended.is_some() && self.encoder_stopped;
         if !self.egress_running {
-            if gone {
-                // A connection made now would start a new broadcast of a stream
-                // that has finished (for example once the network is back).
-                if self.engine.has_buffered() {
-                    info!("encoder gone; discarding what never aired");
-                }
+            if gone && (self.state.ended || !self.engine.has_buffered()) {
+                // Nothing of this stream is left to air.
                 self.finish_stream();
             } else if !self.state.ended && self.engine.output_wanted(now) {
+                // A stream that ended before any of it was due (shorter than the
+                // delay) still airs, on schedule.
                 let Some(target) = self.target(&dest) else {
+                    if gone {
+                        // Nor may it air later: once the settings are fixed, that
+                        // would start a broadcast of a stream that has finished.
+                        info!(
+                            "encoder gone and the destination is not set up; discarding the stream"
+                        );
+                        self.finish_stream();
+                    }
                     return;
                 };
                 self.egress_running = true;
+                self.egress_started = Instant::now();
                 let _ = self.egress_ctl.send(EgressCtl::Start(target));
             }
             return;
@@ -590,9 +601,11 @@ impl Core {
             info!("the stream is over and has all aired; ending the broadcast");
             self.finish_stream();
         } else if !connected {
-            // Unreachable. Within the grace period a reconnect may still air the
-            // rest; after it, reconnecting would start a new broadcast.
-            if gone {
+            // Unreachable. While the encoder may come back, and until the
+            // destination has had the grace period to answer, a reconnect may
+            // still air the rest; after that, it would start a new broadcast of a
+            // stream that has finished.
+            if gone && self.egress_started.elapsed() >= self.config.encoder_grace {
                 info!("encoder gone and the destination is not connected; ending the broadcast");
                 self.finish_stream_because(
                     "The stream ended while the destination could not be reached; \
