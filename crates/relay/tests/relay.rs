@@ -206,3 +206,72 @@ async fn shutdown_releases_the_ingest_port() {
     .await;
     assert!(again.is_ok(), "ingest port still held after shutdown");
 }
+
+#[tokio::test]
+async fn network_ingest_requires_a_key() {
+    let exposed = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "0.0.0.0:0".parse().unwrap(),
+        ..Default::default()
+    })
+    .await;
+    assert!(matches!(
+        exposed,
+        Err(streamdelay_relay::RelayError::IngestKeyRequired(_))
+    ));
+    let empty_key = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "0.0.0.0:0".parse().unwrap(),
+        ingest_key: Some(String::new()),
+        ..Default::default()
+    })
+    .await;
+    assert!(empty_key.is_err(), "an empty key is no key");
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "0.0.0.0:0".parse().unwrap(),
+        ingest_key: Some("k".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connections_that_never_publish_are_closed() {
+    use tokio::io::AsyncReadExt;
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "127.0.0.1:0".parse().unwrap(),
+        publish_timeout: Duration::from_millis(300),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    // Connects and sends nothing, holding a connection slot.
+    let mut idle = tokio::net::TcpStream::connect(relay.ingest_addr())
+        .await
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(Duration::from_secs(5), idle.read(&mut buf))
+        .await
+        .expect("an idle connection was kept open");
+    assert!(matches!(read, Ok(0) | Err(_)));
+    for _ in 0..50 {
+        if relay.state().ingest.last_error.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        relay
+            .state()
+            .ingest
+            .last_error
+            .unwrap()
+            .contains("did not start publishing")
+    );
+    // A real encoder publishes in time and keeps streaming past the deadline.
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_millis(900)).await;
+    assert!(relay.state().ingest.connected);
+    p.stop().await;
+    relay.shutdown().await;
+}

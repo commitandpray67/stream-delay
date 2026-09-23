@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use super::{Link, MediaKind, SessionError};
+use super::{Link, MAX_NON_MEDIA_MESSAGE, MAX_PRE_PUBLISH_MESSAGE, MediaKind, SessionError};
 use crate::amf0::{self, Amf0Value};
 use crate::chunk::Message;
 use crate::message::{self, *};
@@ -69,8 +69,11 @@ const STREAM_ID: u32 = 1;
 
 impl ServerSession {
     pub fn new(config: ServerConfig) -> Self {
+        let mut link = Link::new(config.window_ack_size);
+        link.decoder
+            .set_max_message_len(MAX_PRE_PUBLISH_MESSAGE, MAX_PRE_PUBLISH_MESSAGE);
         Self {
-            link: Link::new(config.window_ack_size),
+            link,
             config,
             state: State::AwaitConnect,
             app: String::new(),
@@ -110,6 +113,10 @@ impl ServerSession {
             return;
         }
         self.state = State::Publishing;
+        // The publisher is authenticated now: allow full-size media.
+        self.link
+            .decoder
+            .set_max_message_len(usize::MAX, MAX_NON_MEDIA_MESSAGE);
         let enc = &self.link.encoder;
         let out = &mut self.link.out;
         write_user_control(enc, out, UC_STREAM_BEGIN, STREAM_ID);

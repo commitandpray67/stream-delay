@@ -1,10 +1,10 @@
 <script lang="ts">
   import CopyField from "../../components/CopyField.svelte";
   import { clearStreamKey, setStreamKey, updateConfig } from "../../lib/api";
-  import { live } from "../../lib/live.svelte";
+  import { adminConfig } from "../../lib/live.svelte";
   import ObsWizard from "./ObsWizard.svelte";
 
-  const pc = $derived(live.config);
+  const pc = $derived(adminConfig());
   let service = $state("");
   let url = $state("");
   let passthrough = $state(false);
@@ -32,14 +32,21 @@
     e.preventDefault();
     error = message = "";
     try {
-      await updateConfig({
+      const hadKey = pc?.destination_key_set ?? false;
+      const saved = await updateConfig({
         destination: { service, url: url.trim(), key_mode: passthrough ? "passthrough" : "stored" },
       });
+      // The server field may have held the key (rtmp://host/app/<key>); it is stored separately.
+      url = saved.config.destination.url;
       if (key.trim()) {
         await setStreamKey(key.trim());
         key = "";
+        message = "Saved.";
+      } else if (hadKey && !saved.destination_key_set && !passthrough) {
+        message = "Saved. The stream key was removed because the server changed: enter the key for the new server.";
+      } else {
+        message = "Saved.";
       }
-      message = "Saved.";
     } catch (err) {
       error = (err as Error).message;
     }
@@ -112,7 +119,7 @@
             In OBS, open <b>Settings → Stream</b>, set <b>Service</b> to <b>Custom…</b> and paste:
             <div class="stack pad">
               <CopyField label="Server" value={pc.urls.obs_server} />
-              <CopyField label="Stream Key" value={passthrough ? "(your real stream key)" : "streamdelay"} />
+              <CopyField label="Stream Key" value={passthrough ? "(your real stream key)" : pc.urls.obs_key} />
             </div>
           </li>
           <li>In <b>Settings → Output</b>, set the keyframe interval to <b>2 s</b>.</li>
@@ -129,7 +136,10 @@
       </p>
       <CopyField label="Dock URL" value={pc.urls.dock} />
       <CopyField label="Overlay URL" value={pc.urls.overlay} />
-      <p class="muted small">These links contain your private access token. Don't share them on stream.</p>
+      <p class="muted small">
+        The dock link can only change the delay and the overlay link can only show it; neither can change your
+        settings or stream key. Still, don't share them on stream.
+      </p>
     </section>
   </div>
 {/if}

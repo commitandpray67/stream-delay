@@ -298,3 +298,177 @@ async fn diagnostics_bundle_has_no_secrets() {
         assert!(!text.contains(secret), "diagnostics leak {secret}");
     }
 }
+
+fn with_token(method: &str, path: &str, token: &str) -> axum::http::request::Builder {
+    req(method, path).header(header::AUTHORIZATION, format!("Bearer {token}"))
+}
+
+#[tokio::test]
+async fn dock_and_overlay_tokens_are_limited() {
+    use streamdelay_control::{Scope, scoped_token};
+    let app = app_with_secrets("-scopes").await;
+    let control = scoped_token(TOKEN, Scope::Control);
+    let read = scoped_token(TOKEN, Scope::Read);
+
+    // The links handed out carry the limited tokens.
+    let (_, body) = send(
+        &app,
+        authed("GET", "/api/v1/config").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert!(body["urls"]["dashboard"].as_str().unwrap().ends_with(TOKEN));
+    assert!(body["urls"]["dock"].as_str().unwrap().ends_with(&control));
+    assert!(body["urls"]["overlay"].as_str().unwrap().ends_with(&read));
+    assert_eq!(body["scope"], "admin");
+
+    let delay = |token: &str| {
+        with_token("PUT", "/api/v1/delay", token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"seconds":5}"#))
+            .unwrap()
+    };
+    let get = |path: &str, token: &str| with_token("GET", path, token).body(Body::empty()).unwrap();
+
+    // Overlay links can read the state, nothing else.
+    assert_eq!(
+        send(&app, get("/api/v1/state", &read)).await.0,
+        StatusCode::OK
+    );
+    let (s, body) = send(&app, delay(&read)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(body["error"].as_str().unwrap().contains("dashboard"));
+    // Query-string tokens (browser sources, WebSockets) get the same scope.
+    let r = req("GET", &format!("/api/v1/state?token={read}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.0, StatusCode::OK);
+    // The events socket is open to them (this plain GET fails the upgrade instead).
+    let (s, _) = send(&app, get("/api/v1/events", &read)).await;
+    assert!(
+        s != StatusCode::FORBIDDEN && s != StatusCode::UNAUTHORIZED,
+        "{s}"
+    );
+
+    // Dock links can also change the delay.
+    assert_eq!(send(&app, delay(&control)).await.0, StatusCode::OK);
+    let r = with_token("POST", "/api/v1/presets/0", &control)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.0, StatusCode::OK);
+
+    // Neither can reach settings, keys, diagnostics or OBS.
+    for token in [&control, &read] {
+        for path in [
+            "/api/v1/config",
+            "/api/v1/diagnostics",
+            "/api/v1/obs/status",
+        ] {
+            assert_eq!(
+                send(&app, get(path, token)).await.0,
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+        let r = with_token("PUT", "/api/v1/destination/key", token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"key":"live_1"}"#))
+            .unwrap();
+        assert_eq!(send(&app, r).await.0, StatusCode::FORBIDDEN);
+        let r = with_token("PUT", "/api/v1/config", token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"destination":{"service":"custom","url":"rtmp://evil.example/app","key_mode":"stored"}}"#,
+            ))
+            .unwrap();
+        assert_eq!(send(&app, r).await.0, StatusCode::FORBIDDEN);
+    }
+    // Something that merely looks like a token is still rejected.
+    let (s, _) = send(
+        &app,
+        get("/api/v1/state", "0123456789abcdef0123456789abcdef"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+async fn put_config(app: &axum::Router, body: &str) -> (StatusCode, Value) {
+    send(
+        app,
+        authed("PUT", "/api/v1/config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn key_in_destination_url_is_stored_as_a_secret() {
+    const KEY: &str = "abcd-efgh-ijkl-mnop-qrst";
+    let app = app_with_secrets("-urlkey").await;
+    let (s, body) = put_config(
+        &app,
+        &format!(
+            r#"{{"destination":{{"service":"custom","url":"rtmp://a.rtmp.youtube.com/live2/{KEY}","key_mode":"stored"}}}}"#
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["config"]["destination"]["url"],
+        "rtmp://a.rtmp.youtube.com/live2"
+    );
+    assert_eq!(body["destination_key_set"], true);
+    assert!(!body.to_string().contains(KEY), "key returned: {body}");
+    let r = authed("GET", "/api/v1/diagnostics")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(r).await.unwrap();
+    let text = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        !String::from_utf8_lossy(&text).contains(KEY),
+        "diagnostics leak the key"
+    );
+}
+
+#[tokio::test]
+async fn changing_to_another_server_forgets_the_stored_key() {
+    let app = app_with_secrets("-forget").await;
+    let dest = |url: &str| {
+        format!(r#"{{"destination":{{"service":"custom","url":"{url}","key_mode":"stored"}}}}"#)
+    };
+    let (s, _) = put_config(&app, &dest("rtmp://live.twitch.tv/app")).await;
+    assert_eq!(s, StatusCode::OK);
+    let r = authed("PUT", "/api/v1/destination/key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"key":"live_123"}"#))
+        .unwrap();
+    assert_eq!(send(&app, r).await.1["destination_key_set"], true);
+    // Same service over RTMPS, or one of its regional servers: the key stays.
+    for url in [
+        "rtmps://live.twitch.tv:443/app",
+        "rtmp://sea02.contribute.live-video.net/app",
+    ] {
+        let (_, body) = put_config(&app, &dest(url)).await;
+        assert_eq!(body["destination_key_set"], true, "{url}");
+    }
+    // Another server: the key must not follow.
+    let (s, body) = put_config(&app, &dest("rtmp://ingest.example.net/live")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["destination_key_set"], false);
+
+    // Nor via an empty destination in between.
+    put_config(&app, &dest("rtmp://live.twitch.tv/app")).await;
+    let r = authed("PUT", "/api/v1/destination/key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"key":"live_123"}"#))
+        .unwrap();
+    assert_eq!(send(&app, r).await.1["destination_key_set"], true);
+    let (_, body) = put_config(&app, &dest("")).await;
+    assert_eq!(body["destination_key_set"], true, "clearing keeps the key");
+    let (_, body) = put_config(&app, &dest("rtmp://ingest.example.net/live")).await;
+    assert_eq!(
+        body["destination_key_set"], false,
+        "key carried over via an empty URL"
+    );
+}

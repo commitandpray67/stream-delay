@@ -3,17 +3,19 @@
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use axum::{Json, Router, middleware};
+use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError};
 
-use crate::{AppState, auth, diagnostics, obs_routes, settings, ui};
+use crate::auth::{self, Scope};
+use crate::{AppState, diagnostics, obs_routes, settings, ui};
 
 /// Error body: `{"error": "..."}`.
 #[derive(Debug)]
@@ -42,17 +44,34 @@ impl From<RelayError> for ApiError {
 }
 
 pub(crate) fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+    // Every link may read the state (overlay links can do no more).
+    let read = Router::new()
         .route("/api/v1/state", get(get_state))
+        .route("/api/v1/events", get(events))
+        .route_layer(middleware::from_fn(|r: Request, n: Next| {
+            auth::require(Scope::Read, r, n)
+        }));
+    // Dock links can also change the delay.
+    let control = Router::new()
         .route("/api/v1/delay", put(set_delay))
         .route("/api/v1/live", post(go_live))
         .route("/api/v1/cancel", post(cancel))
         .route("/api/v1/presets/{index}", post(preset))
-        .route("/api/v1/events", get(events))
-        .merge(settings::routes())
+        .route_layer(middleware::from_fn(|r: Request, n: Next| {
+            auth::require(Scope::Control, r, n)
+        }));
+    // Settings, stream keys, diagnostics and OBS need the dashboard link.
+    let admin = settings::routes()
         .merge(diagnostics::routes())
         .merge(obs_routes::routes())
+        .route_layer(middleware::from_fn(|r: Request, n: Next| {
+            auth::require(Scope::Admin, r, n)
+        }));
+    Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .merge(read)
+        .merge(control)
+        .merge(admin)
         .merge(ui::routes())
         .layer(middleware::from_fn_with_state(state.clone(), auth::guard))
         .with_state(state)
@@ -130,12 +149,18 @@ async fn preset(
 }
 
 /// Pushes `{"type":"state","state":{...}}` whenever the state changes and
-/// `{"type":"config","config":{...}}` on connect and whenever settings change.
-async fn events(State(st): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| stream_events(st, socket))
+/// `{"type":"config","config":{...}}` on connect and whenever settings change. The
+/// config is the full settings for dashboard links, and only what the dock and
+/// overlay display for other links.
+async fn events(
+    State(st): State<AppState>,
+    Extension(scope): Extension<Scope>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| stream_events(st, scope, socket))
 }
 
-async fn stream_events(st: AppState, socket: WebSocket) {
+async fn stream_events(st: AppState, scope: Scope, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
     let mut state = st.relay().subscribe();
     let mut config = st.shared.config_tx.subscribe();
@@ -143,7 +168,10 @@ async fn stream_events(st: AppState, socket: WebSocket) {
         Message::Text(json!({ "type": "state", "state": s }).to_string().into())
     };
     let config_msg = |st: &AppState| {
-        let c = settings::public_config(st);
+        let c = match scope {
+            Scope::Admin => json!(settings::public_config(st)),
+            _ => json!(settings::limited_config(st, scope)),
+        };
         Message::Text(json!({ "type": "config", "config": c }).to_string().into())
     };
     config.mark_unchanged();

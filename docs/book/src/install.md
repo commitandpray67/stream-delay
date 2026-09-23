@@ -57,16 +57,19 @@ docker run -d --name stream-delay --restart unless-stopped \
 docker logs stream-delay          # shows the dashboard link with its token
 ```
 
-The container listens on all interfaces, so set `STREAMDELAY_INGEST_KEY`: OBS must
-then stream with that key (Settings → Stream → Stream Key), and nobody else can
-publish to your relay. Keep port 7788 private (firewall or VPN); it is protected by
+The container listens on all interfaces, so it requires an ingest key: OBS must
+stream with that key (Settings → Stream → Stream Key), and nobody else can
+publish to your relay. Set it with `STREAMDELAY_INGEST_KEY`; without it,
+stream-delay generates one, saves it in `/data/config.toml` and prints it next to
+the OBS server address in `docker logs`. Keep port 7788 private (firewall or VPN); it is protected by
 the token in the dashboard link.
 
 ### Two-PC setups
 
 On the streaming PC, run stream-delay with `--ingest 0.0.0.0:1935 --ingest-key …`
 (or the Docker image). In OBS on the gaming PC, use
-`rtmp://<streaming-pc-ip>:1935/live` and the ingest key. To control it from
+`rtmp://<streaming-pc-ip>:1935/live` and the ingest key. If you leave out
+`--ingest-key`, one is generated; `streamdelayd urls` and the Setup tab show it. To control it from
 another device, enable *Allow control from other devices* on the Advanced tab.
 
 ## Where things are stored

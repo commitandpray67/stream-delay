@@ -1,7 +1,7 @@
 <script lang="ts">
   import { updateConfig } from "../../lib/api";
   import { formatSecondsLabel } from "../../lib/format";
-  import { live } from "../../lib/live.svelte";
+  import { adminConfig } from "../../lib/live.svelte";
   import type { DelayConfig, DelayMode } from "../../lib/types";
 
   let form = $state<DelayConfig | null>(null);
@@ -10,7 +10,7 @@
   let error = $state("");
 
   $effect(() => {
-    const c = live.config?.config;
+    const c = adminConfig()?.config;
     if (c && !form) {
       form = structuredClone($state.snapshot(c.delay)) as DelayConfig;
       grace = c.ingest.grace_seconds;

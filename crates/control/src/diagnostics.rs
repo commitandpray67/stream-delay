@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use streamdelay_config::secret;
 
 use crate::AppState;
+use crate::auth::Scope;
 use crate::settings::public_config;
 
 /// Recent log lines kept in memory for the bundle.
@@ -147,7 +148,12 @@ fn known_secrets(st: &AppState) -> Vec<String> {
     .filter_map(|name| s.get(name))
     .collect();
     v.extend(st.shared.key_override.clone());
-    v.push(st.config().api.token);
+    let c = st.config();
+    v.extend(c.ingest.key);
+    v.extend(crate::app::split_url_key(&c.destination.url).1);
+    v.extend(
+        [Scope::Admin, Scope::Control, Scope::Read].map(|s| st.shared.tokens.get(s).to_string()),
+    );
     v
 }
 

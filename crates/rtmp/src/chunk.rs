@@ -52,6 +52,12 @@ pub enum ChunkError {
     TooManyStreams,
     #[error("peer has more than {MAX_PENDING_BYTES} bytes of unfinished messages")]
     TooMuchPending,
+    #[error("message of type {type_id} is {length} bytes, over the limit of {max}")]
+    MessageTooLarge {
+        type_id: u8,
+        length: u32,
+        max: usize,
+    },
 }
 
 #[derive(Default)]
@@ -79,6 +85,10 @@ pub struct ChunkDecoder {
     pending: usize,
     /// Unused rest of the current block that complete messages are copied into.
     arena: BytesMut,
+    /// Largest audio or video message accepted.
+    max_media_len: usize,
+    /// Largest message of any other type (commands, metadata, control).
+    max_other_len: usize,
 }
 
 impl Default for ChunkDecoder {
@@ -95,7 +105,17 @@ impl ChunkDecoder {
             buf: BytesMut::new(),
             pending: 0,
             arena: BytesMut::new(),
+            max_media_len: usize::MAX,
+            max_other_len: usize::MAX,
         }
+    }
+
+    /// Limits the declared length of new messages: `media` for audio and video,
+    /// `other` for every other type. A longer message is an error as soon as its
+    /// header arrives. Unlimited by default (the format caps lengths at 16 MiB).
+    pub fn set_max_message_len(&mut self, media: usize, other: usize) {
+        self.max_media_len = media;
+        self.max_other_len = other;
     }
 
     pub fn push(&mut self, data: &[u8]) {
@@ -195,6 +215,19 @@ impl ChunkDecoder {
         // A header chunk (fmt 0-2) always starts a new message, discarding any
         // partial one; a type-3 chunk continues the partial message if there is one.
         let continuation = fmt == 3 && st.in_progress;
+        if !continuation {
+            let max = match type_id {
+                crate::message::AUDIO | crate::message::VIDEO => self.max_media_len,
+                _ => self.max_other_len,
+            };
+            if length as usize > max {
+                return Err(ChunkError::MessageTooLarge {
+                    type_id,
+                    length,
+                    max,
+                });
+            }
+        }
         let mut extended = st.extended;
         let mut ext_value = st.ext_value;
         if fmt <= 2 {
@@ -626,6 +659,34 @@ mod tests {
         }
         assert_eq!(err, Some(ChunkError::TooMuchPending));
         assert!(dec.pending <= MAX_PENDING_BYTES);
+    }
+
+    #[test]
+    fn oversized_messages_are_rejected_by_type() {
+        let mut dec = ChunkDecoder::new();
+        dec.set_max_message_len(1000, 100);
+        // Headers alone are enough: the body is never waited for.
+        dec.push(&[0x03, 0, 0, 0, 0, 0, 101, 20, 0, 0, 0, 0]);
+        assert_eq!(
+            dec.next_message(),
+            Err(ChunkError::MessageTooLarge {
+                type_id: 20,
+                length: 101,
+                max: 100
+            })
+        );
+        let enc = ChunkEncoder::new();
+        let mut out = BytesMut::new();
+        enc.write(&mut out, 6, 0, 9, 1, &[1u8; 1000]);
+        enc.write(&mut out, 4, 0, 8, 1, &[2u8; 1001]);
+        let mut dec = ChunkDecoder::new();
+        dec.set_max_message_len(1000, 100);
+        dec.push(&out);
+        assert_eq!(dec.next_message().unwrap().unwrap().payload.len(), 1000);
+        assert!(matches!(
+            dec.next_message(),
+            Err(ChunkError::MessageTooLarge { type_id: 8, .. })
+        ));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 <script lang="ts">
   import StatusBadge from "../components/StatusBadge.svelte";
   import { t } from "../lib/i18n";
-  import { live } from "../lib/live.svelte";
+  import { adminConfig, live } from "../lib/live.svelte";
   import AdvancedTab from "./dashboard/AdvancedTab.svelte";
   import ControlTab from "./dashboard/ControlTab.svelte";
   import DelayTab from "./dashboard/DelayTab.svelte";
@@ -23,9 +23,12 @@
     history.replaceState(null, "", `#${tab}`);
   });
 
+  const admin = $derived(adminConfig());
+  // A dock or overlay link opened as the dashboard: its token cannot change settings.
+  const limited = $derived(!!live.config && !admin);
   // First run: nudge towards setup when nothing is configured yet.
   const needsSetup = $derived(
-    !!live.config && !live.config.destination_key_set && live.config.config.destination.key_mode === "stored",
+    !!admin && !admin.destination_key_set && admin.config.destination.key_mode === "stored",
   );
 </script>
 
@@ -52,7 +55,13 @@
     {:else if !live.connected}
       <p class="notice">{t("conn.lost")}</p>
     {/if}
-    {#if live.config?.restart_required}
+    {#if limited}
+      <p class="notice">
+        This link can't open the dashboard. Use the dashboard link from stream-delay (the tray menu, or
+        <code>streamdelayd urls</code>).
+      </p>
+    {/if}
+    {#if admin?.restart_required}
       <p class="notice">Some changes take effect after you restart stream-delay.</p>
     {/if}
     {#if needsSetup && tab === "control"}
@@ -62,7 +71,9 @@
       </p>
     {/if}
 
-    {#if tab === "control"}<ControlTab />
+    {#if limited}
+      <!-- Nothing else works with a dock or overlay token. -->
+    {:else if tab === "control"}<ControlTab />
     {:else if tab === "setup"}<SetupTab />
     {:else if tab === "delay"}<DelayTab />
     {:else if tab === "overlay"}<OverlayTab />

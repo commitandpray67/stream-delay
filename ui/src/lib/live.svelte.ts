@@ -1,15 +1,22 @@
 // Live connection to the stream-delay WebSocket. Components read `live` reactively.
 
 import { getToken } from "./api";
-import type { PublicConfig, RelayState } from "./types";
+import type { LimitedConfig, PublicConfig, RelayState } from "./types";
 
 export const live = $state({
   state: null as RelayState | null,
-  config: null as PublicConfig | null,
+  /** Full settings for dashboard links, the dock/overlay subset for others. */
+  config: null as LimitedConfig | null,
   connected: false,
   /** Set when the token is rejected, so the UI can explain instead of retrying forever. */
   unauthorized: false,
 });
+
+/** The full settings, or null when this link's token is not the dashboard's. */
+export function adminConfig(): PublicConfig | null {
+  const c = live.config;
+  return c?.scope === "admin" ? (c as PublicConfig) : null;
+}
 
 let started = false;
 

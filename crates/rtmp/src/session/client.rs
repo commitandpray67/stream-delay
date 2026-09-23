@@ -2,7 +2,7 @@ use std::fmt;
 
 use bytes::Bytes;
 
-use super::{Link, MediaKind, SessionError};
+use super::{Link, MAX_NON_MEDIA_MESSAGE, MediaKind, SessionError};
 use crate::amf0::{self, Amf0Value};
 use crate::chunk::Message;
 use crate::message::*;
@@ -83,6 +83,10 @@ impl ClientSession {
             state: State::Connecting,
             stream_id: 0,
         };
+        // Ingest servers only send us commands and control messages.
+        s.link
+            .decoder
+            .set_max_message_len(usize::MAX, MAX_NON_MEDIA_MESSAGE);
         s.link.set_out_chunk_size(s.config.chunk_size);
         let mut props: Vec<(String, Amf0Value)> = vec![
             ("app".into(), Amf0Value::string(s.config.app.clone())),

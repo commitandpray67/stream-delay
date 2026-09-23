@@ -110,6 +110,36 @@ impl SecretStore for Secrets {
     }
 }
 
+/// Secrets kept in memory only, for `--ephemeral` runs: nothing touches the disk
+/// and everything is forgotten when the process exits.
+#[derive(Default)]
+pub struct MemorySecrets {
+    map: Mutex<BTreeMap<String, String>>,
+}
+
+impl SecretStore for MemorySecrets {
+    fn get(&self, name: &str) -> Option<String> {
+        self.map.lock().ok()?.get(name).cloned()
+    }
+
+    fn set(&self, name: &str, value: &str) -> Result<(), String> {
+        self.map
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(name.into(), value.into());
+        Ok(())
+    }
+
+    fn delete(&self, name: &str) -> Result<(), String> {
+        self.map.lock().map_err(|e| e.to_string())?.remove(name);
+        Ok(())
+    }
+
+    fn describe(&self) -> String {
+        "memory only (forgotten when stream-delay stops)".into()
+    }
+}
+
 #[cfg(all(
     feature = "keychain",
     any(target_os = "macos", windows, target_os = "linux")
@@ -171,5 +201,29 @@ mod tests {
         s.delete("k").unwrap();
         assert_eq!(s.get("k"), None);
         assert!(s.describe().contains("secrets.toml"));
+    }
+
+    #[test]
+    fn memory_store_round_trip() {
+        let s = MemorySecrets::default();
+        assert_eq!(s.get("k"), None);
+        s.set("k", "live_123").unwrap();
+        assert_eq!(s.get("k").as_deref(), Some("live_123"));
+        s.delete("k").unwrap();
+        assert_eq!(s.get("k"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_files_are_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("secrets.toml");
+        fs::write(&file, "").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let s = Secrets::new(dir.path(), false);
+        s.set("k", "v").unwrap();
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

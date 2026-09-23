@@ -1,8 +1,10 @@
 # OBS dock and overlay
 
 Both are web pages served by stream-delay. Copy their links from the **Setup** tab
-or the tray menu. The links contain your private access token: don't show them on
-stream or share them.
+or the tray menu. Each link contains its own access token: the dock's can only
+change the delay and the overlay's can only show it; neither can change your
+settings or stream key. Still, don't show them on stream or share them. Links
+copied before this version carry the dashboard's token: copy them again.
 
 ## Dock
 

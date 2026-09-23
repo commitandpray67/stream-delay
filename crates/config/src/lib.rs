@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use secrets::{SecretStore, Secrets};
+pub use secrets::{MemorySecrets, SecretStore, Secrets};
 pub use streamdelay_engine::DelayMode;
 
 /// Names of stored secrets.
@@ -348,13 +348,16 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut f = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(path)?;
+        // `mode` only applies to new files: tighten an existing one before writing,
+        // which also fails (so nothing is written) if another user owns it.
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
         f.write_all(data)
     }
     #[cfg(not(unix))]

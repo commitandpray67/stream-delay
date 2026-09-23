@@ -4552,6 +4552,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "rand 0.9.5",
+ "ring",
  "rust-embed",
  "serde",
  "serde_json",

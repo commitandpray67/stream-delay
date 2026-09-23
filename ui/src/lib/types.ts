@@ -102,14 +102,26 @@ export interface Config {
   hotkeys: HotkeyConfig;
 }
 
-export interface PublicConfig {
+/** What a link's token may do: overlay links read, dock links control, the dashboard is admin. */
+export type Scope = "read" | "control" | "admin";
+
+/** Settings every link receives: what the dock and overlay display. */
+export interface LimitedConfig {
+  scope: Scope;
+  config: { delay: DelayConfig; overlay: OverlayConfig };
+  urls: { obs_server: string };
+  version: string;
+}
+
+/** The full settings, sent only to dashboard (admin) links. */
+export interface PublicConfig extends LimitedConfig {
+  scope: "admin";
   config: Config;
   destination_key_set: boolean;
   secrets_backend: string;
-  urls: { dashboard: string; dock: string; overlay: string; obs_server: string };
+  urls: { dashboard: string; dock: string; overlay: string; obs_server: string; obs_key: string };
   services: { id: string; name: string; url: string }[];
   restart_required: boolean;
-  version: string;
 }
 
 export interface ObsStatus {

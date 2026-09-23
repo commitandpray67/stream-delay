@@ -1,20 +1,28 @@
 import type { Ack, DelayMode, GoLiveWhen, ObsStatus, PublicConfig, RelayState } from "./types";
 
-const TOKEN_KEY = "stream-delay-token";
+/**
+ * Where a page remembers its token. Dock and overlay links carry tokens that can do
+ * less than the dashboard's, so each page keeps its own and opening one never
+ * replaces the dashboard's token.
+ */
+function tokenKey(): string {
+  const view = location.pathname.replace(/\/+$/, "");
+  return view === "/dock" || view === "/overlay" ? `stream-delay-token:${view.slice(1)}` : "stream-delay-token";
+}
 
 /** The API token: from `?token=` in the URL, else remembered from a previous visit. */
 export function getToken(): string {
   const fromUrl = new URLSearchParams(location.search).get("token");
   if (fromUrl) {
     try {
-      localStorage.setItem(TOKEN_KEY, fromUrl);
+      localStorage.setItem(tokenKey(), fromUrl);
     } catch {
       // Storage can be unavailable (private windows, OBS browser sources).
     }
     return fromUrl;
   }
   try {
-    return localStorage.getItem(TOKEN_KEY) ?? "";
+    return localStorage.getItem(tokenKey()) ?? "";
   } catch {
     return "";
   }

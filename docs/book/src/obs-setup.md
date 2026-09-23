@@ -34,7 +34,8 @@ In OBS, open **Settings → Stream**:
 - Service: **Custom…**
 - Server: `rtmp://127.0.0.1:1935/live` (the Setup tab shows the exact address if
   the port had to change)
-- Stream Key: anything, for example `streamdelay`
+- Stream Key: anything, for example `streamdelay`, unless stream-delay listens on
+  your network: then use the ingest key shown on the Setup tab
 
 stream-delay uses the key you saved on the Setup tab, not the one in OBS. If you
 prefer to keep the real key in OBS, tick **Use the stream key entered in OBS

@@ -11,13 +11,19 @@ use serde::Serialize;
 use streamdelay_config::{Config, ConfigError, KeyMode, SecretStore, secret};
 use streamdelay_relay::{
     Destination, DestinationKey, EngineConfig, GoLiveWhen, RelayConfig, RelayError, RelayHandle,
+    RtmpUrl,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
+use crate::auth::{Scope, Tokens};
 use crate::{AppState, Shared, routes};
+
+/// Stream key OBS uses towards stream-delay when no ingest key is set (any value
+/// works then; this one is recognizable).
+pub(crate) const LOCAL_KEY: &str = "streamdelay";
 
 /// Command-line or environment settings that override the config file for this run.
 #[derive(Debug, Clone, Default)]
@@ -59,11 +65,16 @@ pub enum AppError {
 /// Links for the streamer to paste into OBS.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Urls {
+    /// Full control, including settings and stream keys.
     pub dashboard: String,
+    /// Can change the delay, nothing else.
     pub dock: String,
+    /// Can only read the state.
     pub overlay: String,
     /// Value for OBS Settings → Stream → Server.
     pub obs_server: String,
+    /// Value for OBS Settings → Stream → Stream Key (the ingest key, if one is set).
+    pub obs_key: String,
 }
 
 /// A running stream-delay instance.
@@ -82,7 +93,32 @@ impl App {
                 c
             }
         };
+        // Older versions (or hand edits) may have the stream key in the destination
+        // URL; keep it in the secret store instead, like a key entered on its own.
+        if let (url, Some(key)) = split_url_key(&config.destination.url) {
+            let stored = opts.secrets.get(secret::DESTINATION_KEY);
+            let moved = if stored.is_some_and(|k| !k.is_empty()) {
+                // A stored key already took precedence over the one in the URL.
+                Ok(())
+            } else {
+                opts.secrets.set(secret::DESTINATION_KEY, &key)
+            };
+            match moved {
+                Ok(()) => {
+                    config.destination.url = url;
+                    if let Some(p) = &opts.config_path {
+                        config.save(p)?;
+                    }
+                    info!("moved the stream key out of the destination URL");
+                }
+                Err(e) => warn!("could not move the stream key out of the destination URL: {e}"),
+            }
+        }
+        // As saved, without this run's overrides.
+        let saved = config.clone();
+
         let o = &opts.overrides;
+        let mut key_override = o.destination_key.clone();
         if let Some(v) = o.ingest {
             config.ingest.bind = v;
         }
@@ -90,8 +126,10 @@ impl App {
             config.api.bind = v;
         }
         if let Some(v) = &o.destination_url {
-            config.destination.url = v.clone();
+            let (url, key) = split_url_key(v);
+            config.destination.url = url;
             config.destination.service = "custom".into();
+            key_override = key_override.or(key);
         }
         if o.passthrough {
             config.destination.key_mode = KeyMode::Passthrough;
@@ -114,6 +152,32 @@ impl App {
         if let Some(k) = &o.ingest_key {
             config.ingest.key = Some(k.clone());
         }
+        // Reachable from other devices: without a key anyone who can connect could
+        // stream to the destination. Generate one and keep it for the next run.
+        if config.ingest.key.as_deref().is_none_or(str::is_empty)
+            && !config.ingest.bind.ip().to_canonical().is_loopback()
+        {
+            let key = streamdelay_config::new_token();
+            if let Some(p) = &opts.config_path {
+                let mut saved = saved;
+                saved.ingest.key = Some(key.clone());
+                saved.save(p)?;
+            }
+            warn!(
+                "the RTMP input on {} can be reached from other devices, so encoders must \
+                 use the stream key shown with the OBS server address",
+                config.ingest.bind
+            );
+            config.ingest.key = Some(key);
+        }
+        if config.destination.key_mode == KeyMode::Passthrough
+            && config.ingest.key.as_deref().is_some_and(|k| !k.is_empty())
+        {
+            warn!(
+                "passthrough forwards the key OBS streams with, which has to be the ingest \
+                 key here; store the destination stream key instead"
+            );
+        }
 
         // Bind the API first: if its port is taken nothing else has started yet, so
         // the caller can retry with another port.
@@ -128,7 +192,7 @@ impl App {
             addr: config.api.bind,
             source,
         })?;
-        let key_override = o.destination_key.clone();
+        let key_override_url = config.destination.url.clone();
         let relay = streamdelay_relay::start(RelayConfig {
             ingest_bind: config.ingest.bind,
             destination: destination(&config, opts.secrets.as_ref(), key_override.as_deref()),
@@ -149,10 +213,12 @@ impl App {
         let state = AppState {
             shared: Arc::new(Shared {
                 relay,
+                tokens: Tokens::new(&config.api.token),
                 config: RwLock::new(config),
                 config_path: opts.config_path,
                 secrets: opts.secrets,
                 key_override,
+                key_override_url,
                 config_tx,
                 port: api_addr.port(),
                 restart_required: AtomicBool::new(false),
@@ -194,7 +260,7 @@ impl App {
     pub fn needs_setup(&self) -> bool {
         let c = self.config();
         c.destination.key_mode == KeyMode::Stored
-            && self.state.shared.key_override.is_none()
+            && self.state.key_override(&c.destination.url).is_none()
             && self
                 .state
                 .shared
@@ -231,7 +297,7 @@ pub(crate) fn urls(state: &AppState) -> Urls {
     } else {
         format!("{}:{}", c.api.bind.ip(), state.shared.port)
     };
-    let token = &c.api.token;
+    let token = |s| state.shared.tokens.get(s);
     let ingest = state.relay().ingest_addr();
     let ingest_host = if ingest.ip().is_unspecified() {
         format!("127.0.0.1:{}", ingest.port())
@@ -239,11 +305,51 @@ pub(crate) fn urls(state: &AppState) -> Urls {
         ingest.to_string()
     };
     Urls {
-        dashboard: format!("http://{host}/?token={token}"),
-        dock: format!("http://{host}/dock?token={token}"),
-        overlay: format!("http://{host}/overlay?token={token}"),
+        dashboard: format!("http://{host}/?token={}", token(Scope::Admin)),
+        dock: format!("http://{host}/dock?token={}", token(Scope::Control)),
+        overlay: format!("http://{host}/overlay?token={}", token(Scope::Read)),
         obs_server: format!("rtmp://{ingest_host}/live"),
+        obs_key: c
+            .ingest
+            .key
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| LOCAL_KEY.into()),
     }
+}
+
+/// Splits a stream key embedded in a destination URL (`rtmp://host/app/<key>`)
+/// from it. URLs without a key, and invalid ones, are returned unchanged.
+pub(crate) fn split_url_key(url: &str) -> (String, Option<String>) {
+    match RtmpUrl::parse(url) {
+        Ok(u) if u.stream_key.is_some() => (u.tc_url, u.stream_key),
+        _ => (url.to_string(), None),
+    }
+}
+
+/// Services whose stream keys work on several ingest hosts (RTMP and RTMPS,
+/// regional servers).
+const SERVICE_DOMAINS: &[&[&str]] = &[&["twitch.tv", "live-video.net"], &["youtube.com"]];
+
+/// True when `new` publishes to another server than `old`, so a stream key meant
+/// for `old` must not be sent to it. Clearing the destination is no change (the key
+/// goes nowhere), but setting one after an empty or invalid URL is: otherwise
+/// clearing it first would carry the key over to any server.
+pub(crate) fn different_server(old: &str, new: &str) -> bool {
+    let Ok(b) = RtmpUrl::parse(new) else {
+        return false;
+    };
+    let Ok(a) = RtmpUrl::parse(old) else {
+        return true;
+    };
+    let (a, b) = (a.host.to_ascii_lowercase(), b.host.to_ascii_lowercase());
+    let service = |host: &str| {
+        SERVICE_DOMAINS.iter().position(|domains| {
+            domains
+                .iter()
+                .any(|d| host == *d || host.strip_suffix(d).is_some_and(|p| p.ends_with('.')))
+        })
+    };
+    a != b && (service(&a).is_none() || service(&a) != service(&b))
 }
 
 pub(crate) fn engine_config(c: &Config) -> EngineConfig {

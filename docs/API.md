@@ -4,7 +4,17 @@ stream-delay serves an HTTP and WebSocket API on `http://127.0.0.1:7788` (config
 
 ## Authentication
 
-Every `/api` request needs the install's token, which is generated on first run and stored in `config.toml`. Pass it in one of these ways:
+Every `/api` request needs a token. The install's admin token is generated on first run and stored in `config.toml`; the dock and overlay links carry tokens derived from it that can do less:
+
+| Link | Scope | Allowed |
+|---|---|---|
+| Dashboard | `admin` | Everything. |
+| Dock | `control` | `GET /api/v1/state`, the events WebSocket, and the delay control endpoints below. |
+| Overlay | `read` | `GET /api/v1/state` and the events WebSocket. |
+
+A valid token without enough scope gets `403 Forbidden`; a missing or wrong token gets `401 Unauthorized`. For a Stream Deck or another controller, use the dock link's token. The derived tokens stay the same as long as the admin token does.
+
+Pass the token in one of these ways:
 
 - `Authorization: Bearer <token>` (preferred)
 - `X-Stream-Delay-Token: <token>`
@@ -12,7 +22,7 @@ Every `/api` request needs the install's token, which is generated on first run 
 
 Requests must also use a loopback `Host` (`127.0.0.1`, `localhost` or `[::1]` with the right port), and browser requests from another origin are refused. Both checks stop malicious web pages from controlling your stream. LAN access can be enabled in settings; the token is still required.
 
-Run `streamdelayd urls` to print links that already contain the token.
+Run `streamdelayd urls` to print links that already contain their tokens.
 
 ## Delay control
 
@@ -71,15 +81,15 @@ Commands return an acknowledgement:
 
 `GET /api/v1/events?token=<token>` upgrades to a WebSocket that sends JSON messages:
 
-- `{"type": "config", "config": {...}}` on connect and whenever settings change (the same body as `GET /api/v1/config`).
+- `{"type": "config", "config": {...}}` on connect and whenever settings change. With the dashboard token this is the same body as `GET /api/v1/config` (with `"scope": "admin"`). Dock and overlay tokens get only what those pages display: `{"scope": "control" | "read", "config": {"delay": {...}, "overlay": {...}}, "urls": {"obs_server": "..."}, "version": "..."}`.
 - `{"type": "state", "state": {...}}` on connect and whenever the state changes (up to 4 times per second).
 
 ## Settings
 
 | Method and path | Body | Effect |
 |---|---|---|
-| `GET /api/v1/config` | none | Settings (never including the token or secrets), link URLs, and whether a stream key is saved. |
-| `PUT /api/v1/config` | Any of `destination`, `delay`, `overlay`, `hotkeys`, `grace_seconds`, `allow_lan` | Partial update. Destination changes apply immediately; `restart_required` says when a restart is needed. |
+| `GET /api/v1/config` | none | Settings (never including tokens or secrets), link URLs, the stream key OBS should use (`urls.obs_key`), and whether a destination stream key is saved. |
+| `PUT /api/v1/config` | Any of `destination`, `delay`, `overlay`, `hotkeys`, `grace_seconds`, `allow_lan` | Partial update. Destination changes apply immediately; `restart_required` says when a restart is needed. A stream key in the destination URL (`rtmp://host/app/<key>`) is moved to the keychain and removed from the URL. Changing the destination to another server forgets the saved stream key, so it is never sent anywhere it was not meant for (RTMP and RTMPS, or regional servers of the same service, keep it). |
 | `PUT /api/v1/destination/key` | `{"key": "live_..."}` | Store the stream key in the OS keychain. |
 | `DELETE /api/v1/destination/key` | none | Forget the stored key. |
 
@@ -96,7 +106,7 @@ Commands return an acknowledgement:
 
 | Method and path | Body | Effect |
 |---|---|---|
-| `GET /api/v1/diagnostics` | none | A JSON file for bug reports: version, OS, settings, state and the last 2000 log lines. Stream keys, passwords, the API token, `live_…` keys, `token=` values and your home directory path are removed. Sent as a download (`Content-Disposition: attachment`). |
+| `GET /api/v1/diagnostics` | none | A JSON file for bug reports: version, OS, settings, state and the last 2000 log lines. Stream keys (including one in the destination URL), the ingest key, passwords, all API tokens, `live_…` keys, `token=` values and your home directory path are removed. Sent as a download (`Content-Disposition: attachment`). |
 
 The dashboard's **Advanced** tab has a *Download diagnostics* button, and
 `streamdelayd diagnostics -o diagnostics.json` saves the same file from a running

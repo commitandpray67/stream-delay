@@ -159,3 +159,39 @@ mod arbitrary_input {
         }
     }
 }
+
+#[test]
+fn large_messages_are_refused_before_publishing() {
+    // An unauthenticated peer declares a huge AMF0 command (a 16 MiB strict array
+    // of nulls would take about 800 MiB to decode). The header alone is refused.
+    let mut s = ServerSession::new(ServerConfig::default());
+    let mut enc = crate::chunk::ChunkEncoder::new();
+    enc.set_chunk_size(1 << 20);
+    let mut out = bytes::BytesMut::new();
+    let payload = vec![0x05u8; MAX_PRE_PUBLISH_MESSAGE + 1];
+    enc.write(&mut out, CSID_COMMAND, 0, COMMAND_AMF0, 0, &payload);
+    let err = s.feed(&out[..16]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SessionError::Chunk(crate::chunk::ChunkError::MessageTooLarge { .. })
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn publishing_allows_large_media_but_bounds_other_messages() {
+    let (mut c, mut s) = connected_pair();
+    // A 4 MB keyframe is fine once the publish was accepted.
+    let key = vec![0x17u8; 4 << 20];
+    c.send_media(MediaKind::Video, 0, &key);
+    let (_, se) = pump(&mut c, &mut s);
+    assert!(
+        se.iter()
+            .any(|e| matches!(e, ServerEvent::Media { payload, .. } if payload.len() == key.len()))
+    );
+    // Data messages stay bounded.
+    c.send_data(0, &vec![0x05u8; MAX_NON_MEDIA_MESSAGE + 1]);
+    assert!(s.feed(&c.take_output()).is_err());
+}

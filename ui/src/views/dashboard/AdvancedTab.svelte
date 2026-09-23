@@ -1,16 +1,17 @@
 <script lang="ts">
   import CopyField from "../../components/CopyField.svelte";
   import { getToken, updateConfig } from "../../lib/api";
-  import { live } from "../../lib/live.svelte";
+  import { adminConfig } from "../../lib/live.svelte";
   import type { HotkeyConfig } from "../../lib/types";
 
+  const pc = $derived(adminConfig());
   let hotkeys = $state<HotkeyConfig | null>(null);
   let allowLan = $state(false);
   let message = $state("");
   let error = $state("");
 
   $effect(() => {
-    const c = live.config?.config;
+    const c = pc?.config;
     if (c && !hotkeys) {
       hotkeys = structuredClone($state.snapshot(c.hotkeys)) as HotkeyConfig;
       allowLan = c.api.allow_lan;
@@ -29,7 +30,7 @@
   }
 </script>
 
-{#if live.config && hotkeys}
+{#if pc && hotkeys}
   <div class="stack">
     <form class="panel stack" onsubmit={save}>
       <h2>Global hotkeys</h2>
@@ -41,7 +42,7 @@
       <div class="cols">
         <label>Go live now <input bind:value={hotkeys.go_live} /></label>
         <label>Go live after it airs <input bind:value={hotkeys.go_live_after_air} /></label>
-        {#each live.config.config.delay.presets as p, i (i)}
+        {#each pc.config.delay.presets as p, i (i)}
           <label>
             Preset {i + 1} ({p.seconds <= 0 ? "live" : `${p.seconds} s`})
             <input bind:value={hotkeys.presets[i]} />
@@ -83,9 +84,9 @@
         <code>POST /api/v1/live {'{'}"when": "after-air"{'}'}</code>,
         <code>POST /api/v1/presets/2</code>, <code>GET /api/v1/state</code>.
       </p>
-      <CopyField label="Dashboard link (contains the token)" value={live.config.urls.dashboard} secret />
+      <CopyField label="Dashboard link (contains the token)" value={pc.urls.dashboard} secret />
       <p class="muted small">
-        stream-delay {live.config.version} · secrets are stored in {live.config.secrets_backend} ·
+        stream-delay {pc.version} · secrets are stored in {pc.secrets_backend} ·
         <a href="https://commitandpray67.github.io/stream-delay/" target="_blank" rel="noreferrer">user guide</a> ·
         <a href="https://github.com/commitandpray67/stream-delay" target="_blank" rel="noreferrer">source code (GPL-3.0)</a>
       </p>

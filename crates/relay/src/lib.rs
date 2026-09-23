@@ -64,13 +64,17 @@ pub struct RelayConfig {
     pub ingest_bind: SocketAddr,
     /// If set, the encoder must publish to this application name.
     pub ingest_app: Option<String>,
-    /// If set, the encoder must publish with this stream key.
+    /// If set, the encoder must publish with this stream key. Required when
+    /// `ingest_bind` is not a loopback address.
     pub ingest_key: Option<String>,
     pub destination: Option<Destination>,
     pub engine: EngineConfig,
     /// How long to keep the destination connected after the encoder disconnects, so a
     /// quick encoder reconnect continues the same broadcast.
     pub encoder_grace: Duration,
+    /// An encoder connection that has not started publishing within this time of
+    /// connecting (handshake included) is closed.
+    pub publish_timeout: Duration,
 }
 
 impl Default for RelayConfig {
@@ -82,6 +86,7 @@ impl Default for RelayConfig {
             destination: None,
             engine: EngineConfig::default(),
             encoder_grace: Duration::from_secs(30),
+            publish_timeout: Duration::from_secs(15),
         }
     }
 }
@@ -97,6 +102,12 @@ pub enum RelayError {
     Engine(#[from] EngineError),
     #[error("invalid destination URL: {0}")]
     Url(#[from] streamdelay_rtmp::url::UrlError),
+    #[error(
+        "the RTMP input on {0} can be reached from other devices, so it needs an ingest \
+         key (--ingest-key or STREAMDELAY_INGEST_KEY); otherwise anyone who can reach it \
+         could stream to your channel"
+    )]
+    IngestKeyRequired(SocketAddr),
     #[error("the relay has shut down")]
     Closed,
 }
@@ -211,9 +222,13 @@ impl RelayHandle {
 }
 
 /// Starts the relay on the current tokio runtime.
-pub async fn start(config: RelayConfig) -> Result<RelayHandle, RelayError> {
+pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     if let Some(d) = &config.destination {
         RtmpUrl::parse(&d.url)?;
+    }
+    config.ingest_key = config.ingest_key.filter(|k| !k.is_empty());
+    if config.ingest_key.is_none() && !config.ingest_bind.ip().to_canonical().is_loopback() {
+        return Err(RelayError::IngestKeyRequired(config.ingest_bind));
     }
     let listener = TcpListener::bind(config.ingest_bind)
         .await
@@ -236,7 +251,12 @@ pub async fn start(config: RelayConfig) -> Result<RelayHandle, RelayError> {
     };
     let (state_tx, state_rx) = watch::channel(initial);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(ingest::listen(listener, events_tx.clone(), shutdown_rx));
+    tokio::spawn(ingest::listen(
+        listener,
+        config.publish_timeout,
+        events_tx.clone(),
+        shutdown_rx,
+    ));
     tokio::spawn(core::run(
         config,
         ingest_addr,

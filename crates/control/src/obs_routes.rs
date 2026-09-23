@@ -14,8 +14,6 @@ use crate::app::{destination, urls};
 use crate::routes::ApiError;
 
 const OVERLAY_SOURCE: &str = "Stream Delay Overlay";
-/// Stream key OBS uses towards stream-delay (any value works; this one is recognizable).
-const LOCAL_KEY: &str = "streamdelay";
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -220,12 +218,12 @@ async fn configure(
             let dest = destination(
                 &config,
                 st.shared.secrets.as_ref(),
-                st.shared.key_override.as_deref(),
+                st.key_override(&config.destination.url),
             );
             st.relay().set_destination(dest)?;
         }
 
-        obs.stream_to(&links.obs_server, LOCAL_KEY).await?;
+        obs.stream_to(&links.obs_server, &links.obs_key).await?;
         info!("OBS now streams to {}", links.obs_server);
         messages.push("OBS now streams through stream-delay.".to_string());
     } else {

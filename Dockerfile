@@ -4,7 +4,8 @@
 #     -e STREAMDELAY_INGEST_KEY=choose-a-secret ghcr.io/commitandpray67/stream-delay
 #
 # Then stream from OBS to rtmp://<host>:1935/live with the ingest key, and open
-# the dashboard link printed in the logs (`docker logs`).
+# the dashboard link printed in the logs (`docker logs`). Without
+# STREAMDELAY_INGEST_KEY a key is generated, saved in /data and printed there too.
 
 FROM node:22-bookworm-slim AS ui
 RUN corepack enable

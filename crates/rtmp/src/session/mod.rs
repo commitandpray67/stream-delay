@@ -17,6 +17,16 @@ use crate::amf0::Amf0Error;
 use crate::chunk::{ChunkDecoder, ChunkEncoder, ChunkError, Message};
 use crate::message::{self, *};
 
+/// Largest message a publisher may send before its publish is accepted. The
+/// commands of a normal handshake (connect, releaseStream, FCPublish,
+/// createStream, publish) are a few hundred bytes each; this keeps an
+/// unauthenticated peer from making us buffer and decode megabytes.
+pub const MAX_PRE_PUBLISH_MESSAGE: usize = 64 * 1024;
+/// Largest non-media message (commands, metadata, control) at any time. Decoding
+/// AMF0 can take many times its size in memory, so it is bounded separately from
+/// audio and video.
+pub const MAX_NON_MEDIA_MESSAGE: usize = 1024 * 1024;
+
 /// Kind of media carried by an audio/video message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaKind {

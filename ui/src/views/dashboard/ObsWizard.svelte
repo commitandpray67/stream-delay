@@ -1,6 +1,6 @@
 <script lang="ts">
   import { obsConfigure, obsConnect, obsRestore, obsStatus } from "../../lib/api";
-  import { live } from "../../lib/live.svelte";
+  import { adminConfig } from "../../lib/live.svelte";
   import type { ObsStatus } from "../../lib/types";
 
   let status = $state<ObsStatus | null>(null);
@@ -14,7 +14,7 @@
   let message = $state("");
 
   $effect(() => {
-    const c = live.config?.config.obs;
+    const c = adminConfig()?.config.obs;
     if (c) {
       host = c.host;
       port = c.port;

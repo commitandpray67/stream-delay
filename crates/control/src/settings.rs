@@ -13,7 +13,8 @@ use streamdelay_relay::RtmpUrl;
 use tracing::{info, warn};
 
 use crate::AppState;
-use crate::app::{Urls, destination, urls};
+use crate::app::{Urls, destination, different_server, split_url_key, urls};
+use crate::auth::Scope;
 use crate::routes::ApiError;
 
 pub(crate) fn routes() -> Router<AppState> {
@@ -29,9 +30,11 @@ pub(crate) struct ServiceInfo {
     url: &'static str,
 }
 
-/// Configuration as shown to the UI: no token, no secrets.
+/// Configuration as shown to the dashboard: no token, no secrets.
 #[derive(Debug, Serialize)]
 pub(crate) struct PublicConfig {
+    /// Always `admin`; lets clients tell this apart from [`LimitedConfig`].
+    scope: Scope,
     config: Config,
     destination_key_set: bool,
     secrets_backend: String,
@@ -44,13 +47,18 @@ pub(crate) struct PublicConfig {
 pub(crate) fn public_config(st: &AppState) -> PublicConfig {
     let mut config = st.config();
     config.api.token = String::new();
-    let key_set = st.shared.key_override.is_some()
+    // Shown as `urls.obs_key` instead, which diagnostics leave out.
+    config.ingest.key = None;
+    // Keys are moved out of the URL when it is saved; never show one regardless.
+    config.destination.url = split_url_key(&config.destination.url).0;
+    let key_set = st.key_override(&config.destination.url).is_some()
         || st
             .shared
             .secrets
             .get(secret::DESTINATION_KEY)
             .is_some_and(|k| !k.is_empty());
     PublicConfig {
+        scope: Scope::Admin,
         config,
         destination_key_set: key_set,
         secrets_backend: st.shared.secrets.describe(),
@@ -64,6 +72,41 @@ pub(crate) fn public_config(st: &AppState) -> PublicConfig {
             })
             .collect(),
         restart_required: st.shared.restart_required.load(Ordering::Relaxed),
+        version: env!("CARGO_PKG_VERSION"),
+    }
+}
+
+/// What dock and overlay links see: the settings they display, nothing else.
+#[derive(Debug, Serialize)]
+pub(crate) struct LimitedConfig {
+    scope: Scope,
+    config: LimitedSettings,
+    urls: LimitedUrls,
+    version: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct LimitedSettings {
+    delay: DelayConfig,
+    overlay: OverlayConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct LimitedUrls {
+    obs_server: String,
+}
+
+pub(crate) fn limited_config(st: &AppState, scope: Scope) -> LimitedConfig {
+    let c = st.config();
+    LimitedConfig {
+        scope,
+        config: LimitedSettings {
+            delay: c.delay,
+            overlay: c.overlay,
+        },
+        urls: LimitedUrls {
+            obs_server: urls(st).obs_server,
+        },
         version: env!("CARGO_PKG_VERSION"),
     }
 }
@@ -136,9 +179,35 @@ fn validate(u: &SettingsUpdate) -> Result<(), String> {
 
 async fn update_config(
     State(st): State<AppState>,
-    Json(update): Json<SettingsUpdate>,
+    Json(mut update): Json<SettingsUpdate>,
 ) -> Result<Json<PublicConfig>, ApiError> {
     validate(&update).map_err(ApiError::bad_request)?;
+    // A key typed into the URL (rtmp://host/app/<key>) is stored like one entered
+    // in the key field, so the URL shown to the UI and saved in config.toml never
+    // contains it.
+    let mut url_key = None;
+    if let Some(d) = &mut update.destination {
+        let (url, key) = split_url_key(&d.url);
+        d.url = url;
+        url_key = key;
+    }
+    let old_url = st.config().destination.url;
+    let secret_err = |e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Some(key) = &url_key {
+        st.shared
+            .secrets
+            .set(secret::DESTINATION_KEY, key)
+            .map_err(secret_err)?;
+    } else if let Some(d) = &update.destination
+        && different_server(&old_url, &d.url)
+    {
+        // The stored key belongs to the old server: never send it to another one.
+        st.shared
+            .secrets
+            .delete(secret::DESTINATION_KEY)
+            .map_err(secret_err)?;
+        info!("destination server changed; the stored stream key was removed");
+    }
     let mut destination_changed = false;
     let new_config = {
         let mut c = st.shared.config.write().expect("config lock");
@@ -192,7 +261,7 @@ fn apply_destination(st: &AppState, c: &Config) -> Result<(), ApiError> {
     let dest = destination(
         c,
         st.shared.secrets.as_ref(),
-        st.shared.key_override.as_deref(),
+        st.key_override(&c.destination.url),
     );
     info!(?dest, "destination updated");
     st.relay().set_destination(dest)?;
@@ -231,4 +300,51 @@ async fn delete_key(State(st): State<AppState>) -> Result<Json<PublicConfig>, Ap
     apply_destination(&st, &st.config())?;
     st.shared.config_tx.send_modify(|_| {});
     Ok(Json(public_config(&st)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use streamdelay_config::MemorySecrets;
+    use streamdelay_relay::RelayConfig;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn dock_and_overlay_config_has_nothing_secret() {
+        let relay = streamdelay_relay::start(RelayConfig {
+            ingest_bind: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mut config = Config::default();
+        config.api.token = "0123456789abcdef".into();
+        config.ingest.key = Some("ingest-secret".into());
+        config.obs.host = "obs.lan".into();
+        let st = crate::state(relay, config, Arc::new(MemorySecrets::default()), 7788);
+
+        let v = serde_json::to_value(limited_config(&st, Scope::Control)).unwrap();
+        assert_eq!(v["scope"], "control");
+        assert!(v["config"]["delay"]["presets"].is_array());
+        assert!(v["config"]["overlay"]["mask_title"].is_string());
+        assert!(v["urls"]["obs_server"].is_string());
+        let text = v.to_string();
+        for s in [
+            "0123456789abcdef",
+            "ingest-secret",
+            "obs.lan",
+            "token",
+            "destination",
+        ] {
+            assert!(!text.contains(s), "limited config contains {s}: {text}");
+        }
+
+        // The dashboard sees the ingest key only as the OBS stream key.
+        let v = serde_json::to_value(public_config(&st)).unwrap();
+        assert_eq!(v["scope"], "admin");
+        assert!(v["config"]["ingest"]["key"].is_null());
+        assert_eq!(v["urls"]["obs_key"], "ingest-secret");
+    }
 }

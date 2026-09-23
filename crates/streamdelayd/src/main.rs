@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use streamdelay_config::{Config, Secrets};
-use streamdelay_control::{App, AppError, AppOptions, Overrides, diagnostics};
+use streamdelay_config::{Config, MemorySecrets, SecretStore, Secrets};
+use streamdelay_control::{App, AppError, AppOptions, Overrides, Scope, diagnostics, scoped_token};
 use streamdelay_relay::RelayError;
 use tracing::info;
 use tracing_subscriber::prelude::*;
@@ -37,7 +37,8 @@ struct Cli {
 enum Cmd {
     /// Run the relay (OBS -> stream-delay -> destination) with the web UI and API.
     Run(RunArgs),
-    /// Print the OBS server address and the dock, overlay and dashboard links.
+    /// Print the OBS server address and stream key, and the dock, overlay and
+    /// dashboard links.
     Urls,
     /// Set the delay on a running instance.
     Delay {
@@ -172,13 +173,24 @@ fn main() -> Result<()> {
             let path = config_path(&cli.config)?;
             let c = Config::load_or_create(&path)?;
             let host = format!("127.0.0.1:{}", c.api.bind.port());
+            let token = |s| scoped_token(&c.api.token, s);
             println!(
                 "OBS server:  rtmp://127.0.0.1:{}/live",
                 c.ingest.bind.port()
             );
-            println!("Dashboard:   http://{host}/?token={}", c.api.token);
-            println!("OBS dock:    http://{host}/dock?token={}", c.api.token);
-            println!("Overlay:     http://{host}/overlay?token={}", c.api.token);
+            match c.ingest.key.as_deref().filter(|k| !k.is_empty()) {
+                Some(k) => println!("OBS key:     {k}"),
+                None => println!("OBS key:     any"),
+            }
+            println!("Dashboard:   http://{host}/?token={}", token(Scope::Admin));
+            println!(
+                "OBS dock:    http://{host}/dock?token={}",
+                token(Scope::Control)
+            );
+            println!(
+                "Overlay:     http://{host}/overlay?token={}",
+                token(Scope::Read)
+            );
             Ok(())
         }
         Cmd::Delay { seconds, mask, api } => {
@@ -234,14 +246,15 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
     } else {
         Some(config_path(&config)?)
     };
-    let secrets_dir = match &config_path {
-        Some(p) => p.parent().map(PathBuf::from).unwrap_or_default(),
-        None => std::env::temp_dir().join(format!("streamdelayd-{}", std::process::id())),
+    // Ephemeral runs keep secrets in memory: a file under the shared temp directory
+    // would be at a predictable path other users could interfere with.
+    let secrets: Arc<dyn SecretStore> = match &config_path {
+        Some(p) => Arc::new(Secrets::new(
+            &p.parent().map(PathBuf::from).unwrap_or_default(),
+            !args.no_keychain,
+        )),
+        None => Arc::new(MemorySecrets::default()),
     };
-    let secrets = Arc::new(Secrets::new(
-        &secrets_dir,
-        !args.no_keychain && !args.ephemeral,
-    ));
     let overrides = Overrides {
         ingest: args.ingest,
         api: args.api,
@@ -265,10 +278,18 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
         .await
         .map_err(startup_error)?;
         let urls = app.urls();
-        println!(
-            "OBS server:  {}  (Settings → Stream → Custom, any stream key)",
-            urls.obs_server
-        );
+        if app.config().ingest.key.is_some_and(|k| !k.is_empty()) {
+            println!(
+                "OBS server:  {}  (Settings → Stream → Custom)",
+                urls.obs_server
+            );
+            println!("OBS key:     {}", urls.obs_key);
+        } else {
+            println!(
+                "OBS server:  {}  (Settings → Stream → Custom, any stream key)",
+                urls.obs_server
+            );
+        }
         println!("Dashboard:   {}", urls.dashboard);
         println!("OBS dock:    {}", urls.dock);
         println!("Overlay:     {}", urls.overlay);

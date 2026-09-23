@@ -19,7 +19,9 @@ The first public beta. Everything below is new.
   (30 s by default), and continues seamlessly when it comes back.
 - Reconnects to the destination with backoff and resumes from the buffer, so
   viewers miss nothing.
-- Optional ingest key for setups where the relay listens on the network.
+- Ingest key for setups where the relay listens on the network. It is required
+  then; if none is set, one is generated, saved and shown with the OBS server
+  address.
 
 ### Delay
 
@@ -37,7 +39,9 @@ The first public beta. Everything below is new.
 - Web dashboard, OBS browser dock and a transparent overlay (delay badge,
   change pop-up, Mask slate), all served locally.
 - Local HTTP and WebSocket API, protected by a per-install token, a `Host` check
-  against DNS rebinding and a same-origin check.
+  against DNS rebinding and a same-origin check. Dock and overlay links carry
+  tokens that can only control the delay or only read the state; settings,
+  stream keys, diagnostics and OBS need the dashboard link.
 - `streamdelayd` command line: `run`, `urls`, `delay`, `live`, `state`,
   `diagnostics`.
 
@@ -48,7 +52,9 @@ The first public beta. Everything below is new.
 - OBS setup wizard over obs-websocket: backs up OBS's stream settings, points OBS
   at stream-delay, optionally imports the Twitch key and adds the overlay, and
   restores everything with one click.
-- Stream keys and passwords are stored in the OS keychain.
+- Stream keys and passwords are stored in the OS keychain (in memory only with
+  `--ephemeral`). A key typed into the destination URL is stored the same way,
+  and changing the destination to another server forgets the saved key.
 - Moves to another port automatically if 1935 or 7788 is taken.
 
 ### Support and hardening
@@ -57,8 +63,10 @@ The first public beta. Everything below is new.
   version, settings, state and recent logs, with keys, passwords and tokens removed.
 - Memory stays flat on long streams: buffered media is stored in shared 1 MiB
   blocks rather than one allocation per message, which fragmented the heap.
-- Limits on memory use for untrusted RTMP input; fuzzing of the RTMP, AMF0 and
-  FLV parsers and the engine; chaos tests (destination resets and stalls, encoder
+- Limits on memory use for untrusted RTMP input: before an encoder publishes it
+  may only send messages up to 64 KiB, must publish within 15 s, and one address
+  may hold at most four connections. Fuzzing of the RTMP, AMF0 and FLV parsers
+  and the engine; chaos tests (destination resets and stalls, encoder
   crashes); a soak test that watches memory over hours.
 - User guide at <https://commitandpray67.github.io/stream-delay/>.
 
