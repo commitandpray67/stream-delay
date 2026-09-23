@@ -31,6 +31,20 @@ window), then start the app again. Only one copy can run at a time; the app and
 The links contain a private token. Copy them again from the **Setup** tab or the
 tray menu. If you reinstalled or deleted the settings file, the token changed.
 
+## The dock shows old buttons (Go live now, no End stream)
+
+OBS kept an older version of the dock open, or cached it. Open **Docks → Custom
+Browser Docks…**, add `&v=2` to the end of the dock's URL, and click **Apply**.
+From version 0.3 on, docks and overlays reload themselves after an update.
+
+## The OBS setup wizard says OBS runs on another computer
+
+Versions up to 0.2.0 took OBS's own network address (the one OBS's WebSocket
+settings show, such as `192.168.0.10`) for another computer. Update, or enter
+`127.0.0.1` as the OBS host on the Setup tab. If OBS really runs on another
+computer, start stream-delay with `--ingest 0.0.0.0:1935`; see
+[two-PC setups](install.md#two-pc-setups).
+
 ## "Keyframe interval is 4.0 s"
 
 Set the keyframe interval to 2 s in OBS (**Settings → Output → Streaming →

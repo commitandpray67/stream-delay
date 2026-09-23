@@ -6,6 +6,56 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Dump buffer**: throws away everything viewers haven't seen yet, so it never
+  airs, and keeps streaming with the same delay. For the moment something
+  happens on stream that must not go out. With Rewind (the default), viewers see
+  the last stretch again and the stream continues from after the dump; the delay
+  never drops, so no overlay is needed. With Mask, or when the buffer doesn't
+  reach back far enough, the overlay slate covers the stream while the delay
+  builds back up. In the dock, dashboard, tray menu, API
+  (`POST /api/v1/stream/dump`), command line (`streamdelayd dump`) and as a
+  hotkey.
+- **End stream** now airs what viewers haven't seen yet, then ends the broadcast;
+  nothing after the click airs, and **Keep streaming** takes it back until then.
+  **End stream now** is the old behavior (the buffer never airs), and explains
+  itself the first time it is used. API: `POST /api/v1/stream/end` with
+  `{"when": "after-air"}`; command line: `streamdelayd end --after-air`.
+- **Check for updates** on the dashboard's Advanced tab, with the version.
+- Docks and overlays that OBS kept open reload themselves after stream-delay is
+  updated, instead of running the old version.
+- The dock warns before a Mask dump when no overlay is connected
+  (`{"type": "overlays"}` on the events WebSocket counts them).
+
+### Changed
+
+- **The dock's buttons follow the stream.** Starting a stream is up to OBS; the
+  dock shows **Dump buffer**, **End stream** and **End stream now** while you
+  are streaming, and after ending tells you to stop and start streaming in OBS
+  to go live again (**Resume broadcasting** is on the dashboard and tray).
+- "Go live" is now "remove the delay" everywhere, so it isn't mistaken for
+  starting the stream: the **0 s** preset (formerly **Live**), **Remove delay
+  after it airs** (formerly *Air up to now, then go live*), and a **No delay**
+  status (formerly **Live**).
+- **Stopping and restarting the stream in OBS before its end has aired** lets
+  the old broadcast finish, then starts a new one for the new stream. The old
+  broadcast used to carry on with no data while OBS was stopped, and Twitch
+  drops a connection that goes quiet for about 30 s.
+- The overlay's pop-up appears only when you change the delay, once the change
+  is in effect ("Stream delay: 15 s", "Stream delay removed"). It no longer pops
+  up when a stream starts or reconnects, and says what the delay really is when
+  the buffer was too short for the one asked for. Its badge shows the delay you
+  set rather than one stretched by a keyframe.
+
+### Fixed
+
+- The OBS setup wizard took an OBS at this computer's own network address (the
+  one OBS's WebSocket settings show) for one on another computer: it offered to
+  set up an OBS that already streamed to stream-delay, then refused.
+- "Buffered 2:11 of 2:00": the buffer label no longer shows more than the
+  maximum.
+
 ## [0.2.0] - 2026-09-23
 
 ### Changed

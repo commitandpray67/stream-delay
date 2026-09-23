@@ -98,7 +98,9 @@ to the settings that only your user can read.
 
 ## Updating and uninstalling
 
-The desktop app checks for updates at start and from the tray menu (**Check for
-updates**) once releases are signed. Uninstall it like any other app; delete the
+The desktop app checks for updates when it starts, and when you click **Check for
+updates** in the tray menu or on the dashboard's **Advanced** tab; it asks before
+installing one. (`streamdelayd` and Docker don't update themselves: the button
+links to the latest release instead.) Uninstall it like any other app; delete the
 settings folder above to remove your settings, and the `dev.stream-delay` entries from
 your keychain.

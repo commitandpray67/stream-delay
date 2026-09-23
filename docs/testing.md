@@ -40,13 +40,15 @@ test channel) to see what viewers see.
 | 2 | Preset 60 s (Rewind) | Jumps back another ~30 s. |
 | 3 | Lower to 15 s | Skips forward; the clock is 15–17 s behind. |
 | 4 | Mask 20 s | Slate appears at once, stays for ~40 s, and no content is shown twice. |
-| 5 | Air up to now, then go live | Plays up to the moment you pressed, then jumps to live. |
-| 6 | Delay 30 s, then **Go live now** | Jumps to live within ~2 s. |
-| 7 | Stop OBS's stream, wait 10 s, start again (within the 30 s grace period) | The Twitch connection stays up in Inspector; the stream continues. |
-| 8 | Disconnect the network for ~10 s while delayed | stream-delay reconnects; after it, nothing was skipped and the delay is ~10 s longer. |
-| 9 | Delay 30 s, then **End stream** | The broadcast ends in Inspector at once; the last 30 s never air. **Resume** starts a new broadcast 30 s behind. |
-| 10 | Setup → turn off the rolling buffer, then preset 30 s | The slate covers the stream while the delay builds (Mask); nothing repeats. |
-| 11 | Stream 1 h with a change every few minutes | No Inspector warnings besides the reconnect in step 8 and the end in step 9; memory in Task Manager/Activity Monitor stays flat. |
+| 5 | Remove delay after it airs | Plays up to the moment you pressed, then jumps to live. |
+| 6 | Delay 30 s, then preset **0 s** | Jumps to live within ~2 s. |
+| 7 | Delay 30 s, wait a minute, hold up a sign, then **Dump buffer** | The last ~30 s before the dump play again, then the stream continues from after it; the sign never airs, and the delay stays 30 s. |
+| 8 | Delay 30 s. Stop OBS's stream, start it again 10 s later | The first broadcast airs its last 30 s, then ends in Inspector; the new stream starts a new broadcast 30 s after you started it. |
+| 9 | Disconnect the network for ~10 s while delayed | stream-delay reconnects; after it, nothing was skipped and the delay is ~10 s longer. |
+| 10 | Delay 30 s, then **End stream** | The last 30 s air, then the broadcast ends in Inspector. Stopping and starting the stream in OBS starts a new one. |
+| 11 | Delay 30 s, then **End stream now** | The broadcast ends in Inspector at once; the last 30 s never air. |
+| 12 | Setup → turn off the rolling buffer, then preset 30 s | The slate covers the stream while the delay builds (Mask); nothing repeats. |
+| 13 | Stream 1 h with a change every few minutes | No Inspector warnings besides the reconnect in step 9 and the ends in steps 8, 10 and 11; memory in Task Manager/Activity Monitor stays flat. |
 
 For each step, note anything odd: freezes (and how long), artifacts, audio
 drift, player errors, and whether the low-latency and normal Twitch players

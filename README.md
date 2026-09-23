@@ -16,8 +16,9 @@ OBS  →  rtmp://127.0.0.1:1935/live  →  stream-delay  →  Twitch
 
 - **Add delay instantly** when a stream sniper shows up. Viewers briefly see the last few seconds again, and nothing new leaks.
 - **Mask mode:** an on-stream slate covers the change, so no gameplay is shown twice.
-- **Go live** at once, or **after what's buffered has aired**, so chat can catch up.
-- **Starts and ends like streaming straight to Twitch.** Stop streaming in OBS and the delayed rest airs, then the broadcast ends. If OBS crashes or loses its connection, stream-delay keeps the broadcast open for 30 s so OBS can pick up where it left off. **End stream** cuts it off at once without airing the buffer.
+- **Remove the delay** at once, or **after what's buffered has aired**, so chat can catch up.
+- **Dump the buffer** when something happens that must not go out: what viewers haven't seen yet is thrown away, and the stream carries on with the same delay.
+- **Starts and ends like streaming straight to Twitch.** You start in OBS as always. Stop streaming in OBS (or click **End stream**) and the delayed rest airs, then the broadcast ends. If OBS crashes or loses its connection, stream-delay keeps the broadcast open for 30 s so OBS can pick up where it left off. **End stream now** cuts it off at once without airing the buffer.
 - **Rides out network trouble.** If the connection to Twitch drops, stream-delay reconnects at once and continues from its buffer, so viewers miss nothing.
 - **No re-encoding.** Video and audio pass through byte for byte, with almost no CPU use.
 - **Control it your way:** an OBS dock, a browser-source overlay (delay badge and slate), global hotkeys, a tray menu, the command line, and an HTTP/WebSocket API for Stream Deck, Streamer.bot and scripts.
@@ -43,7 +44,8 @@ The [quick start](https://commitandpray67.github.io/stream-delay/quick-start.htm
 streamdelayd run                  # prints the OBS server address and the dashboard, dock and overlay links
 streamdelayd delay 30             # control a running instance
 streamdelayd live --after-air
-streamdelayd end
+streamdelayd dump
+streamdelayd end --after-air
 ```
 
 With Docker:
