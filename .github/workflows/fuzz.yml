@@ -1,0 +1,58 @@
+name: Fuzz
+
+# Runs every cargo-fuzz target in fuzz/fuzz_targets for a fixed time. The corpus is
+# cached between runs so coverage builds up; crashing inputs are uploaded as an
+# artifact. Reproduce locally with `cargo +nightly fuzz run <target> <crash-file>`.
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "300"
+  pull_request:
+    paths:
+      - "crates/rtmp/**"
+      - "crates/flv/**"
+      - "crates/engine/**"
+      - "fuzz/**"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Build
+        run: cargo fuzz build
+      - name: Fuzz
+        env:
+          PER_TARGET: ${{ inputs.seconds || (github.event_name == 'pull_request' && '60') || '300' }}
+        run: |
+          for t in $(cargo fuzz list); do
+            echo "::group::$t"
+            cargo fuzz run "$t" -- -max_total_time="$PER_TARGET"
+            echo "::endgroup::"
+          done
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts

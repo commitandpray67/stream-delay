@@ -14,6 +14,10 @@ const TOKEN: &str = "0123456789abcdef";
 const PORT: u16 = 7788;
 
 async fn app() -> axum::Router {
+    app_with_secrets("").await
+}
+
+async fn app_with_secrets(suffix: &str) -> axum::Router {
     let relay = streamdelay_relay::start(RelayConfig {
         ingest_bind: "127.0.0.1:0".parse().unwrap(),
         ..Default::default()
@@ -24,7 +28,7 @@ async fn app() -> axum::Router {
     config.api.token = TOKEN.into();
     config.destination.url = String::new();
     // Secrets go to a throwaway directory that is never cleaned up mid-test.
-    let dir = std::env::temp_dir().join(format!("sd-api-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("sd-api-test-{}{suffix}", std::process::id()));
     let secrets = Arc::new(Secrets::new(&dir, false));
     streamdelay_control::router(relay, config, secrets, PORT)
 }
@@ -230,4 +234,67 @@ async fn ui_is_served_without_token() {
     let app = app().await;
     let (s, _) = send(&app, req("GET", "/dock").body(Body::empty()).unwrap()).await;
     assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn diagnostics_bundle_has_no_secrets() {
+    use tracing_subscriber::prelude::*;
+    const KEY: &str = "sk-not-a-twitch-key-42";
+    let app = app_with_secrets("-diag").await;
+    let (s, _) = send(
+        &app,
+        authed("PUT", "/api/v1/destination/key")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(r#"{{"key":"{KEY}"}}"#)))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // Log lines that leak every kind of secret.
+    let subscriber = tracing_subscriber::registry().with(streamdelay_control::diagnostics::layer());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::warn!("egress to rtmp://example/app/{KEY} failed");
+        tracing::warn!("dock opened: /dock?token={TOKEN}");
+        tracing::warn!("obs profile uses live_987654_AbCdEfGh");
+    });
+
+    let r = req("GET", "/api/v1/diagnostics")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, r).await.0, StatusCode::UNAUTHORIZED);
+    let resp = app
+        .clone()
+        .oneshot(
+            authed("GET", "/api/v1/diagnostics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let disposition = resp.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap();
+    assert!(disposition.starts_with("attachment; filename=\"stream-delay-diagnostics-"));
+    let text = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["state"]["delay"]["phase"], "offline");
+    let logs = body["logs"].as_array().unwrap();
+    assert!(logs.iter().any(|l| {
+        l.as_str()
+            .unwrap()
+            .contains("egress to rtmp://example/app/<redacted> failed")
+    }));
+    for secret in [KEY, TOKEN, "987654_AbCdEfGh"] {
+        assert!(!text.contains(secret), "diagnostics leak {secret}");
+    }
 }

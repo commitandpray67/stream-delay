@@ -479,3 +479,22 @@ mod tests {
         assert!(!cmd.keyframe && !cmd.config);
     }
 }
+
+#[cfg(test)]
+mod fuzz_tests {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_input_never_panics(data in prop::collection::vec(any::<u8>(), 0..512)) {
+            if let Some(i) = super::inspect_video(&data)
+                && let Some(offset) = i.nal_offset
+            {
+                let _ = super::hevc::cra_to_bla(&data, offset);
+            }
+            let _ = super::inspect_audio(&data);
+            let _ = super::hevc::cra_to_bla(&data, 0);
+            let _ = super::hevc::cra_to_bla(&data, data.len() / 2);
+        }
+    }
+}

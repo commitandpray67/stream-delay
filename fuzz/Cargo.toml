@@ -1,0 +1,59 @@
+[package]
+name = "streamdelay-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+bytes = "1"
+streamdelay-rtmp = { path = "../crates/rtmp" }
+streamdelay-flv = { path = "../crates/flv" }
+streamdelay-engine = { path = "../crates/engine" }
+
+# Not part of the main workspace: fuzzing needs a nightly toolchain.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "chunk_decoder"
+path = "fuzz_targets/chunk_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "amf0"
+path = "fuzz_targets/amf0.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flv"
+path = "fuzz_targets/flv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sessions"
+path = "fuzz_targets/sessions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine"
+path = "fuzz_targets/engine.rs"
+test = false
+doc = false
+bench = false

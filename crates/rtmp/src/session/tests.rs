@@ -124,3 +124,38 @@ fn acknowledgements_are_sent_after_window() {
     let m = dec.next_message().unwrap().expect("ack");
     assert_eq!(m.type_id, crate::message::ACKNOWLEDGEMENT);
 }
+
+mod arbitrary_input {
+    use proptest::prelude::*;
+
+    use crate::handshake::{ClientHandshake, ServerHandshake};
+    use crate::session::*;
+
+    proptest! {
+        /// Whatever a peer sends, sessions and handshakes return errors, never panic.
+        #[test]
+        fn sessions_never_panic(data in prop::collection::vec(any::<u8>(), 0..4096)) {
+            let mut s = ServerSession::new(ServerConfig::default());
+            let _ = s.feed(&data);
+            s.accept_publish();
+            let _ = s.feed(&data);
+            let mut c = ClientSession::new(ClientConfig::new("app", "rtmp://x/app", "k"));
+            let _ = c.feed(&data);
+            let mut out = bytes::BytesMut::new();
+            let _ = ServerHandshake::new().feed(&data, &mut out);
+            let mut h = ClientHandshake::new();
+            h.start(&mut out);
+            let _ = h.feed(&data, &mut out);
+        }
+
+        /// A valid connect followed by garbage still never panics.
+        #[test]
+        fn garbage_after_connect_never_panics(data in prop::collection::vec(any::<u8>(), 0..2048)) {
+            let mut c = ClientSession::new(ClientConfig::new("live", "rtmp://x/live", "k"));
+            let mut s = ServerSession::new(ServerConfig::default());
+            let hello = c.take_output();
+            let _ = s.feed(&hello);
+            let _ = s.feed(&data);
+        }
+    }
+}

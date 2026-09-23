@@ -2,6 +2,7 @@
 
 mod client;
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,8 +10,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use streamdelay_config::{Config, Secrets};
-use streamdelay_control::{App, AppOptions, Overrides};
+use streamdelay_control::{App, AppOptions, Overrides, diagnostics};
 use tracing::info;
+use tracing_subscriber::prelude::*;
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +54,15 @@ enum Cmd {
     },
     /// Print the state of a running instance as JSON.
     State {
+        #[command(flatten)]
+        api: ApiArgs,
+    },
+    /// Save a diagnostics file (settings, state, recent logs; secrets removed) from a
+    /// running instance, to attach to bug reports.
+    Diagnostics {
+        /// Where to write it (default: print to the terminal).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
         #[command(flatten)]
         api: ApiArgs,
     },
@@ -185,15 +196,31 @@ fn main() -> Result<()> {
             let (url, token) = api.resolve(&cli.config)?;
             client::print(client::get(&url, &token, "/api/v1/state")?)
         }
+        Cmd::Diagnostics { output, api } => {
+            let (url, token) = api.resolve(&cli.config)?;
+            let bundle = client::get(&url, &token, "/api/v1/diagnostics")?;
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, serde_json::to_string_pretty(&bundle)?)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    println!("Saved diagnostics to {}", path.display());
+                    Ok(())
+                }
+                None => client::print(bundle),
+            }
+        }
     }
 }
 
 fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,obws=error".into()),
         )
+        // No color codes when logs go to a file or `docker logs`.
+        .with(tracing_subscriber::fmt::layer().with_ansi(std::io::stderr().is_terminal()))
+        .with(diagnostics::layer())
         .init();
     let config_path = if args.ephemeral {
         None

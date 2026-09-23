@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting! **Never paste your stream key.** Use "Export log bundle" in the dashboard; it redacts secrets.
+        Thanks for reporting! **Never paste your stream key.** Attach the diagnostics file instead: dashboard → Advanced → **Download diagnostics** (or `streamdelayd diagnostics -o diagnostics.json`). It removes keys, passwords and tokens.
   - type: textarea
     id: what
     attributes:
@@ -40,6 +40,5 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Logs
-      description: Attach the exported log bundle or paste relevant lines.
-      render: text
+      label: Diagnostics
+      description: Drag the diagnostics file here, or paste relevant log lines.

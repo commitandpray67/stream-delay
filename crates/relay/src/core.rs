@@ -85,6 +85,9 @@ pub(crate) async fn run(
     events_tx: mpsc::UnboundedSender<Event>,
     mut events: mpsc::UnboundedReceiver<Event>,
     state_tx: watch::Sender<RelayState>,
+    // Dropped (or set) when this task ends, which stops the ingest listener and
+    // closes encoder connections.
+    shutdown: watch::Sender<bool>,
 ) {
     let (egress_ctl, egress_ctl_rx) = mpsc::unbounded_channel();
     let (media_tx, media_rx) = mpsc::unbounded_channel();
@@ -138,6 +141,7 @@ pub(crate) async fn run(
         tokio::select! {
             c = control.recv() => match c {
                 Some(Control::Shutdown(done)) => {
+                    let _ = shutdown.send(true);
                     let _ = core.egress_ctl.send(EgressCtl::Stop);
                     // Give the egress a moment to unpublish cleanly.
                     tokio::time::sleep(Duration::from_millis(300)).await;

@@ -7,6 +7,7 @@
 
 mod app;
 mod auth;
+pub mod diagnostics;
 mod obs_routes;
 mod routes;
 mod settings;

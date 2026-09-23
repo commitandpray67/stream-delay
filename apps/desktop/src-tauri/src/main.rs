@@ -16,9 +16,11 @@ use std::sync::Arc;
 use streamdelay_config::{Config, Secrets};
 use streamdelay_control::{App, AppError, AppOptions, Overrides};
 use streamdelay_relay::RelayError;
+use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tracing::{error, info, warn};
+use tracing_subscriber::prelude::*;
 
 /// The running core, shared with tray and hotkey handlers.
 pub struct Core(pub Arc<App>);
@@ -101,14 +103,18 @@ fn init_logging() {
         std::fs::create_dir_all(&d).ok()?;
         std::fs::File::create(d.join("stream-delay.log")).ok()
     });
-    match file {
-        Some(f) => tracing_subscriber::fmt()
-            .with_env_filter(filter)
+    let output = match file {
+        Some(f) => tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(std::sync::Mutex::new(f))
-            .init(),
-        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
-    }
+            .boxed(),
+        None => tracing_subscriber::fmt::layer().boxed(),
+    };
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(output)
+        .with(streamdelay_control::diagnostics::layer())
+        .init();
 }
 
 /// Starts relay and control server, moving to fallback ports if the configured
@@ -211,6 +217,25 @@ pub fn show_dashboard(app: &AppHandle, tab: Option<&str>) {
         .title("stream-delay")
         .inner_size(1120.0, 820.0)
         .min_inner_size(420.0, 480.0)
+        // Without a handler macOS ignores downloads (the diagnostics file); the
+        // default destination is the Downloads folder.
+        .on_download(|webview, event| {
+            if let DownloadEvent::Finished { path, success, .. } = event {
+                let (text, kind) = match (success, path) {
+                    (true, Some(p)) => {
+                        (format!("Saved to {}", p.display()), MessageDialogKind::Info)
+                    }
+                    _ => ("The download failed.".to_string(), MessageDialogKind::Error),
+                };
+                webview
+                    .dialog()
+                    .message(text)
+                    .kind(kind)
+                    .title("stream-delay")
+                    .show(|_| {});
+            }
+            true
+        })
         .build();
     match result {
         Ok(_) => info!("dashboard opened"),

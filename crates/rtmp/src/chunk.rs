@@ -13,6 +13,14 @@ use thiserror::Error;
 pub const DEFAULT_CHUNK_SIZE: usize = 128;
 /// Largest chunk size accepted from a peer (the spec allows up to 2^31-1; we cap it).
 pub const MAX_CHUNK_SIZE: usize = 1 << 24;
+/// Chunk streams a peer may use at once. Encoders use a handful; the limit stops a
+/// hostile peer from spreading partial messages over thousands of streams.
+pub const MAX_CHUNK_STREAMS: usize = 64;
+/// Bytes held in unfinished messages across all chunk streams.
+pub const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
+/// Up-front allocation for a new message; larger messages grow as data arrives, so a
+/// header alone cannot make us allocate its declared length.
+const MAX_RESERVE: usize = 256 * 1024;
 const EXTENDED: u32 = 0x00FF_FFFF;
 
 /// A complete RTMP message.
@@ -32,6 +40,10 @@ pub enum ChunkError {
     MissingHeader(u32),
     #[error("invalid chunk size {0}")]
     InvalidChunkSize(u32),
+    #[error("peer used more than {MAX_CHUNK_STREAMS} chunk streams")]
+    TooManyStreams,
+    #[error("peer has more than {MAX_PENDING_BYTES} bytes of unfinished messages")]
+    TooMuchPending,
 }
 
 #[derive(Default)]
@@ -53,6 +65,8 @@ pub struct ChunkDecoder {
     chunk_size: usize,
     streams: HashMap<u32, StreamState>,
     buf: BytesMut,
+    /// Sum of `partial.len()` over all streams.
+    pending: usize,
 }
 
 impl Default for ChunkDecoder {
@@ -67,6 +81,7 @@ impl ChunkDecoder {
             chunk_size: DEFAULT_CHUNK_SIZE,
             streams: HashMap::new(),
             buf: BytesMut::new(),
+            pending: 0,
         }
     }
 
@@ -90,6 +105,7 @@ impl ChunkDecoder {
     /// Drops a partially received message (the Abort protocol message).
     pub fn abort(&mut self, csid: u32) {
         if let Some(s) = self.streams.get_mut(&csid) {
+            self.pending -= s.partial.len();
             s.partial.clear();
             s.in_progress = false;
         }
@@ -143,6 +159,9 @@ impl ChunkDecoder {
         let st = self.streams.get(&csid).unwrap_or(&default_state);
         if fmt != 0 && !st.has_header {
             return Err(ChunkError::MissingHeader(csid));
+        }
+        if !self.streams.contains_key(&csid) && self.streams.len() >= MAX_CHUNK_STREAMS {
+            return Err(ChunkError::TooManyStreams);
         }
 
         let mut ts_field = 0u32;
@@ -199,6 +218,11 @@ impl ChunkDecoder {
         if b.len() < pos + take {
             return Ok(ChunkResult::NeedMore);
         }
+        // A new header discards the stream's unfinished message, if any.
+        let dropped = if continuation { 0 } else { st.partial.len() };
+        if self.pending - dropped + take > MAX_PENDING_BYTES {
+            return Err(ChunkError::TooMuchPending);
+        }
 
         // The whole chunk is available: commit state.
         let raw_ts = if extended { ext_value } else { ts_field };
@@ -227,14 +251,16 @@ impl ChunkDecoder {
             st.ext_value = ext_value;
             st.has_header = true;
             st.partial.clear();
-            st.partial.reserve(length as usize);
+            st.partial.reserve((length as usize).min(MAX_RESERVE));
             st.in_progress = true;
         }
+        self.pending = self.pending - dropped + take;
         st.partial.extend_from_slice(&self.buf[pos..pos + take]);
         self.buf.advance(pos + take);
 
         if st.partial.len() >= st.length as usize {
             st.in_progress = false;
+            self.pending -= st.partial.len();
             let payload = st.partial.split().freeze();
             return Ok(ChunkResult::Complete(Message {
                 csid,
@@ -465,6 +491,74 @@ mod tests {
         assert_eq!(&m.payload[..], &[8, 8, 8]);
     }
 
+    #[test]
+    fn too_many_chunk_streams_is_an_error() {
+        let enc = ChunkEncoder::new();
+        let mut out = BytesMut::new();
+        for csid in 2..(2 + MAX_CHUNK_STREAMS as u32 + 1) {
+            enc.write(&mut out, csid, 0, 9, 1, b"x");
+        }
+        let mut dec = ChunkDecoder::new();
+        dec.push(&out);
+        let mut result = Ok(None);
+        for _ in 0..=MAX_CHUNK_STREAMS {
+            result = dec.next_message();
+            if result.is_err() {
+                break;
+            }
+        }
+        assert_eq!(result, Err(ChunkError::TooManyStreams));
+    }
+
+    #[test]
+    fn header_alone_does_not_allocate_declared_length() {
+        // A 16 MB message header with no body must not reserve 16 MB.
+        let mut dec = ChunkDecoder::new();
+        dec.set_chunk_size(1).unwrap();
+        dec.push(&[0x06, 0, 0, 0, 0xff, 0xff, 0xff, 9, 1, 0, 0, 0, 0xaa]);
+        assert!(dec.next_message().unwrap().is_none());
+        let st = dec.streams.get(&6).unwrap();
+        assert!(st.partial.capacity() <= MAX_RESERVE);
+    }
+
+    #[test]
+    fn pending_bytes_are_bounded() {
+        // Many streams each holding an unfinished large message.
+        // Each stream sends the first 8 MB chunk of a 16 MB message and stops.
+        let mut dec = ChunkDecoder::new();
+        dec.set_chunk_size(8 * 1024 * 1024).unwrap();
+        let body = vec![0u8; 8 * 1024 * 1024];
+        let mut err = None;
+        for csid in 2u8..20 {
+            let mut chunk = vec![csid, 0, 0, 0, 0xff, 0xff, 0xff, 9, 1, 0, 0, 0];
+            chunk.extend_from_slice(&body);
+            dec.push(&chunk);
+            if let Err(e) = dec.next_message() {
+                err = Some(e);
+                break;
+            }
+        }
+        assert_eq!(err, Some(ChunkError::TooMuchPending));
+        assert!(dec.pending <= MAX_PENDING_BYTES);
+    }
+
+    #[test]
+    fn pending_accounting_returns_to_zero() {
+        let mut enc = ChunkEncoder::new();
+        enc.set_chunk_size(100);
+        let mut out = BytesMut::new();
+        enc.write(&mut out, 6, 0, 9, 1, &[1u8; 1000]);
+        enc.write(&mut out, 4, 0, 8, 1, &[2u8; 50]);
+        let mut dec = ChunkDecoder::new();
+        dec.set_chunk_size(100).unwrap();
+        dec.push(&out[..350]);
+        while dec.next_message().unwrap().is_some() {}
+        assert!(dec.pending > 0);
+        dec.push(&out[350..]);
+        while dec.next_message().unwrap().is_some() {}
+        assert_eq!(dec.pending, 0);
+    }
+
     proptest! {
         #[test]
         fn interleaved_streams_round_trip(
@@ -490,6 +584,7 @@ mod tests {
                     got.push(m);
                 }
             }
+            prop_assert_eq!(dec.pending, 0);
             prop_assert_eq!(got.len(), msgs.len());
             for (m, (csid, ts, ty, p)) in got.iter().zip(msgs.iter()) {
                 prop_assert_eq!(m.csid, *csid);
@@ -497,6 +592,27 @@ mod tests {
                 prop_assert_eq!(m.type_id, *ty);
                 prop_assert_eq!(&m.payload[..], &p[..]);
             }
+        }
+    }
+
+    proptest! {
+        /// Arbitrary bytes never panic the decoder or break its accounting.
+        #[test]
+        fn arbitrary_input_never_panics(
+            data in prop::collection::vec(any::<u8>(), 0..4096),
+            chunk_size in 1u32..300,
+        ) {
+            let mut dec = ChunkDecoder::new();
+            dec.set_chunk_size(chunk_size).unwrap();
+            dec.push(&data);
+            for _ in 0..10_000 {
+                match dec.next_message() {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            let held: usize = dec.streams.values().map(|s| s.partial.len()).sum();
+            prop_assert_eq!(held, dec.pending);
         }
     }
 }

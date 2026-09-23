@@ -1,0 +1,42 @@
+name: Soak
+
+# Long-running stream with random delay changes (tests/soak/run.sh).
+# GitHub-hosted runners stop after 6 hours, so the nightly run lasts 2 hours and
+# manual runs are capped at 5.5 hours. Run the full 12-hour soak on your own
+# machine: `DURATION=43200 tests/soak/run.sh`.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: Duration in hours (max 5.5)
+        default: "2"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Build
+        run: cargo build --release -p streamdelayd
+      - name: Soak
+        env:
+          HOURS: ${{ inputs.hours || '2' }}
+          OUT: ${{ runner.temp }}/soak
+        run: |
+          DURATION=$(python3 -c "print(int(min(float('$HOURS'), 5.5) * 3600))") tests/soak/run.sh
+      - name: Upload samples and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-results
+          path: ${{ runner.temp }}/soak

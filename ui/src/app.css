@@ -55,7 +55,8 @@ select {
   color: inherit;
 }
 
-button {
+button,
+a.button {
   cursor: pointer;
   border: 1px solid var(--border);
   background: var(--panel-2);
@@ -64,7 +65,14 @@ button {
   transition: background 0.12s, border-color 0.12s;
 }
 
-button:hover:not(:disabled) {
+a.button {
+  display: inline-block;
+  color: inherit;
+  text-decoration: none;
+}
+
+button:hover:not(:disabled),
+a.button:hover {
   border-color: var(--accent);
 }
 

@@ -92,6 +92,16 @@ Commands return an acknowledgement:
 | `POST /api/v1/obs/configure` | `{"import_key": true, "add_overlay": true}` | Back up OBS's stream settings, point OBS at stream-delay, and optionally import the Twitch key and add the overlay. |
 | `POST /api/v1/obs/restore` | none | Put OBS's original stream settings back. |
 
+## Diagnostics
+
+| Method and path | Body | Effect |
+|---|---|---|
+| `GET /api/v1/diagnostics` | none | A JSON file for bug reports: version, OS, settings, state and the last 2000 log lines. Stream keys, passwords, the API token, `live_…` keys, `token=` values and your home directory path are removed. Sent as a download (`Content-Disposition: attachment`). |
+
+The dashboard's **Advanced** tab has a *Download diagnostics* button, and
+`streamdelayd diagnostics -o diagnostics.json` saves the same file from a running
+instance.
+
 ## Examples
 
 ```sh

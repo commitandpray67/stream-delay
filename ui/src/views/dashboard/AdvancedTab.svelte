@@ -1,6 +1,6 @@
 <script lang="ts">
   import CopyField from "../../components/CopyField.svelte";
-  import { updateConfig } from "../../lib/api";
+  import { getToken, updateConfig } from "../../lib/api";
   import { live } from "../../lib/live.svelte";
   import type { HotkeyConfig } from "../../lib/types";
 
@@ -62,9 +62,22 @@
     </form>
 
     <section class="panel stack">
+      <h2>Diagnostics</h2>
+      <p class="muted small">
+        When reporting a problem, attach this file to your issue. It holds the version, your settings, the current
+        state and recent log lines. Stream keys, passwords and the API token are removed.
+      </p>
+      <div class="row">
+        <a class="button" href={`/api/v1/diagnostics?token=${encodeURIComponent(getToken())}`} download>
+          Download diagnostics
+        </a>
+      </div>
+    </section>
+
+    <section class="panel stack">
       <h2>API and integrations</h2>
       <p class="muted small">
-        Stream Deck ("Website"/"Web Requests" actions), Streamer.bot, Touch Portal or scripts can call the HTTP API.
+        Stream Deck (with a web-request plugin), Streamer.bot, Firebot, Touch Portal or scripts can call the HTTP API.
         Send the token as <code>Authorization: Bearer &lt;token&gt;</code>. Examples:
         <code>PUT /api/v1/delay {'{'}"seconds": 30{'}'}</code>,
         <code>POST /api/v1/live {'{'}"when": "after-air"{'}'}</code>,
@@ -73,6 +86,7 @@
       <CopyField label="Dashboard link (contains the token)" value={live.config.urls.dashboard} secret />
       <p class="muted small">
         stream-delay {live.config.version} · secrets are stored in {live.config.secrets_backend} ·
+        <a href="https://commitandpray67.github.io/stream-delay/" target="_blank" rel="noreferrer">user guide</a> ·
         <a href="https://github.com/commitandpray67/stream-delay" target="_blank" rel="noreferrer">source code (GPL-3.0)</a>
       </p>
     </section>

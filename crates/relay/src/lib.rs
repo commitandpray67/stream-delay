@@ -235,7 +235,8 @@ pub async fn start(config: RelayConfig) -> Result<RelayHandle, RelayError> {
         ..Default::default()
     };
     let (state_tx, state_rx) = watch::channel(initial);
-    tokio::spawn(ingest::listen(listener, events_tx.clone()));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(ingest::listen(listener, events_tx.clone(), shutdown_rx));
     tokio::spawn(core::run(
         config,
         ingest_addr,
@@ -243,6 +244,7 @@ pub async fn start(config: RelayConfig) -> Result<RelayHandle, RelayError> {
         events_tx,
         events_rx,
         state_tx,
+        shutdown_tx,
     ));
     Ok(RelayHandle {
         control: control_tx,

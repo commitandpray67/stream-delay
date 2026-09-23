@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError};
 
-use crate::{AppState, auth, obs_routes, settings, ui};
+use crate::{AppState, auth, diagnostics, obs_routes, settings, ui};
 
 /// Error body: `{"error": "..."}`.
 #[derive(Debug)]
@@ -51,6 +51,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/v1/presets/{index}", post(preset))
         .route("/api/v1/events", get(events))
         .merge(settings::routes())
+        .merge(diagnostics::routes())
         .merge(obs_routes::routes())
         .merge(ui::routes())
         .layer(middleware::from_fn_with_state(state.clone(), auth::guard))

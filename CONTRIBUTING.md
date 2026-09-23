@@ -4,9 +4,9 @@ Thanks for helping. This project aims to be a dependable tool that streamers can
 
 ## Before you start
 
-- Read [`docs/PLAN.md`](docs/PLAN.md) for the architecture and roadmap.
+- Read [`docs/PLAN.md`](https://github.com/commitandpray67/stream-delay/blob/main/docs/PLAN.md) for the architecture and roadmap.
 - For anything larger than a small fix, open an issue or discussion first so we can agree on the approach.
-- Significant design decisions are recorded as ADRs in [`docs/adr/`](docs/adr/).
+- Significant design decisions are recorded as ADRs in [`docs/adr/`](https://github.com/commitandpray67/stream-delay/tree/main/docs/adr).
 
 ## Development setup
 
@@ -26,6 +26,17 @@ cargo test                      # unit, property and integration tests
 pnpm -C ui install && pnpm -C ui build   # build the web UI embedded into the binary
 tests/e2e/run.sh                # ffmpeg -> streamdelayd -> ffmpeg end-to-end check
 ```
+
+Longer-running checks (CI runs them nightly):
+
+```sh
+cargo +nightly fuzz run chunk_decoder    # fuzz a decoder (targets: cargo fuzz list)
+DURATION=1800 tests/soak/run.sh          # 30 min of random delay changes; watches memory
+```
+
+`cargo fuzz` needs `cargo install cargo-fuzz` and a nightly toolchain. When a
+target finds a crash, the input is saved under `fuzz/artifacts/<target>/`; add a
+regression test for it next to the code that failed.
 
 ## Code layout
 

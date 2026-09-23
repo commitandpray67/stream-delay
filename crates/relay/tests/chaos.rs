@@ -1,0 +1,308 @@
+//! Chaos tests: network faults between the relay and the destination, and encoder
+//! crashes. A fault-injecting TCP proxy sits between the relay and the sink.
+
+mod common;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use common::*;
+use streamdelay_relay::{DelayMode, DestinationKey, EgressStatus, Phase};
+use streamdelay_rtmp::session::MediaKind;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+/// A TCP proxy that can reset every connection or stop forwarding on demand.
+struct FaultProxy {
+    addr: SocketAddr,
+    /// Bumped to abort all current connections with a TCP reset.
+    generation: Arc<AtomicU64>,
+    /// While set, no bytes are forwarded in either direction.
+    stalled: Arc<AtomicBool>,
+}
+
+impl FaultProxy {
+    async fn start(target: SocketAddr) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let generation = Arc::new(AtomicU64::new(0));
+        let stalled = Arc::new(AtomicBool::new(false));
+        let (g, st) = (generation.clone(), stalled.clone());
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(server) = TcpStream::connect(target).await else {
+                    continue;
+                };
+                let my_gen = g.load(Ordering::SeqCst);
+                let (cr, cw) = client.into_split();
+                let (sr, sw) = server.into_split();
+                let g1 = g.clone();
+                let g2 = g.clone();
+                let (s1, s2) = (st.clone(), st.clone());
+                tokio::spawn(pump(cr, sw, g1, my_gen, s1));
+                tokio::spawn(pump(sr, cw, g2, my_gen, s2));
+            }
+        });
+        Self {
+            addr,
+            generation,
+            stalled,
+        }
+    }
+
+    fn reset_all(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn stall(&self, on: bool) {
+        self.stalled.store(on, Ordering::SeqCst);
+    }
+}
+
+async fn pump(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    generation: Arc<AtomicU64>,
+    my_gen: u64,
+    stalled: Arc<AtomicBool>,
+) {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        if generation.load(Ordering::SeqCst) != my_gen {
+            break;
+        }
+        if stalled.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        }
+        let n = tokio::select! {
+            r = from.read(&mut buf) => match r {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+        };
+        if to.write_all(&buf[..n]).await.is_err() {
+            break;
+        }
+    }
+    // Abortive close so the relay sees a reset rather than a clean shutdown.
+    if let Ok(stream) = from.reunite(to) {
+        let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+    }
+}
+
+/// Checks per sink connection: output starts on a keyframe and timestamps never go
+/// backwards. Returns the frame ids received.
+fn check_connections(log: &SinkLog) -> Vec<u32> {
+    let mut frames = Vec::new();
+    for conn in 0..log.connections {
+        let media: Vec<_> = log.media.iter().filter(|m| m.conn == conn).collect();
+        let video: Vec<_> = media
+            .iter()
+            .filter(|m| m.kind == MediaKind::Video)
+            .collect();
+        let Some(first) = video.iter().find_map(|m| frame_of(&m.payload)) else {
+            continue;
+        };
+        assert_eq!(
+            first % 30,
+            0,
+            "connection {conn} did not start on a keyframe"
+        );
+        for kind in [MediaKind::Audio, MediaKind::Video] {
+            let ts: Vec<u32> = media
+                .iter()
+                .filter(|m| m.kind == kind)
+                .map(|m| m.ts)
+                .collect();
+            assert!(
+                ts.windows(2).all(|w| w[0] <= w[1]),
+                "connection {conn}: {kind:?} ts went back"
+            );
+        }
+        frames.extend(video.iter().filter_map(|m| frame_of(&m.payload)));
+    }
+    frames
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn destination_resets_and_stalls_never_leak_or_corrupt() {
+    let (sink, log, _kill) = start_sink().await;
+    let proxy = FaultProxy::start(sink).await;
+    let relay = start_relay(
+        proxy.addr,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+
+    p.stream_for(Duration::from_secs(5)).await;
+    proxy.reset_all();
+    p.stream_for(Duration::from_secs(4)).await;
+    proxy.stall(true);
+    p.stream_for(Duration::from_secs(3)).await;
+    proxy.stall(false);
+    p.stream_for(Duration::from_secs(3)).await;
+    proxy.reset_all();
+    p.stream_for(Duration::from_secs(6)).await;
+
+    {
+        let l = log.lock().unwrap();
+        assert!(
+            l.connections >= 3,
+            "expected reconnects, got {} connections",
+            l.connections
+        );
+        let frames = check_connections(&l);
+        assert!(!frames.is_empty());
+        // No frame ever reached the destination less than the 3 s delay after capture.
+        for m in l.media.iter().filter(|m| m.kind == MediaKind::Video) {
+            if let Some(id) = frame_of(&m.payload) {
+                let age = m.at.saturating_duration_since(p.captured_at(id));
+                assert!(
+                    age >= Duration::from_millis(3_000),
+                    "frame {id} aired after only {age:?}"
+                );
+            }
+        }
+        // Content resumes after every fault: the last frames are recent.
+        let newest = *frames.iter().max().unwrap();
+        assert!(
+            newest + 250 > p.frame,
+            "stream stalled: newest {newest} of {}",
+            p.frame
+        );
+        // Reconnects resume from buffered content: at most what was in flight is lost.
+        let mut seen = frames.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        let missing = (seen[0]..=newest)
+            .filter(|f| seen.binary_search(f).is_err())
+            .count();
+        eprintln!(
+            "connections {}, frames aired {}, newest {newest}/{}, lost {missing}",
+            l.connections,
+            frames.len(),
+            p.frame
+        );
+        assert!(missing <= 120, "{missing} frames lost across two resets");
+    }
+    let state = relay.state();
+    assert!(state.egress.reconnects >= 2);
+    assert_eq!(state.egress.status, EgressStatus::Live);
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn encoder_crash_within_grace_continues_the_broadcast() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(10),
+    )
+    .await;
+    relay.set_delay(2_000, DelayMode::Rewind).await.unwrap();
+    let mut first = Publisher::connect(relay.ingest_addr(), "x").await;
+    first.stream_for(Duration::from_secs(4)).await;
+    first.crash();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!relay.state().ingest.connected);
+
+    // OBS reconnects; its timestamps start again from 0.
+    let mut second = Publisher::connect(relay.ingest_addr(), "x").await;
+    second.base = 100_000;
+    second.stream_for(Duration::from_secs(5)).await;
+
+    {
+        let l = log.lock().unwrap();
+        assert_eq!(
+            l.connections, 1,
+            "the destination connection must survive the encoder crash"
+        );
+        assert_eq!(l.unpublished, 0, "the broadcast must not end");
+        let frames = check_connections(&l);
+        assert!(
+            frames.iter().any(|f| *f < 100_000),
+            "nothing from the first session"
+        );
+        let second_frames: Vec<u32> = frames.iter().copied().filter(|f| *f >= 100_000).collect();
+        assert!(second_frames.len() > 60, "second session barely aired");
+        assert_eq!(
+            second_frames[0] % 30,
+            100_000 % 30,
+            "new session must start on a keyframe"
+        );
+    }
+    second.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn encoder_gone_past_grace_ends_the_broadcast() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(1),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    p.crash();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(
+        log.lock().unwrap().unpublished,
+        1,
+        "the broadcast should end cleanly"
+    );
+    let state = relay.state();
+    assert_eq!(state.egress.status, EgressStatus::Idle);
+    assert_eq!(state.delay.phase, Phase::Offline);
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_destination_shows_backlog_then_recovers() {
+    let (sink, log, _kill) = start_sink().await;
+    let proxy = FaultProxy::start(sink).await;
+    let relay = start_relay(
+        proxy.addr,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    // About 12 Mbps of video, enough to fill socket buffers while stalled.
+    p.stream_sized(Duration::from_secs(2), 50_000).await;
+    proxy.stall(true);
+    let mut max_backlog = 0;
+    let end = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < end {
+        p.stream_sized(Duration::from_millis(250), 50_000).await;
+        max_backlog = max_backlog.max(relay.state().egress.backlog_bytes);
+    }
+    proxy.stall(false);
+    p.stream_sized(Duration::from_secs(4), 50_000).await;
+    eprintln!(
+        "max backlog {max_backlog} bytes, after recovery {}",
+        relay.state().egress.backlog_bytes
+    );
+    assert!(
+        max_backlog > 1_000_000,
+        "backlog never showed up ({max_backlog} bytes)"
+    );
+    assert!(
+        relay.state().egress.backlog_bytes < max_backlog / 2,
+        "backlog did not drain"
+    );
+    check_connections(&log.lock().unwrap());
+    p.stop().await;
+    relay.shutdown().await;
+}

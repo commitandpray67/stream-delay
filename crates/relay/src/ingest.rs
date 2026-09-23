@@ -1,6 +1,7 @@
 //! RTMP ingest server: accepts the encoder's publish connection.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use streamdelay_rtmp::session::{MediaKind, ServerConfig, ServerEvent, ServerSess
 use streamdelay_rtmp::ts::TsUnwrapper;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::core::Event;
@@ -19,6 +20,10 @@ use crate::io;
 
 /// If the encoder sends nothing for this long, the connection is considered dead.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connections handled at once. Only one can publish; the rest are waiting to be
+/// rejected or are stale, so this only needs headroom for encoder reconnects.
+const MAX_CONNECTIONS: usize = 16;
 
 /// `connect` properties we set ourselves on the egress side.
 const OWN_CONNECT_PROPS: &[&str] = &[
@@ -31,27 +36,43 @@ const OWN_CONNECT_PROPS: &[&str] = &[
     "objectEncoding",
 ];
 
-pub(crate) async fn listen(listener: TcpListener, events: mpsc::UnboundedSender<Event>) {
+pub(crate) async fn listen(
+    listener: TcpListener,
+    events: mpsc::UnboundedSender<Event>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
-        match listener.accept().await {
+        let accepted = tokio::select! {
+            a = listener.accept() => a,
+            _ = shutdown.changed() => return,
+        };
+        match accepted {
             Ok((tcp, peer)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    warn!(%peer, "too many ingest connections; refusing");
+                    continue;
+                };
                 let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
                 let events = events.clone();
+                let mut shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle(tcp, peer, id, events.clone()).await {
+                    let result = tokio::select! {
+                        r = handle(tcp, peer, id, events.clone()) => r,
+                        _ = shutdown.changed() => Ok(()),
+                    };
+                    if let Err(e) = result {
                         debug!(%peer, "ingest connection ended: {e}");
                     }
                     let _ = events.send(Event::IngestClosed { conn: id });
+                    drop(slot);
                 });
             }
             Err(e) => {
                 warn!("ingest accept failed: {e}");
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-        }
-        if events.is_closed() {
-            return;
         }
     }
 }

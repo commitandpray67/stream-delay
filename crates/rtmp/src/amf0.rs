@@ -349,3 +349,16 @@ mod tests {
         assert!(v.get("missing").is_none());
     }
 }
+
+#[cfg(test)]
+mod fuzz_tests {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_input_never_panics(data in prop::collection::vec(any::<u8>(), 0..2048)) {
+            let _ = super::decode_all(&data);
+            let _ = super::decode_one(&data);
+        }
+    }
+}
