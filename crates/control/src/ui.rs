@@ -30,6 +30,30 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/favicon.svg", get(|| asset_named("favicon.svg")))
 }
 
+/// Headers for every response: only this server's own pages may frame ours (the
+/// dashboard previews the overlay; OBS loads docks and sources directly), no MIME
+/// sniffing, and no Referer, since page URLs can carry the access token.
+pub(crate) async fn security_headers(mut r: Response) -> Response {
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'self'"),
+    );
+    h.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    r
+}
+
 async fn index() -> Response {
     match Assets::get("index.html") {
         Some(f) => {

@@ -221,6 +221,7 @@ impl App {
                 tokens: Tokens::new(&config.api.token),
                 config: RwLock::new(config),
                 config_path: opts.config_path,
+                save_lock: std::sync::Mutex::new(()),
                 secrets: opts.secrets,
                 key_override,
                 key_override_url,
@@ -295,20 +296,21 @@ impl App {
     }
 }
 
+/// Where local clients reach a listener: loopback when it listens on every interface.
+/// Formatting a `SocketAddr` puts IPv6 addresses in brackets, as URLs need.
+pub fn reachable(addr: SocketAddr) -> SocketAddr {
+    if addr.ip().is_unspecified() {
+        SocketAddr::from(([127, 0, 0, 1], addr.port()))
+    } else {
+        addr
+    }
+}
+
 pub(crate) fn urls(state: &AppState) -> Urls {
     let c = state.config();
-    let host = if c.api.bind.ip().is_unspecified() {
-        format!("127.0.0.1:{}", state.shared.port)
-    } else {
-        format!("{}:{}", c.api.bind.ip(), state.shared.port)
-    };
+    let host = reachable(SocketAddr::new(c.api.bind.ip(), state.shared.port));
     let token = |s| state.shared.tokens.get(s);
-    let ingest = state.relay().ingest_addr();
-    let ingest_host = if ingest.ip().is_unspecified() {
-        format!("127.0.0.1:{}", ingest.port())
-    } else {
-        ingest.to_string()
-    };
+    let ingest_host = reachable(state.relay().ingest_addr());
     Urls {
         dashboard: format!("http://{host}/?token={}", token(Scope::Admin)),
         dock: format!("http://{host}/dock?token={}", token(Scope::Control)),
@@ -388,4 +390,19 @@ pub(crate) fn destination(
         url: c.destination.url.trim().to_string(),
         key,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn links_use_reachable_bracketed_addresses() {
+        let at = |s: &str| format!("http://{}/", reachable(s.parse().unwrap()));
+        assert_eq!(at("127.0.0.1:7788"), "http://127.0.0.1:7788/");
+        assert_eq!(at("0.0.0.0:7788"), "http://127.0.0.1:7788/");
+        assert_eq!(at("[::1]:7788"), "http://[::1]:7788/");
+        assert_eq!(at("[::]:7788"), "http://127.0.0.1:7788/");
+        assert_eq!(at("[fd00::5]:7788"), "http://[fd00::5]:7788/");
+    }
 }

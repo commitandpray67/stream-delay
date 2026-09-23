@@ -62,7 +62,9 @@ The stream skips forward to a keyframe so that the delay becomes 20 s. The skipp
 
 **End stream** ends the broadcast on Twitch immediately and throws away everything
 in the delay buffer, so none of it is ever shown. Use it when something went wrong
-on stream and even the delayed part must not air. In the dock and dashboard it
+on stream and even the delayed part must not air. It cuts the connection to Twitch
+outright, so even on a slow upload, video still waiting to be sent is dropped
+rather than delivered. In the dock and dashboard it
 takes two clicks (the second within 3 seconds); it is also in the tray menu, the
 API and the command line, and can have a hotkey (none by default).
 

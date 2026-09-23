@@ -4631,6 +4631,7 @@ dependencies = [
  "socket2",
  "streamdelay-engine",
  "streamdelay-rtmp",
+ "subtle",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",

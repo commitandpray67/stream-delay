@@ -21,7 +21,8 @@ it is built to be safe by default:
 - **The RTMP input also listens on `127.0.0.1` only** by default. When it can be
   reached from your network, an ingest key is required so nobody else can
   stream to it; if you don't set one, stream-delay generates one and shows it
-  with the OBS server address.
+  with the OBS server address. A wrong key is only refused after a second, so
+  keys can't be guessed quickly.
 - **Hostile network input:** the RTMP, AMF0 and FLV parsers have hard limits on
   memory use, and are fuzzed and property-tested so malformed data can't crash
   them. Until an encoder has started publishing it may only send small

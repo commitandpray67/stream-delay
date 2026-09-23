@@ -168,10 +168,17 @@ async fn ingest_key_is_enforced() {
     .await
     .unwrap();
     let addr = relay.ingest_addr();
+    let tried = Instant::now();
     let wrong = tokio::spawn(async move { Publisher::connect(addr, "guess").await });
     assert!(
         wrong.await.is_err_and(|e| e.is_panic()),
         "wrong key was accepted"
+    );
+    // Refusals are slow, so keys can't be guessed at network speed.
+    assert!(
+        tried.elapsed() >= Duration::from_millis(900),
+        "refused after {:?}",
+        tried.elapsed()
     );
     assert!(
         relay
@@ -291,13 +298,15 @@ async fn end_stream_discards_the_buffer_and_resume_starts_fresh() {
 
     // About 3 s of captured frames are still in the buffer when the stream ends.
     let ended_at = Instant::now();
-    let last_captured = p.frame;
     relay.end_stream().await.unwrap();
     assert!(relay.state().ended);
     p.stream_for(Duration::from_secs(3)).await;
     {
         let l = log.lock().unwrap();
-        assert_eq!(l.unpublished, 1, "the broadcast must end");
+        // Ended by resetting the connection: a clean unpublish would queue behind
+        // (and so deliver) whatever the OS had not sent yet.
+        assert_eq!(l.disconnected, 1, "the broadcast must end");
+        assert_eq!(l.unpublished, 0, "unpublished instead of resetting");
         assert_eq!(l.connections, 1, "nothing may reconnect while ended");
         // Nothing reached the destination after the end, apart from what was
         // already on its way.
@@ -309,6 +318,9 @@ async fn end_stream_discards_the_buffer_and_resume_starts_fresh() {
         assert!(late.is_empty(), "frames aired after ending: {late:?}");
     }
 
+    // OBS kept streaming while ended (the 3 s above, shorter than the delay):
+    // none of that may air after resuming.
+    let resumed_from = p.frame;
     relay.resume().await.unwrap();
     assert!(!relay.state().ended);
     p.stream_for(Duration::from_secs(6)).await;
@@ -324,9 +336,12 @@ async fn end_stream_discards_the_buffer_and_resume_starts_fresh() {
     };
     assert_eq!(connections, 2, "resume starts a new broadcast");
     assert!(!second.is_empty(), "nothing aired after resuming");
-    // Only content captured after the end airs, still with the delay.
+    // Only content captured after resuming airs, still with the delay.
     for (at, id) in &second {
-        assert!(*id >= last_captured, "frame {id} from before the end aired");
+        assert!(
+            *id >= resumed_from,
+            "frame {id} from before resuming aired (resumed at {resumed_from})"
+        );
         let age = at.saturating_duration_since(p.captured_at(*id));
         assert!(
             age >= Duration::from_millis(3_000),

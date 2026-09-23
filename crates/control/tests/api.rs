@@ -237,6 +237,35 @@ async fn ui_is_served_without_token() {
 }
 
 #[tokio::test]
+async fn every_response_carries_security_headers() {
+    let app = app().await;
+    for (r, want) in [
+        (req("GET", "/").body(Body::empty()).unwrap(), StatusCode::OK),
+        (
+            authed("GET", "/api/v1/state").body(Body::empty()).unwrap(),
+            StatusCode::OK,
+        ),
+        // Refusals too.
+        (
+            req("GET", "/api/v1/state").body(Body::empty()).unwrap(),
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let path = r.uri().to_string();
+        let resp = app.clone().oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), want, "{path}");
+        let h = resp.headers();
+        assert_eq!(
+            h["content-security-policy"], "frame-ancestors 'self'",
+            "{path}"
+        );
+        assert_eq!(h["x-frame-options"], "SAMEORIGIN", "{path}");
+        assert_eq!(h["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(h["referrer-policy"], "no-referrer", "{path}");
+    }
+}
+
+#[tokio::test]
 async fn diagnostics_bundle_has_no_secrets() {
     use tracing_subscriber::prelude::*;
     const KEY: &str = "sk-not-a-twitch-key-42";

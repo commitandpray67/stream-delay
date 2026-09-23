@@ -87,6 +87,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(admin)
         .merge(ui::routes())
         .layer(middleware::from_fn_with_state(state.clone(), auth::guard))
+        // Outermost, so refusals from the guard carry the headers too.
+        .layer(middleware::map_response(ui::security_headers))
         .with_state(state)
 }
 

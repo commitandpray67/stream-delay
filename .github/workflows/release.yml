@@ -8,6 +8,11 @@ name: Release
 # Pushes to main or claude/** that touch the release setup run the same builds as
 # a dry run: installers and binaries are uploaded as artifacts of the workflow run
 # (downloadable from its page) and nothing is published.
+#
+# The signing secrets (updater key, Apple credentials) belong in the `release`
+# environment, which only v* tags may use (docs/RELEASING.md). A branch push can
+# change this file, so dry runs never see them: they sign with a key made for
+# the run.
 on:
   push:
     tags: ["v*"]
@@ -18,9 +23,9 @@ on:
       - "apps/desktop/src-tauri/tauri.conf.json"
   workflow_dispatch:
 
+# Jobs ask for more only where they publish.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,6 +34,86 @@ env:
 jobs:
   desktop:
     name: Desktop (${{ matrix.name }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+            args: ""
+          - name: Windows
+            os: windows-latest
+            args: ""
+          - name: macOS (universal)
+            os: macos-latest
+            args: "--target universal-apple-darwin"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the web UI
+        run: pnpm -C ui install --frozen-lockfile && pnpm -C ui build
+      - name: Install the Tauri CLI
+        run: pnpm -C apps/desktop install --frozen-lockfile
+      - name: Updater configuration
+        id: updater
+        shell: bash
+        env:
+          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          # Signed auto-updates are enabled once the repository variable
+          # TAURI_UPDATER_PUBKEY and secret TAURI_SIGNING_PRIVATE_KEY are set
+          # (see docs/RELEASING.md).
+          if [ -n "$PUBKEY" ]; then
+            printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s"}}}' "$PUBKEY" \
+              > apps/desktop/src-tauri/tauri.release.conf.json
+            echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and attach to the draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS signing and notarization (optional until an Apple Developer ID is set up).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: stream-delay ${{ github.ref_name }}
+          releaseBody: See CHANGELOG.md for what changed. Checksums are in SHA256SUMS.txt.
+          releaseDraft: true
+          # The updater follows releases/latest, which skips pre-releases.
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
+
+  desktop-dry-run:
+    name: Desktop dry run (${{ matrix.name }})
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     strategy:
       fail-fast: false
       matrix:
@@ -67,53 +152,24 @@ jobs:
         run: pnpm -C ui install --frozen-lockfile && pnpm -C ui build
       - name: Install the Tauri CLI
         run: pnpm -C apps/desktop install --frozen-lockfile
-      - name: Updater configuration
+      - name: Throwaway updater key
         id: updater
         shell: bash
-        env:
-          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
         run: |
-          # Signed auto-updates are enabled once the repository variable
-          # TAURI_UPDATER_PUBKEY and secret TAURI_SIGNING_PRIVATE_KEY are set
-          # (see docs/RELEASING.md).
-          if [ -n "$PUBKEY" ]; then
-            printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s"}}}' "$PUBKEY" \
-              > apps/desktop/src-tauri/tauri.release.conf.json
-            echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Build and attach to the draft release
-        if: env.RELEASE == 'true'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS signing and notarization (optional until an Apple Developer ID is set up).
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        with:
-          projectPath: apps/desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: stream-delay ${{ github.ref_name }}
-          releaseBody: See CHANGELOG.md for what changed. Checksums are in SHA256SUMS.txt.
-          releaseDraft: true
-          # The updater follows releases/latest, which skips pre-releases.
-          prerelease: false
-          includeUpdaterJson: true
-          args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
-      - name: Build (dry run)
-        if: env.RELEASE != 'true'
+          # Sign like a release, with a key that exists only for this run, so the
+          # check below proves every platform produces signed update bundles.
+          # (A relative path: Windows paths trip up Git Bash.)
+          pnpm -C apps/desktop tauri signer generate --ci -w dry-run-updater.key >/dev/null
+          printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s"}}}' \
+            "$(cat apps/desktop/dry-run-updater.key.pub)" \
+            > apps/desktop/src-tauri/tauri.release.conf.json
+          echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$(cat apps/desktop/dry-run-updater.key)" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
+      - name: Build
         shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm -C apps/desktop tauri build ${{ matrix.args }} ${{ steps.updater.outputs.args }}
-      - name: Upload installers (dry run)
-        if: env.RELEASE != 'true'
+      - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ runner.os }}
@@ -126,12 +182,11 @@ jobs:
             ${{ matrix.bundle }}/**/*.rpm
             ${{ matrix.bundle }}/**/*.sig
           if-no-files-found: error
-      - name: Check update signatures (dry run)
-        if: env.RELEASE != 'true' && vars.TAURI_UPDATER_PUBKEY != ''
+      - name: Check update signatures
         shell: bash
         run: |
-          # With the updater key configured, every platform must produce signed
-          # update bundles, or installed copies could not update to this build.
+          # Every platform must produce signed update bundles, or installed copies
+          # could not update to a release built this way.
           sigs=$(find "${{ matrix.bundle }}" -name '*.sig')
           echo "$sigs"
           test -n "$sigs"
@@ -183,6 +238,8 @@ jobs:
     name: Attach binaries and checksums
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [desktop, headless]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -203,6 +260,9 @@ jobs:
   container:
     name: Container image
     needs: [headless]
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -19,6 +19,11 @@ use crate::{
     RelayState,
 };
 
+/// Most media queued for the destination but not yet written; beyond it, output
+/// stays in the delay buffer. About 10 s at 6 Mbps; normally the queue is nearly
+/// empty.
+const MAX_EGRESS_BACKLOG: u64 = 8 * 1024 * 1024;
+
 pub(crate) enum Event {
     IngestPublish {
         conn: u64,
@@ -201,12 +206,13 @@ impl Core {
                 self.publish_state();
             }
             Control::EndStream(reply) => {
-                // Drop the buffer first so nothing buffered can be sent, then close
-                // the destination connection, which ends the broadcast.
+                // Drop the buffer first so nothing buffered can be sent, then reset
+                // the destination connection, which ends the broadcast without
+                // delivering what the OS still holds to send.
                 self.engine.discard();
                 if self.egress_running {
                     self.egress_running = false;
-                    let _ = self.egress_ctl.send(EgressCtl::Stop);
+                    let _ = self.egress_ctl.send(EgressCtl::Abort);
                 }
                 self.state.ended = true;
                 info!("stream ended by the streamer; buffered content discarded");
@@ -221,6 +227,9 @@ impl Core {
             }
             Control::Resume(reply) => {
                 if self.state.ended {
+                    // The encoder may have kept sending while ended. None of that
+                    // may air: the new broadcast starts from what arrives from now.
+                    self.engine.discard();
                     self.state.ended = false;
                     info!("resuming the broadcast");
                 }
@@ -336,8 +345,13 @@ impl Core {
         {
             return Err(format!("unknown application '{app}' (expected '{want}')"));
         }
+        // Constant time, so response timing does not reveal how much of a guess
+        // was right.
         if let Some(want) = &self.config.ingest_key
-            && want != key
+            && !bool::from(subtle::ConstantTimeEq::ct_eq(
+                want.as_bytes(),
+                key.as_bytes(),
+            ))
         {
             return Err("wrong stream key for stream-delay".into());
         }
@@ -357,7 +371,16 @@ impl Core {
     /// Runs the engine, forwards due messages and manages the egress connection.
     fn pump(&mut self) -> Option<u64> {
         let now = self.now();
-        let wake = self.engine.poll(now, &mut self.out);
+        // When the upload can't keep up, stop queueing more for the destination:
+        // the rest waits in the delay buffer (which has a memory cap) instead of
+        // an unbounded queue, and airs once the upload catches up.
+        let queued = self.counters.backlog.load(Ordering::Relaxed);
+        let room = MAX_EGRESS_BACKLOG.saturating_sub(queued);
+        let wake = self.engine.poll_budget(
+            now,
+            &mut self.out,
+            usize::try_from(room).unwrap_or(usize::MAX),
+        );
         for m in self.out.drain(..) {
             self.counters
                 .backlog
@@ -388,9 +411,11 @@ impl Core {
             return;
         }
         // End the broadcast once the encoder has been gone for the grace period and
-        // everything buffered has been sent.
+        // everything buffered has been written to the destination (not just queued
+        // for it: the stop would otherwise cut off the last messages).
         if self.publisher.is_none()
             && self.engine.drained()
+            && self.counters.backlog.load(Ordering::Relaxed) == 0
             && self
                 .ingest_ended
                 .is_some_and(|t| t.elapsed() >= self.config.encoder_grace)

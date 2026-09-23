@@ -49,6 +49,8 @@ struct Sim {
     floor_log: Vec<(usize, u64)>,
     audio: bool,
     jitter: u64,
+    /// Byte budget per poll (a destination falling behind), or unlimited.
+    budget: Option<usize>,
 }
 
 fn payload(prefix: &[u8], id: u32) -> Bytes {
@@ -86,6 +88,7 @@ impl Sim {
             floor_log: Vec::new(),
             audio: true,
             jitter: 0,
+            budget: None,
         };
         s.start_encoder(0);
         s
@@ -143,7 +146,10 @@ impl Sim {
 
     fn poll(&mut self) {
         let mut out = Vec::new();
-        self.wake = self.e.poll(self.now, &mut out);
+        self.wake = match self.budget {
+            Some(b) => self.e.poll_budget(self.now, &mut out, b),
+            None => self.e.poll(self.now, &mut out),
+        };
         for m in out {
             self.sent.push(Sent {
                 at: self.now,
@@ -767,6 +773,39 @@ fn without_history_only_what_the_delay_needs_is_kept() {
     assert!(!snap.mask_visible);
     // Now about the delay plus one keyframe interval is kept.
     assert!(snap.history_ms <= 14_200, "history {}", snap.history_ms);
+    s.check_invariants();
+}
+
+#[test]
+fn a_byte_budget_holds_output_back_without_gaps() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 5_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(10 * SEC);
+    let n = s.sent.len();
+    // The destination falls behind: nothing may be handed over for 3 s.
+    s.budget = Some(0);
+    s.advance(3 * SEC);
+    assert_eq!(s.sent.len(), n, "sent with no budget left");
+    // A small budget lets a little through per poll.
+    s.budget = Some(1);
+    s.advance(SEC);
+    assert!(s.sent.len() > n, "nothing sent with budget");
+    // Room again: what was held back airs in order, with nothing skipped.
+    s.budget = None;
+    s.advance(5 * SEC);
+    let video: Vec<u64> = s
+        .media_sent_in(n..s.sent.len())
+        .filter(|(_, _, i)| i.kind == Kind::Video)
+        .map(|(_, _, i)| i.index)
+        .collect();
+    assert!(
+        video.windows(2).all(|w| w[1] == w[0] + 1),
+        "video frames skipped or reordered"
+    );
+    // Held-back content airs later than its delay, never sooner.
     s.check_invariants();
 }
 

@@ -23,6 +23,9 @@ use crate::io;
 /// If the encoder sends nothing for this long, the connection is considered dead.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a refused publish (for example a wrong ingest key) waits for its answer.
+const REJECT_DELAY: Duration = Duration::from_secs(1);
+
 /// Connections handled at once. Only one can publish; the rest are waiting to be
 /// rejected or are stale, so this only needs headroom for encoder reconnects.
 const MAX_CONNECTIONS: usize = 16;
@@ -234,6 +237,10 @@ async fn handle(
                         }
                         Ok(Err(reason)) => {
                             warn!(%peer, "rejected publish: {reason}");
+                            // Answer slowly, so the ingest key can't be guessed quickly:
+                            // with the per-address connection limit, one address gets
+                            // a handful of tries per second.
+                            tokio::time::sleep(REJECT_DELAY).await;
                             session.reject_publish("NetStream.Publish.BadName", &reason);
                             write(&mut tcp, &session.take_output()).await?;
                             return Ok(());

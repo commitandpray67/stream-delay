@@ -126,13 +126,10 @@ async fn connect(
             .set(secret::OBS_PASSWORD, &body.password)
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
-    let config = {
-        let mut c = st.shared.config.write().expect("config lock");
+    change(&st, |c| {
         c.obs.host = host;
         c.obs.port = body.port;
-        c.clone()
-    };
-    save(&st, &config)?;
+    })?;
     Ok(Json(build_status(&st, Ok(obs)).await))
 }
 
@@ -156,13 +153,14 @@ struct ConfigureResult {
     message: String,
 }
 
-fn save(st: &AppState, c: &streamdelay_config::Config) -> Result<(), ApiError> {
-    if let Some(path) = &st.shared.config_path {
-        c.save(path)
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-    st.shared.config_tx.send_replace(c.clone());
-    Ok(())
+/// Changes and saves the settings, and updates open pages.
+fn change(
+    st: &AppState,
+    f: impl FnOnce(&mut streamdelay_config::Config),
+) -> Result<streamdelay_config::Config, ApiError> {
+    let (config, ()) = st.change_config(f)?;
+    st.shared.config_tx.send_replace(config.clone());
+    Ok(config)
 }
 
 async fn configure(
@@ -201,8 +199,7 @@ async fn configure(
             messages.push("Your Twitch stream key was moved into stream-delay.".to_string());
         }
 
-        let config = {
-            let mut c = st.shared.config.write().expect("config lock");
+        let config = change(&st, |c| {
             c.obs.backup = Some(backup);
             if imported_key {
                 c.destination.key_mode = KeyMode::Stored;
@@ -211,9 +208,7 @@ async fn configure(
                     c.destination.url = streamdelay_config::SERVICES[0].url.into();
                 }
             }
-            c.clone()
-        };
-        save(&st, &config)?;
+        })?;
         if imported_key {
             let dest = destination(
                 &config,
@@ -274,12 +269,7 @@ async fn restore(State(st): State<AppState>) -> Result<Json<ObsStatus>, ApiError
     })
     .await?;
     let _ = st.shared.secrets.delete(secret::OBS_BACKUP_KEY);
-    let config = {
-        let mut c = st.shared.config.write().expect("config lock");
-        c.obs.backup = None;
-        c.clone()
-    };
-    save(&st, &config)?;
+    change(&st, |c| c.obs.backup = None)?;
     info!("restored OBS's original stream settings");
     Ok(Json(build_status(&st, Ok(obs)).await))
 }

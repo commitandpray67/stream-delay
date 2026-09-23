@@ -269,6 +269,74 @@ async fn encoder_gone_past_grace_ends_the_broadcast() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_destination_is_bounded_and_end_stream_does_not_wait_for_it() {
+    let (sink, log, _kill) = start_sink().await;
+    let proxy = FaultProxy::start(sink).await;
+    let relay = start_relay(
+        proxy.addr,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_sized(Duration::from_secs(1), 50_000).await;
+    // About 48 Mbps while nothing gets through: far more than socket buffers hold.
+    proxy.stall(true);
+    let mut max_backlog = 0;
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end {
+        p.stream_sized(Duration::from_millis(250), 200_000).await;
+        max_backlog = max_backlog.max(relay.state().egress.backlog_bytes);
+    }
+    eprintln!("max backlog while stalled: {max_backlog} bytes");
+    assert!(
+        max_backlog > 4_000_000,
+        "the stall never backed up ({max_backlog} bytes)"
+    );
+    // The queue stops at its limit (plus one message); the rest waits in the
+    // delay buffer.
+    assert!(
+        max_backlog <= 9 * 1024 * 1024,
+        "egress backlog kept growing: {max_backlog} bytes"
+    );
+
+    // Ending the stream must not wait for the stalled destination.
+    relay.end_stream().await.unwrap();
+    let ended = Instant::now();
+    while relay.state().egress.status != EgressStatus::Idle
+        && ended.elapsed() < Duration::from_secs(10)
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        relay.state().egress.status,
+        EgressStatus::Idle,
+        "egress stuck on the stalled destination"
+    );
+    assert!(
+        ended.elapsed() < Duration::from_secs(1),
+        "ending took {:?}",
+        ended.elapsed()
+    );
+    assert_eq!(relay.state().egress.backlog_bytes, 0, "queue not dropped");
+
+    // Once the destination works again, the relay can broadcast again.
+    proxy.stall(false);
+    relay.resume().await.unwrap();
+    p.stream_sized(Duration::from_secs(4), 50_000).await;
+    {
+        let l = log.lock().unwrap();
+        assert_eq!(l.connections, 2, "no new broadcast after resuming");
+        assert!(
+            l.media.iter().any(|m| m.conn == 1),
+            "nothing aired after resuming"
+        );
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_destination_shows_backlog_then_recovers() {
     let (sink, log, _kill) = start_sink().await;
     let proxy = FaultProxy::start(sink).await;

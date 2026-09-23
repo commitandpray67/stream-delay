@@ -10,7 +10,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use streamdelay_config::{Config, MemorySecrets, SecretStore, Secrets};
-use streamdelay_control::{App, AppError, AppOptions, Overrides, Scope, diagnostics, scoped_token};
+use streamdelay_control::{
+    App, AppError, AppOptions, Overrides, Scope, diagnostics, reachable, scoped_token,
+};
 use streamdelay_relay::RelayError;
 use tracing::info;
 use tracing_subscriber::prelude::*;
@@ -157,12 +159,7 @@ impl ApiArgs {
             let bind = file
                 .as_ref()
                 .map_or(Config::default().api.bind, |c| c.api.bind);
-            let host = if bind.ip().is_unspecified() {
-                "127.0.0.1".to_string()
-            } else {
-                bind.ip().to_string()
-            };
-            format!("http://{host}:{}", bind.port())
+            format!("http://{}", reachable(bind))
         });
         let token = self
             .token

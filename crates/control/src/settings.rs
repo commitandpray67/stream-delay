@@ -10,7 +10,7 @@ use streamdelay_config::{
     Config, DelayConfig, DestinationConfig, HotkeyConfig, OverlayConfig, SERVICES, secret,
 };
 use streamdelay_relay::RtmpUrl;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::AppState;
 use crate::app::{Urls, destination, different_server, split_url_key, urls};
@@ -208,11 +208,10 @@ async fn update_config(
             .map_err(secret_err)?;
         info!("destination server changed; the stored stream key was removed");
     }
-    let mut destination_changed = false;
-    let mut keep_buffer_changed = false;
-    let new_config = {
-        let mut c = st.shared.config.write().expect("config lock");
+    let (new_config, (destination_changed, keep_buffer_changed)) = st.change_config(|c| {
         let mut restart = false;
+        let mut destination_changed = false;
+        let mut keep_buffer_changed = false;
         if let Some(d) = update.destination {
             destination_changed = d != c.destination;
             c.destination = d;
@@ -239,9 +238,8 @@ async fn update_config(
         if restart {
             st.shared.restart_required.store(true, Ordering::Relaxed);
         }
-        c.clone()
-    };
-    save(&st, &new_config)?;
+        (destination_changed, keep_buffer_changed)
+    })?;
     if destination_changed {
         apply_destination(&st, &new_config)?;
     }
@@ -250,16 +248,6 @@ async fn update_config(
     }
     st.shared.config_tx.send_replace(new_config);
     Ok(Json(public_config(&st)))
-}
-
-fn save(st: &AppState, c: &Config) -> Result<(), ApiError> {
-    if let Some(path) = &st.shared.config_path {
-        c.save(path).map_err(|e| {
-            warn!("saving settings failed: {e}");
-            ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        })?;
-    }
-    Ok(())
 }
 
 fn apply_destination(st: &AppState, c: &Config) -> Result<(), ApiError> {
@@ -328,7 +316,13 @@ mod tests {
         config.api.token = "0123456789abcdef".into();
         config.ingest.key = Some("ingest-secret".into());
         config.obs.host = "obs.lan".into();
-        let st = crate::state(relay, config, Arc::new(MemorySecrets::default()), 7788);
+        let st = crate::state(
+            relay,
+            config,
+            Arc::new(MemorySecrets::default()),
+            7788,
+            None,
+        );
 
         let v = serde_json::to_value(limited_config(&st, Scope::Control)).unwrap();
         assert_eq!(v["scope"], "control");

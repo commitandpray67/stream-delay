@@ -6,6 +6,34 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Resume broadcasting aired what OBS sent while the stream was ended.**
+  Resuming within the delay after **End stream** aired everything from the moment
+  the stream was ended. Now only what OBS sends after resuming airs.
+- **End stream on a slow or stalled upload.** It now cuts the connection at once,
+  so video the computer had not sent yet is dropped instead of airing, and it no
+  longer waits for a stalled connection (which could block resuming or new
+  broadcasts for minutes).
+- When the upload can't keep up, at most 8 MiB waits to be sent; the rest stays
+  in the delay buffer (which has a memory cap) instead of an ever-growing queue.
+- Saving two settings changes at the same moment could fail or leave the
+  settings file with the older change.
+- Links (dashboard, dock, overlay, OBS server) were broken when stream-delay
+  listened on an IPv6 address.
+
+### Security
+
+- A wrong ingest key is refused only after a second, and keys are compared in
+  constant time, so a network-reachable ingest key can't be guessed quickly.
+- The dashboard removes its access token from the address bar once it has
+  remembered it, so it doesn't show on stream or in screenshots.
+- Web pages can no longer be framed by other sites, and responses send
+  `nosniff` and `Referrer-Policy: no-referrer`.
+- Release builds: the update signing key and Apple credentials are only
+  available to tag builds (through the `release` environment, see
+  `docs/RELEASING.md`); dry runs sign with a throwaway key.
+
 ## [0.1.0] - 2026-09-23
 
 The first public beta. Everything below is new.

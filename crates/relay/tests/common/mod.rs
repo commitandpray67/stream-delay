@@ -32,6 +32,8 @@ pub struct SinkLog {
     pub metadata: usize,
     pub connections: usize,
     pub unpublished: usize,
+    /// Connections the relay closed or reset.
+    pub disconnected: usize,
 }
 
 /// A minimal RTMP server standing in for Twitch.
@@ -111,7 +113,10 @@ pub async fn start_sink() -> (
                     }
                     tokio::select! {
                         n = tcp.read(&mut buf) => match n {
-                            Ok(0) | Err(_) => return,
+                            Ok(0) | Err(_) => {
+                                log.lock().unwrap().disconnected += 1;
+                                return;
+                            }
                             Ok(n) => data = buf[..n].to_vec(),
                         },
                         _ = kill.changed() => return,

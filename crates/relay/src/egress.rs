@@ -21,6 +21,8 @@ use crate::io::{self, BoxStream};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
+/// How long a clean unpublish may take before the connection is just dropped.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Everything needed to connect.
 #[derive(Clone, PartialEq)]
@@ -32,7 +34,28 @@ pub(crate) struct Target {
 
 pub(crate) enum EgressCtl {
     Start(Target),
+    /// Unpublish cleanly and disconnect.
     Stop,
+    /// End the broadcast at once ("end stream"): reset the connection, so what the
+    /// OS has not sent yet is discarded rather than delivered.
+    Abort,
+}
+
+/// A second handle on the destination socket, for [`EgressCtl::Abort`].
+struct Aborter(Option<socket2::Socket>);
+
+impl Aborter {
+    fn new(tcp: &TcpStream) -> Self {
+        Self(socket2::SockRef::from(tcp).try_clone().ok())
+    }
+
+    /// Makes closing the connection reset it: the OS then drops data still waiting
+    /// to be sent (on a slow upload, seconds of stream) instead of delivering it.
+    fn arm(&self) {
+        if let Some(s) = &self.0 {
+            let _ = s.set_linger(Some(Duration::ZERO));
+        }
+    }
 }
 
 /// Counters shared with the core task.
@@ -62,7 +85,7 @@ pub(crate) async fn run(
             tokio::select! {
                 c = ctl.recv() => match c {
                     Some(EgressCtl::Start(t)) => target = Some(t),
-                    Some(EgressCtl::Stop) => {}
+                    Some(EgressCtl::Stop | EgressCtl::Abort) => {}
                     None => return,
                 },
                 m = media.recv() => {
@@ -76,7 +99,7 @@ pub(crate) async fn run(
         status(&events, EgressStatus::Connecting, None);
         info!(destination = %t.url.redacted(), "connecting to destination");
         let connected = tokio::time::timeout(CONNECT_TIMEOUT, connect(&t)).await;
-        let (stream, session) = match connected {
+        let (stream, session, aborter) = match connected {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
                 warn!("destination connection failed: {e}");
@@ -114,9 +137,12 @@ pub(crate) async fn run(
         let Ok(generation) = gen_rx.await else { return };
         let started = Instant::now();
         let (end, last_written) = publish(
-            stream, session, generation, &mut ctl, &mut media, &events, &counters,
+            stream, session, &aborter, generation, &mut ctl, &mut media, &events, &counters,
         )
         .await;
+        // The socket closes once this second handle goes too; don't keep it open
+        // through a reconnect backoff.
+        drop(aborter);
         let error = match &end {
             RunEnd::Failed { error } => Some(error.clone()),
             _ => None,
@@ -174,7 +200,7 @@ async fn wait_backoff(
             _ = &mut sleep => return Some(current),
             c = ctl.recv() => match c {
                 Some(EgressCtl::Start(t)) => return Some(t),
-                Some(EgressCtl::Stop) | None => {
+                Some(EgressCtl::Stop | EgressCtl::Abort) | None => {
                     status(events, EgressStatus::Idle, None);
                     return None;
                 }
@@ -187,11 +213,12 @@ async fn wait_backoff(
     }
 }
 
-async fn connect(t: &Target) -> Result<(BoxStream, ClientSession), String> {
+async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), String> {
     let tcp = TcpStream::connect((t.url.host.as_str(), t.url.port))
         .await
         .map_err(|e| format!("could not reach {}:{}: {e}", t.url.host, t.url.port))?;
     io::tune(&tcp);
+    let aborter = Aborter::new(&tcp);
     let mut stream: BoxStream = match t.url.scheme {
         Scheme::Rtmp => Box::pin(tcp),
         Scheme::Rtmps => {
@@ -245,7 +272,7 @@ async fn connect(t: &Target) -> Result<(BoxStream, ClientSession), String> {
                         .write_all(&out)
                         .await
                         .map_err(|e| format!("write failed: {e}"))?;
-                    return Ok((stream, session));
+                    return Ok((stream, session, aborter));
                 }
                 ClientEvent::Error { code, description } => {
                     return Err(format!(
@@ -257,9 +284,38 @@ async fn connect(t: &Target) -> Result<(BoxStream, ClientSession), String> {
     }
 }
 
+/// What a control message means for the running connection (`None`: the core
+/// has gone, which counts as a stop). Arms `aborter` for an abort.
+fn ended_by(c: Option<EgressCtl>, aborter: &Aborter) -> RunEnd {
+    match c {
+        Some(EgressCtl::Start(t)) => RunEnd::Retarget(t),
+        Some(EgressCtl::Abort) => {
+            aborter.arm();
+            RunEnd::Stopped
+        }
+        Some(EgressCtl::Stop) | None => RunEnd::Stopped,
+    }
+}
+
+/// Writes `data` unless a control message arrives first, so stopping never waits
+/// on a stalled destination. `Err` carries that message; the write was cut short.
+async fn write_or_ctl(
+    wr: &mut WriteHalf<BoxStream>,
+    data: &[u8],
+    ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
+) -> Result<std::io::Result<()>, Option<EgressCtl>> {
+    tokio::select! {
+        biased;
+        c = ctl.recv() => Err(c),
+        r = wr.write_all(data) => Ok(r),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn publish(
     stream: BoxStream,
     mut session: ClientSession,
+    aborter: &Aborter,
     generation: u64,
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
     media: &mut mpsc::UnboundedReceiver<(u64, OutMsg)>,
@@ -274,20 +330,22 @@ async fn publish(
     loop {
         tokio::select! {
             biased;
-            c = ctl.recv() => match c {
-                Some(EgressCtl::Stop) | None => {
+            c = ctl.recv() => {
+                // Unpublish cleanly if the destination still takes data, but don't
+                // wait on one that has stalled: dropping the connection also ends
+                // the broadcast. An abort skips this, so nothing more is sent.
+                if !matches!(c, Some(EgressCtl::Abort)) {
                     session.close();
-                    let _ = wr.write_all(&session.take_output()).await;
-                    let _ = wr.flush().await;
-                    let _ = wr.shutdown().await;
-                    return (RunEnd::Stopped, last_written);
+                    let out = session.take_output();
+                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
+                        wr.write_all(&out).await?;
+                        wr.flush().await?;
+                        wr.shutdown().await
+                    })
+                    .await;
                 }
-                Some(EgressCtl::Start(t)) => {
-                    session.close();
-                    let _ = wr.write_all(&session.take_output()).await;
-                    return (RunEnd::Retarget(t), last_written);
-                }
-            },
+                return (ended_by(c, aborter), last_written);
+            }
             n = rd.read(&mut buf) => {
                 let n = match n {
                     Ok(0) => return (RunEnd::Failed { error: "the destination closed the connection".into() }, last_written),
@@ -305,8 +363,12 @@ async fn publish(
                     Err(e) => return (RunEnd::Failed { error: e.to_string() }, last_written),
                 }
                 let out = session.take_output();
-                if !out.is_empty() && let Err(e) = wr.write_all(&out).await {
-                    return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written);
+                if !out.is_empty() {
+                    match write_or_ctl(&mut wr, &out, ctl).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
+                        Err(c) => return (ended_by(c, aborter), last_written),
+                    }
                 }
             }
             n = media.recv_many(&mut batch, 64) => {
@@ -330,10 +392,15 @@ async fn publish(
                     }
                 }
                 let out = session.take_output();
-                let result = wr.write_all(&out).await;
+                let result = write_or_ctl(&mut wr, &out, ctl).await;
                 counters.backlog.fetch_sub(bytes, Ordering::Relaxed);
-                if let Err(e) = result {
-                    return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written);
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
+                    // Told to stop mid-write (End stream on a slow upload): the RTMP
+                    // stream is cut mid-message, so there is no clean unpublish;
+                    // dropping the connection ends the broadcast.
+                    Err(c) => return (ended_by(c, aborter), last_written),
                 }
                 counters.written.fetch_add(out.len() as u64, Ordering::Relaxed);
                 if batch_last.is_some() {

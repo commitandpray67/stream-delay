@@ -723,6 +723,19 @@ impl Engine {
 
     /// Moves every message that is due into `out` and returns when to call again.
     pub fn poll(&mut self, now: Time, out: &mut Vec<OutMsg>) -> Option<Time> {
+        self.poll_budget(now, out, usize::MAX)
+    }
+
+    /// Like [`Engine::poll`], but stops once `max_bytes` of payload have been
+    /// moved into `out` (it may go over by one message). Used when the destination
+    /// is falling behind: what is held back stays in the buffer and airs later,
+    /// never sooner.
+    pub fn poll_budget(
+        &mut self,
+        now: Time,
+        out: &mut Vec<OutMsg>,
+        max_bytes: usize,
+    ) -> Option<Time> {
         self.evict(now);
         self.run_pending(now);
         let pending_wake = (self.out.pending != Pending::None).then_some(now + 50 * MS);
@@ -730,6 +743,7 @@ impl Engine {
             return pending_wake;
         }
         let mut wake = None;
+        let mut emitted = 0usize;
         loop {
             if self.out.next_seq < self.base_seq {
                 self.out.next_seq = self.base_seq;
@@ -790,11 +804,18 @@ impl Engine {
                 wake = Some(due);
                 break;
             }
+            if emitted >= max_bytes {
+                // Look again soon; the caller passes a new budget once it has room.
+                wake = Some(now + 50 * MS);
+                break;
+            }
+            let before = out.len();
             if self.out.pending_headers {
                 self.emit_headers(out);
             }
             self.out.first_emitted.get_or_insert(self.out.next_seq);
             self.emit_entry(out);
+            emitted += out[before..].iter().map(|m| m.payload.len()).sum::<usize>();
             self.out.next_seq += 1;
             self.run_pending(now);
         }

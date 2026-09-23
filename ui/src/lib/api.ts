@@ -10,14 +10,30 @@ function tokenKey(): string {
   return view === "/dock" || view === "/overlay" ? `stream-delay-token:${view.slice(1)}` : "stream-delay-token";
 }
 
+/** The dashboard is the page that may be on screen; dock and overlay live inside OBS. */
+function isDashboard(): boolean {
+  const view = location.pathname.replace(/\/+$/, "");
+  return view !== "/dock" && view !== "/overlay";
+}
+
 /** The API token: from `?token=` in the URL, else remembered from a previous visit. */
 export function getToken(): string {
   const fromUrl = new URLSearchParams(location.search).get("token");
   if (fromUrl) {
+    let remembered = false;
     try {
       localStorage.setItem(tokenKey(), fromUrl);
+      remembered = localStorage.getItem(tokenKey()) === fromUrl;
     } catch {
       // Storage can be unavailable (private windows, OBS browser sources).
+    }
+    // Once remembered, take the dashboard's token out of the address bar and history,
+    // where it would show on stream or in screenshots. Dock and overlay keep it: OBS
+    // reloads them from their original URL.
+    if (remembered && isDashboard()) {
+      const url = new URL(location.href);
+      url.searchParams.delete("token");
+      history.replaceState(history.state, "", url.pathname + url.search + url.hash);
     }
     return fromUrl;
   }

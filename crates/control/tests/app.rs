@@ -35,6 +35,39 @@ async fn network_ingest_gets_a_saved_key() {
 }
 
 #[tokio::test]
+async fn ipv6_addresses_give_working_links() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        eprintln!("no IPv6 loopback here; skipping");
+        return;
+    }
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: Overrides {
+            ingest: Some("[::1]:0".parse().unwrap()),
+            api: Some("[::1]:0".parse().unwrap()),
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    let urls = app.urls();
+    let api = format!("http://[::1]:{}/", app.api_addr.port());
+    assert!(urls.dashboard.starts_with(&api), "{}", urls.dashboard);
+    assert!(
+        urls.dock.starts_with(&format!("{api}dock?")),
+        "{}",
+        urls.dock
+    );
+    assert!(
+        urls.obs_server.starts_with("rtmp://[::1]:"),
+        "{}",
+        urls.obs_server
+    );
+    app.shutdown().await;
+}
+
+#[tokio::test]
 async fn local_ingest_needs_no_key() {
     let app = App::start(AppOptions {
         config_path: None,
