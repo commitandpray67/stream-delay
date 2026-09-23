@@ -1,0 +1,15 @@
+# Release image: packages the streamdelayd binaries built by the release workflow
+# (dist/<arch>/streamdelayd) instead of compiling them again. To build an image
+# from source, use Dockerfile. Keep the runtime part in sync with Dockerfile.
+
+FROM debian:bookworm-slim
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --home /data --create-home streamdelay
+COPY --chmod=755 dist/${TARGETARCH}/streamdelayd /usr/local/bin/streamdelayd
+USER streamdelay
+ENV STREAMDELAY_CONFIG=/data/config.toml
+VOLUME /data
+EXPOSE 1935 7788
+ENTRYPOINT ["streamdelayd", "run", "--no-keychain", "--allow-lan", "--ingest", "0.0.0.0:1935", "--api", "0.0.0.0:7788"]

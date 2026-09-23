@@ -1,10 +1,21 @@
 name: Release
 
 # Push a tag like v0.1.0 to build installers, headless binaries and the container
-# image. Everything lands in a draft GitHub release for review.
+# image. Everything lands in a draft GitHub release for review; publish it as a
+# normal release (not a pre-release), since the updater only looks at the latest
+# full release.
+#
+# Pushes to main or claude/** that touch the release setup run the same builds as
+# a dry run: installers and binaries are uploaded as artifacts of the workflow run
+# (downloadable from its page) and nothing is published.
 on:
   push:
     tags: ["v*"]
+    branches: [main, "claude/**"]
+    paths:
+      - ".github/workflows/release.yml"
+      - "Dockerfile.release"
+      - "apps/desktop/src-tauri/tauri.conf.json"
   workflow_dispatch:
 
 permissions:
@@ -13,6 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
   desktop:
@@ -24,12 +36,15 @@ jobs:
           - name: Linux
             os: ubuntu-22.04
             args: ""
+            bundle: target/release/bundle
           - name: Windows
             os: windows-latest
             args: ""
+            bundle: target/release/bundle
           - name: macOS (universal)
             os: macos-latest
             args: "--target universal-apple-darwin"
+            bundle: target/universal-apple-darwin/release/bundle
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +81,9 @@ jobs:
               > apps/desktop/src-tauri/tauri.release.conf.json
             echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
           fi
-      - uses: tauri-apps/tauri-action@v0
+      - name: Build and attach to the draft release
+        if: env.RELEASE == 'true'
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -82,11 +99,32 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
           releaseName: stream-delay ${{ github.ref_name }}
-          releaseBody: See the assets below. Checksums are in SHA256SUMS.txt.
+          releaseBody: See CHANGELOG.md for what changed. Checksums are in SHA256SUMS.txt.
           releaseDraft: true
-          prerelease: true
+          # The updater follows releases/latest, which skips pre-releases.
+          prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
+      - name: Build (dry run)
+        if: env.RELEASE != 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm -C apps/desktop tauri build ${{ matrix.args }} ${{ steps.updater.outputs.args }}
+      - name: Upload installers (dry run)
+        if: env.RELEASE != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ runner.os }}
+          path: |
+            ${{ matrix.bundle }}/**/*.exe
+            ${{ matrix.bundle }}/**/*.msi
+            ${{ matrix.bundle }}/**/*.dmg
+            ${{ matrix.bundle }}/**/*.AppImage
+            ${{ matrix.bundle }}/**/*.deb
+            ${{ matrix.bundle }}/**/*.rpm
+          if-no-files-found: error
 
   headless:
     name: streamdelayd (${{ matrix.target }})
@@ -98,12 +136,17 @@ jobs:
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, exe: streamdelayd }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: streamdelayd.exe }
           - { os: macos-latest, target: aarch64-apple-darwin, exe: streamdelayd }
-          - { os: macos-13, target: x86_64-apple-darwin, exe: streamdelayd }
+          # Intel Macs: cross-compiled, as GitHub no longer offers Intel runners.
+          - { os: macos-latest, target: x86_64-apple-darwin, exe: streamdelayd }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -111,21 +154,24 @@ jobs:
         with:
           node-version: 22
       - run: pnpm -C ui install --frozen-lockfile && pnpm -C ui build
-      - run: cargo build --release -p streamdelayd
+      - run: cargo build --release -p streamdelayd --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
-          name=streamdelayd-${{ github.ref_name }}-${{ matrix.target }}
+          version="${GITHUB_REF_NAME//\//-}"
+          name="streamdelayd-$version-${{ matrix.target }}"
           mkdir "$name"
-          cp target/release/${{ matrix.exe }} README.md LICENSE docs/API.md "$name"/
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md LICENSE docs/API.md "$name"/
           if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: headless-${{ matrix.target }}
           path: streamdelayd-*.*
+          if-no-files-found: error
 
   publish-headless:
     name: Attach binaries and checksums
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [desktop, headless]
     runs-on: ubuntu-latest
     steps:
@@ -146,12 +192,29 @@ jobs:
 
   container:
     name: Container image
+    needs: [headless]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: headless-*-linux-gnu
+          merge-multiple: true
+      # The image packages the binaries built above instead of compiling again,
+      # which for arm64 would run under emulation and take an hour.
+      - name: Arrange binaries by architecture
+        run: |
+          for pair in amd64:x86_64 arm64:aarch64; do
+            arch=${pair%%:*}; target=${pair#*:}
+            mkdir -p "dist/$arch" extract
+            tar xzf streamdelayd-*-"$target"-unknown-linux-gnu.tar.gz -C extract
+            cp extract/streamdelayd-*-"$target"-unknown-linux-gnu/streamdelayd "dist/$arch/"
+          done
+          ls -l dist/*
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
+        if: env.RELEASE == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -166,7 +229,8 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ env.RELEASE == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

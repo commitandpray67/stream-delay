@@ -1,37 +1,51 @@
 # Releasing
 
-Releases are built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a tag `v*` is pushed. The workflow creates a **draft pre-release** containing:
+Releases are built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a tag `v*` is pushed. The workflow creates a **draft release** containing:
 
 - Desktop installers from `tauri-action`: Windows NSIS and MSI, a universal macOS DMG/app, and Linux AppImage, deb and rpm.
 - Headless `streamdelayd` archives for Linux (x86_64, aarch64), Windows and macOS (Apple Silicon, Intel).
 - `SHA256SUMS.txt` covering every asset.
-- A multi-arch container image `ghcr.io/<owner>/stream-delay:<version>` (and `:edge`).
+- With auto-update set up (below), `latest.json` and signed update bundles.
+- A multi-arch container image `ghcr.io/<owner>/stream-delay:<version>` (and `:edge`), packaged from the headless Linux binaries.
 
-Review the draft, then publish it.
+Review the draft, then publish it **as a normal release, not a pre-release**: the app looks for updates at `releases/latest`, which skips pre-releases. Say "beta" in the notes instead.
+
+**Dry run:** a push to `main` or a `claude/**` branch that changes the release workflow, `Dockerfile.release` or `tauri.conf.json` runs the same builds without publishing anything. The installers and binaries are attached to the workflow run as artifacts (Actions → the run → Artifacts), which is also a quick way to get a test build.
 
 ## Checklist
 
-1. Update `version` in `Cargo.toml` (workspace), `apps/desktop/src-tauri/tauri.conf.json`, `ui/package.json` and `apps/desktop/package.json`.
-2. Make sure CI is green on `main`, including the end-to-end job.
+1. Update `version` in `Cargo.toml` (workspace), `apps/desktop/src-tauri/tauri.conf.json`, `ui/package.json` and `apps/desktop/package.json`. MSI installers need a plain `x.y.z` version.
+2. Make sure CI is green on `main`, including the end-to-end job, and the last release dry run passed.
 3. Test on a real Twitch account with `?bandwidthtest=true` on each OS you can reach, following [`docs/testing.md`](testing.md), and run the 12-hour soak (`DURATION=43200 tests/soak/run.sh`).
 4. Move the `Unreleased` section of `CHANGELOG.md` under the new version and date.
 5. `git tag v0.x.y && git push origin v0.x.y`.
-6. Paste the changelog entry into the draft release notes, then publish.
+6. Paste the changelog entry into the draft release notes, then publish (not as a pre-release).
 
 ## One-time setup
 
-### Auto-update signing (recommended)
+### Auto-update signing (recommended before the first release)
 
-Tauri's updater only installs updates signed with your key.
+Tauri's updater only installs updates signed with your key, so installs of a release built without a key never update themselves.
 
-```sh
-pnpm -C apps/desktop tauri signer generate -w ~/.tauri/stream-delay.key
-```
+1. Create the key pair. It asks for a password; remember it.
 
-- Add the private key as the repository **secret** `TAURI_SIGNING_PRIVATE_KEY`, and its password as `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-- Add the public key as the repository **variable** `TAURI_UPDATER_PUBKEY`.
+   ```sh
+   # macOS/Linux
+   pnpm -C apps/desktop tauri signer generate -w ~/.tauri/stream-delay.key
+   # Windows (PowerShell)
+   pnpm -C apps/desktop tauri signer generate -w $HOME\.tauri\stream-delay.key
+   ```
 
-Once these are set, releases include `latest.json` and signed update bundles. The app checks `releases/latest/download/latest.json` on start and from the tray menu. Without them the app builds fine and simply has no updater.
+   This writes the private key to `stream-delay.key` and the public key to `stream-delay.key.pub`. Keep the private key and password safe (a password manager); anyone with both can publish updates your users will install.
+2. In the GitHub repository: **Settings → Secrets and variables → Actions**.
+   - **Secrets** tab → *New repository secret*:
+     - `TAURI_SIGNING_PRIVATE_KEY`: the whole content of `stream-delay.key`
+       (`cat ~/.tauri/stream-delay.key`, or `Get-Content $HOME\.tauri\stream-delay.key` on Windows).
+     - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password from step 1.
+   - **Variables** tab → *New repository variable*:
+     - `TAURI_UPDATER_PUBKEY`: the whole content of `stream-delay.key.pub`.
+
+The next release (or dry run) then includes `latest.json` and signed update bundles, and the app checks `releases/latest/download/latest.json` on start and from the tray menu. Without the key the app builds fine and simply has no updater.
 
 ### macOS signing and notarization
 
