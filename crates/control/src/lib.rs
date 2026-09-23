@@ -248,6 +248,30 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn only_what_a_change_changed_is_saved() {
+        let saved = Config::default();
+        // In effect: a command-line maximum.
+        let mut before = saved.clone();
+        before.delay.max_seconds = 60;
+        let mut after = before.clone();
+        after.delay.presets[1].seconds = 7.0;
+        after.obs.backup = Some(streamdelay_config::ObsBackup {
+            service_type: "rtmp_common".into(),
+            obs: Some("127.0.0.1:4455".into()),
+            settings_json: None,
+        });
+        let s = with_changes(&saved, &before, &after);
+        assert_eq!(s.delay.max_seconds, 120, "the override was saved");
+        assert_eq!(s.delay.presets[1].seconds, 7.0);
+        assert_eq!(s.obs.backup, after.obs.backup);
+        // Settings a change removes are removed.
+        let s = with_changes(&s, &after, &before);
+        assert_eq!(s.obs.backup, None);
+        assert_eq!(s.delay.presets, saved.delay.presets);
+        assert_eq!(s, saved);
+    }
+
     #[tokio::test]
     async fn concurrent_changes_all_reach_the_settings_file() {
         let relay = streamdelay_relay::start(RelayConfig {
