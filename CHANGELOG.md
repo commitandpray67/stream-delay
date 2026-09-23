@@ -97,7 +97,6 @@ All notable changes to stream-delay are listed here. The format follows
 - The desktop app kept only the current run's log; the previous one is now kept
   as `stream-delay.previous.log`, so the log of a crashed run survives the
   restart.
-
 - **Resume broadcasting aired what OBS sent while the stream was ended.**
   Resuming within the delay after **End stream** aired everything from the moment
   the stream was ended. Now only what OBS sends after resuming airs.
