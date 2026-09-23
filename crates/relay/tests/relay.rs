@@ -69,16 +69,21 @@ async fn delay_rewind_and_go_live() {
     {
         let l = log.lock().unwrap();
         let frames = video_frames(&l);
-        let after: Vec<_> = frames.iter().filter(|(at, _, _)| *at >= t_rewind).collect();
-        let before_max = frames
-            .iter()
-            .filter(|(at, _, _)| *at < t_rewind)
-            .map(|f| f.1)
-            .max()
-            .unwrap();
-        // Viewers see some frames again, starting from a keyframe.
-        assert!(after[0].1 <= before_max, "no rewind happened");
-        assert_eq!(after[0].1 % 30, 0, "rewind did not land on a keyframe");
+        // Viewers see some frames again, starting from a keyframe. Find the rewind
+        // as the backward jump in what the sink received: frames sent just before
+        // the splice can still arrive after the command returns.
+        let jump = frames
+            .windows(2)
+            .position(|w| w[1].1 < w[0].1)
+            .map(|i| i + 1)
+            .expect("no rewind happened");
+        let (from, to) = (frames[jump - 1].1, frames[jump].1);
+        assert_eq!(to % 30, 0, "rewind did not land on a keyframe");
+        assert!(from - to >= 30, "rewound only {} frames", from - to);
+        assert!(
+            frames[jump].0 + Duration::from_millis(500) >= t_rewind,
+            "rewind happened before the command"
+        );
         assert_monotonic(&l);
     }
     assert_eq!(relay.state().delay.phase, streamdelay_relay::Phase::Delayed);
