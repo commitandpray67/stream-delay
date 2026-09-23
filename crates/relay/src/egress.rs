@@ -297,17 +297,28 @@ fn ended_by(c: Option<EgressCtl>, aborter: &Aborter) -> RunEnd {
     }
 }
 
+/// Outcome of [`write_or_ctl`].
+enum Written {
+    Done,
+    Failed(std::io::Error),
+    /// A control message arrived first and the write was cut short.
+    Interrupted(Option<EgressCtl>),
+}
+
 /// Writes `data` unless a control message arrives first, so stopping never waits
-/// on a stalled destination. `Err` carries that message; the write was cut short.
+/// on a stalled destination.
 async fn write_or_ctl(
     wr: &mut WriteHalf<BoxStream>,
     data: &[u8],
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
-) -> Result<std::io::Result<()>, Option<EgressCtl>> {
+) -> Written {
     tokio::select! {
         biased;
-        c = ctl.recv() => Err(c),
-        r = wr.write_all(data) => Ok(r),
+        c = ctl.recv() => Written::Interrupted(c),
+        r = wr.write_all(data) => match r {
+            Ok(()) => Written::Done,
+            Err(e) => Written::Failed(e),
+        },
     }
 }
 
@@ -365,9 +376,9 @@ async fn publish(
                 let out = session.take_output();
                 if !out.is_empty() {
                     match write_or_ctl(&mut wr, &out, ctl).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
-                        Err(c) => return (ended_by(c, aborter), last_written),
+                        Written::Done => {}
+                        Written::Failed(e) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
+                        Written::Interrupted(c) => return (ended_by(c, aborter), last_written),
                     }
                 }
             }
@@ -395,12 +406,12 @@ async fn publish(
                 let result = write_or_ctl(&mut wr, &out, ctl).await;
                 counters.backlog.fetch_sub(bytes, Ordering::Relaxed);
                 match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
+                    Written::Done => {}
+                    Written::Failed(e) => return (RunEnd::Failed { error: format!("write failed: {e}") }, last_written),
                     // Told to stop mid-write (End stream on a slow upload): the RTMP
                     // stream is cut mid-message, so there is no clean unpublish;
                     // dropping the connection ends the broadcast.
-                    Err(c) => return (ended_by(c, aborter), last_written),
+                    Written::Interrupted(c) => return (ended_by(c, aborter), last_written),
                 }
                 counters.written.fetch_add(out.len() as u64, Ordering::Relaxed);
                 if batch_last.is_some() {
