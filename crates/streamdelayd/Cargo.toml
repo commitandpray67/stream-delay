@@ -20,6 +20,12 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "1"
 ureq = { version = "3", default-features = false, features = ["json"] }
+dhat = { version = "0.3", optional = true }
+
+[features]
+# Heap profiling for leak hunting: writes dhat-heap.json when `run` exits
+# (Ctrl-C). View it at https://nnethercote.github.io/dh_view/dh_view.html.
+dhat-heap = ["dep:dhat"]
 
 [lints]
 workspace = true

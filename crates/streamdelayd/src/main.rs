@@ -14,6 +14,10 @@ use streamdelay_control::{App, AppOptions, Overrides, diagnostics};
 use tracing::info;
 use tracing_subscriber::prelude::*;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[derive(Parser)]
 #[command(
     name = "streamdelayd",
@@ -158,6 +162,8 @@ impl ApiArgs {
 }
 
 fn main() -> Result<()> {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
     let cli = Cli::parse();
     match cli.command {
         Cmd::Run(args) => run(cli.config, args),
