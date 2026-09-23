@@ -132,8 +132,9 @@ jobs:
         run: |
           # With the updater key configured, every platform must produce signed
           # update bundles, or installed copies could not update to this build.
-          found=$(find ${{ matrix.bundle }} -name '*.sig' | tee /dev/stderr | wc -l)
-          test "$found" -gt 0
+          sigs=$(find "${{ matrix.bundle }}" -name '*.sig')
+          echo "$sigs"
+          test -n "$sigs"
 
   headless:
     name: streamdelayd (${{ matrix.target }})
