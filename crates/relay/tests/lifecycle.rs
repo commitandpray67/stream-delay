@@ -625,8 +625,7 @@ async fn a_dump_replays_what_aired_and_never_airs_what_had_not() {
     p.stream_for(Duration::from_secs(5)).await;
     {
         let l = log.lock().unwrap();
-        assert_eq!(l.connections, 1, "the broadcast must continue");
-        assert_eq!(l.unpublished, 0);
+        assert_dump_kept_the_broadcast(&l);
         assert_monotonic(&l);
         let ids = aired(&l);
         for &id in &ids {
@@ -681,8 +680,7 @@ async fn a_mask_dump_throws_away_what_has_not_aired_under_the_slate() {
     assert!(state.delay.effective_ms >= 2_900, "{:?}", state.delay);
     {
         let l = log.lock().unwrap();
-        assert_eq!(l.connections, 1, "the broadcast must continue");
-        assert_eq!(l.unpublished, 0);
+        assert_dump_kept_the_broadcast(&l);
         for id in aired(&l) {
             let captured = p.captured_at(id);
             assert!(

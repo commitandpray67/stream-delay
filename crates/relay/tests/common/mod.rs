@@ -410,17 +410,32 @@ pub fn video_frames(log: &SinkLog) -> Vec<(Instant, u32, u32)> {
         .collect()
 }
 
+/// Timestamps never go backwards on a connection (a new one starts again).
 pub fn assert_monotonic(log: &SinkLog) {
-    for kind in [MediaKind::Audio, MediaKind::Video] {
-        let ts: Vec<u32> = log
-            .media
-            .iter()
-            .filter(|m| m.kind == kind)
-            .map(|m| m.ts)
-            .collect();
-        assert!(
-            ts.windows(2).all(|w| w[0] <= w[1]),
-            "{kind:?} timestamps went backwards"
-        );
+    for conn in 0..log.connections {
+        for kind in [MediaKind::Audio, MediaKind::Video] {
+            let ts: Vec<u32> = log
+                .media
+                .iter()
+                .filter(|m| m.conn == conn && m.kind == kind)
+                .map(|m| m.ts)
+                .collect();
+            assert!(
+                ts.windows(2).all(|w| w[0] <= w[1]),
+                "connection {conn}: {kind:?} timestamps went backwards"
+            );
+        }
     }
+}
+
+/// A dump kept the broadcast going: it never ended it, and connected again at
+/// once at most once, where it reset the connection because a frame had not
+/// left this computer yet (Windows, which sends asynchronously, often has one).
+pub fn assert_dump_kept_the_broadcast(log: &SinkLog) {
+    assert!(
+        log.connections <= 2,
+        "the broadcast must continue: {} connections",
+        log.connections
+    );
+    assert_eq!(log.unpublished, 0, "the broadcast must continue");
 }
