@@ -1,9 +1,11 @@
 name: Release
 
-# Push a tag like v0.1.0 to build installers, headless binaries and the container
-# image. Everything lands in a draft GitHub release for review; publish it as a
-# normal release (not a pre-release), since the updater only looks at the latest
-# full release.
+# Push a tag like v0.1.0 to build installers and headless binaries. The tag's
+# commit must pass CI first. Everything lands in a draft GitHub release, which is
+# checked (every asset there, every update signed with the project's key) before
+# its checksums are added; publish it as a normal release (not a pre-release),
+# since the updater only looks at the latest full release. Publishing it pushes
+# the container image (publish-image.yml): nothing is public before that.
 #
 # Pushes to main or claude/** that touch the release setup run the same builds as
 # a dry run: installers and binaries are uploaded as artifacts of the workflow run
@@ -19,6 +21,7 @@ on:
     branches: [main, "claude/**"]
     paths:
       - ".github/workflows/release.yml"
+      - ".github/scripts/verify_release.py"
       - "Dockerfile.release"
       - "apps/desktop/src-tauri/tauri.conf.json"
   workflow_dispatch:
@@ -29,12 +32,41 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
+  # The tagged commit must pass everything CI checks, whatever happened on main.
+  ci:
+    name: CI
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/ci.yml
+
+  checks:
+    name: Release checks
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: The tag matches the version everywhere
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          fail=0
+          check() {
+            if [ "$2" != "$v" ]; then
+              echo "::error::$1 says version '$2', the tag says $v"
+              fail=1
+            fi
+          }
+          check Cargo.toml "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          for f in apps/desktop/src-tauri/tauri.conf.json apps/desktop/package.json ui/package.json; do
+            check "$f" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$f")"
+          done
+          grep -q "^## \[$v\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $v"; fail=1; }
+          exit $fail
+
   desktop:
     name: Desktop (${{ matrix.name }})
     if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ci, checks]
     environment: release
     permissions:
       contents: write
@@ -78,15 +110,17 @@ jobs:
         shell: bash
         env:
           PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+          HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
-          # Signed auto-updates are enabled once the repository variable
-          # TAURI_UPDATER_PUBKEY and secret TAURI_SIGNING_PRIVATE_KEY are set
-          # (see docs/RELEASING.md).
-          if [ -n "$PUBKEY" ]; then
-            printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s"}}}' "$PUBKEY" \
-              > apps/desktop/src-tauri/tauri.release.conf.json
-            echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
+          # Without the key pair, the app would be built without its updater, and
+          # installed copies could never update again (docs/RELEASING.md).
+          if [ -z "$PUBKEY" ] || [ "$HAS_SIGNING_KEY" != true ]; then
+            echo "::error::A release needs the updater keys: the repository variable TAURI_UPDATER_PUBKEY and the secret TAURI_SIGNING_PRIVATE_KEY of the release environment."
+            exit 1
           fi
+          printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s"}}}' "$PUBKEY" \
+            > apps/desktop/src-tauri/tauri.release.conf.json
+          echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
       # macOS signing and notarization (optional until an Apple Developer ID is set
       # up). Tauri imports a certificate whenever APPLE_CERTIFICATE is set, even to
       # the empty value a missing secret gives, and then fails the build; so the
@@ -203,14 +237,18 @@ jobs:
       - name: Check update signatures
         shell: bash
         run: |
-          # Every platform must produce signed update bundles, or installed copies
-          # could not update to a release built this way.
-          sigs=$(find "${{ matrix.bundle }}" -name '*.sig')
-          echo "$sigs"
-          test -n "$sigs"
+          # Every platform must produce update bundles signed with the key it was
+          # given, or installed copies could not update to a release built this way.
+          # On Windows, python3 can be the Microsoft Store placeholder.
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          PUBKEY="$(cat apps/desktop/dry-run-updater.key.pub)" \
+            "$py" .github/scripts/verify_release.py signatures "${{ matrix.bundle }}"
 
   headless:
     name: streamdelayd (${{ matrix.target }})
+    needs: [ci, checks]
+    # Dry runs skip the checks above; releases need them to pass.
+    if: ${{ !failure() && !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -246,10 +284,16 @@ jobs:
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md LICENSE docs/API.md "$name"/
           if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+          # Only the archive is uploaded. A tag's name has dots, so a wider
+          # pattern also picked up this folder, which the release upload then
+          # refused (v0.2.0 lost three archives and its checksums that way).
+          rm -rf "$name"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: headless-${{ matrix.target }}
-          path: streamdelayd-*.*
+          path: |
+            streamdelayd-*.tar.gz
+            streamdelayd-*.zip
           if-no-files-found: error
 
   publish-headless:
@@ -260,27 +304,49 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: headless-*
           merge-multiple: true
+          path: headless
       - name: Upload to the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "${{ github.ref_name }}" streamdelayd-* --clobber
-          mkdir all && cd all
-          gh release download "${{ github.ref_name }}" --pattern '*' --skip-existing
-          rm -f SHA256SUMS.txt && sha256sum * > SHA256SUMS.txt
+          ls -l headless
+          # All five archives, or fail here rather than publish without some.
+          test "$(ls headless/streamdelayd-*.tar.gz headless/streamdelayd-*.zip | wc -l)" -eq 5
+          gh release upload "${{ github.ref_name }}" headless/streamdelayd-*.tar.gz headless/streamdelayd-*.zip --clobber
+      - name: Check the whole release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          mkdir all
+          gh release download "${{ github.ref_name }}" --dir all --pattern '*'
+          rm -f all/SHA256SUMS.txt
+          # Every installer and archive, update signatures made with the project's
+          # key, and latest.json offering this version to every platform.
+          python3 .github/scripts/verify_release.py release all "${{ github.ref_name }}"
+      - name: Add checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd all
+          sha256sum * > SHA256SUMS.txt
           gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber
 
+  # Builds the image as a check. It is pushed when the release is published
+  # (publish-image.yml), from the archives in the release.
   container:
-    name: Container image
+    name: Container image (build only)
     needs: [headless]
     permissions:
       contents: read
-      packages: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -301,24 +367,9 @@ jobs:
           ls -l dist/*
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        if: env.RELEASE == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=edge
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
-          push: ${{ env.RELEASE == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: false
