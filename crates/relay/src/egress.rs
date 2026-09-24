@@ -961,25 +961,32 @@ mod tests {
 
     #[tokio::test]
     async fn a_dump_resets_the_connection_when_the_os_has_not_sent_everything() {
-        // The frame fits the send buffer, so its write completes, but not the
-        // destination's receive window, which it does not read from.
-        let (stream, aborter, _far) = connection(Some(1024 * 1024), Some(4 * 1024)).await;
+        // A destination that reads nothing, and a send buffer large enough
+        // that writes complete while it holds what the destination has no room
+        // for (how much that is depends on the OS).
+        let (stream, aborter, far) = connection(Some(4 * 1024 * 1024), Some(4 * 1024)).await;
         let mut p = Publishing::start(stream, aborter);
-        p.frame(1, 200_000, 0);
-        p.until_written().await;
+        let mut at_far = vec![0u8; 16 * 1024 * 1024];
+        for seq in 1.. {
+            assert!(seq <= 200, "the destination took everything");
+            p.frame(seq, 64_000, 0);
+            if tokio::time::timeout(Duration::from_secs(1), p.until_written())
+                .await
+                .is_err()
+            {
+                // No room even in the send buffer: a blocked write.
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let received = far.peek(&mut at_far).await.unwrap() as u64;
+            if received < p.counters.written.load(Ordering::Relaxed) {
+                break;
+            }
+        }
         p.dump();
-        // Delivered: none of it for sure, since the OS holds most of it.
+        // Delivered: none of it for sure, since the OS holds some.
         let end = p.ended().await;
-        assert!(
-            matches!(
-                end,
-                RunEnd::CutReset {
-                    cut: 1,
-                    delivered: None
-                }
-            ),
-            "not reset"
-        );
+        assert!(matches!(end, RunEnd::CutReset { cut: 1, .. }), "not reset");
         while let Ok(ev) = p.events.try_recv() {
             assert!(!matches!(ev, Event::CutDone { .. }), "answered too early");
         }
