@@ -216,10 +216,8 @@ fn is_twitch_key_tail(tail: &str) -> bool {
 
 fn known_secrets(st: &AppState) -> Vec<String> {
     let s = &st.shared.secrets;
-    let mut v: Vec<String> = [secret::OBS_PASSWORD, secret::OBS_BACKUP_KEY]
-        .iter()
-        .filter_map(|name| s.get(name))
-        .collect();
+    let mut v: Vec<String> = s.get(secret::OBS_BACKUP_KEY).into_iter().collect();
+    v.extend(crate::obs_routes::saved_password(s.as_ref()));
     v.extend(crate::dest_key::any(s.as_ref()));
     v.extend(crate::obs_routes::backup_secrets(s.as_ref()));
     v.extend(st.shared.key_override.clone());

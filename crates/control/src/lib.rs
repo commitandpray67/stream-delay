@@ -70,6 +70,12 @@ pub(crate) struct Shared {
     pub overlays: watch::Sender<usize>,
     /// Set by the desktop app: checks for an update and offers to install it.
     pub update_check: RwLock<Option<UpdateCheck>>,
+    /// The destination (address and key) last given to the relay; see
+    /// [`AppState::sync_destination`].
+    pub applied_destination: Mutex<Option<streamdelay_relay::Destination>>,
+    /// Held for the whole of an OBS wizard step (connect, configure, restore),
+    /// network calls included, so steps never mix one OBS's secrets with another.
+    pub obs_lock: tokio::sync::Mutex<()>,
 }
 
 /// Proof that the settings lock is held; see [`AppState::lock_settings`].
@@ -163,6 +169,24 @@ impl AppState {
             .destination
             .url
             .clone()
+    }
+
+    /// Gives the relay the destination the settings and saved key now call for,
+    /// if it differs from the one it has (another address, or another key for the
+    /// same one). Call it after anything that may change either.
+    pub(crate) fn sync_destination(&self) -> Result<(), ApiError> {
+        let mut applied = self
+            .shared
+            .applied_destination
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dest = self.destination(&self.config());
+        if *applied != dest {
+            tracing::info!(?dest, "destination updated");
+            self.relay().set_destination(dest.clone())?;
+            *applied = dest;
+        }
+        Ok(())
     }
 
     /// The stored stream key, if it may be sent to `url`: only to the server it
@@ -260,7 +284,7 @@ pub(crate) fn state(
     config_path: Option<PathBuf>,
 ) -> AppState {
     let (config_tx, _) = watch::channel(config.clone());
-    AppState {
+    let st = AppState {
         shared: Arc::new(Shared {
             relay,
             tokens: auth::Tokens::new(&config.api.token),
@@ -278,8 +302,16 @@ pub(crate) fn state(
             restart_required: AtomicBool::new(false),
             overlays: watch::channel(0).0,
             update_check: RwLock::new(None),
+            applied_destination: Mutex::new(None),
+            obs_lock: tokio::sync::Mutex::new(()),
         }),
-    }
+    };
+    // What a relay started with these settings was given.
+    *st.shared
+        .applied_destination
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = st.destination(&st.config());
+    st
 }
 
 #[cfg(test)]

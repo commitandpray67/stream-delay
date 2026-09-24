@@ -52,16 +52,64 @@ impl From<ObsError> for ApiError {
     }
 }
 
+/// A secret saved together with the OBS it belongs to (see [`obs_id`]), so it is
+/// only ever used with that OBS, whatever the settings say at the time.
+#[derive(Serialize, Deserialize)]
+struct ForObs<T> {
+    obs: String,
+    value: T,
+}
+
+fn save_for_obs<T: Serialize>(
+    secrets: &dyn SecretStore,
+    name: &str,
+    obs: &str,
+    value: T,
+) -> Result<(), ApiError> {
+    let record = serde_json::to_string(&ForObs {
+        obs: obs.to_string(),
+        value,
+    })
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    secrets
+        .set(name, &record)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+/// The saved secret `name` and the OBS it belongs to. One saved by an older
+/// version, on its own, belongs to `legacy_obs`.
+fn load_for_obs<T: serde::de::DeserializeOwned>(
+    secrets: &dyn SecretStore,
+    name: &str,
+    legacy_obs: &str,
+    legacy: impl FnOnce(String) -> Option<T>,
+) -> Option<(String, T)> {
+    let raw = secrets.get(name)?;
+    match serde_json::from_str::<ForObs<T>>(&raw) {
+        Ok(r) => Some((r.obs, r.value)),
+        Err(_) => legacy(raw).map(|v| (legacy_obs.to_string(), v)),
+    }
+}
+
+/// The password saved for the OBS at `host:port`, if any.
+fn password_for(secrets: &dyn SecretStore, c: &Config) -> Option<String> {
+    let id = obs_id(&c.obs.host, c.obs.port);
+    load_for_obs::<String>(secrets, secret::OBS_PASSWORD, &id, Some)
+        .filter(|(obs, p)| *obs == id && !p.is_empty())
+        .map(|(_, p)| p)
+}
+
+/// The saved OBS password, whichever OBS it is for (for redaction).
+pub(crate) fn saved_password(secrets: &dyn SecretStore) -> Option<String> {
+    load_for_obs::<String>(secrets, secret::OBS_PASSWORD, "", Some).map(|(_, p)| p)
+}
+
 /// The configured OBS, with its saved password.
 fn target(st: &AppState, c: &Config) -> ObsTarget {
     ObsTarget {
         host: c.obs.host.clone(),
         port: c.obs.port,
-        password: st
-            .shared
-            .secrets
-            .get(secret::OBS_PASSWORD)
-            .filter(|p| !p.is_empty()),
+        password: password_for(st.shared.secrets.as_ref(), c),
     }
 }
 
@@ -190,24 +238,42 @@ pub(crate) fn migrate_backup(config: &mut Config, secrets: &dyn SecretStore) -> 
     ) {
         obj.insert("key".into(), key.into());
     }
-    match secrets.set(secret::OBS_BACKUP, &settings.to_string()) {
+    let obs = backup.obs.clone().unwrap_or_default();
+    match save_for_obs(secrets, secret::OBS_BACKUP, &obs, &settings) {
         Ok(()) => {
             let _ = secrets.delete(secret::OBS_BACKUP_KEY);
             backup.settings_json = None;
             changed = true;
             info!("moved the saved OBS settings to the secret store");
         }
-        Err(e) => warn!("could not move the saved OBS settings to the secret store: {e}"),
+        Err(e) => warn!(
+            "could not move the saved OBS settings to the secret store: {}",
+            e.1
+        ),
     }
     changed
 }
 
-/// The backed-up settings, including the stream key.
-fn backup_settings(secrets: &dyn SecretStore, backup: &ObsBackup) -> Result<Value, ApiError> {
-    let (json, key) = match (secrets.get(secret::OBS_BACKUP), &backup.settings_json) {
-        (Some(json), _) => (json, None),
+/// The backed-up settings of the OBS `obs`, including the stream key. Refused if
+/// the saved ones belong to another OBS.
+fn backup_settings(
+    secrets: &dyn SecretStore,
+    backup: &ObsBackup,
+    obs: &str,
+) -> Result<Value, ApiError> {
+    let legacy_obs = backup.obs.clone().unwrap_or_else(|| obs.to_string());
+    let saved = load_for_obs::<Value>(secrets, secret::OBS_BACKUP, &legacy_obs, |json| {
+        serde_json::from_str(&json).ok()
+    });
+    let (from, mut settings, key) = match (saved, &backup.settings_json) {
+        (Some((from, settings)), _) => (from, settings, None),
         // Not moved yet: the secret store was unavailable at startup.
-        (None, Some(json)) => (json.clone(), secrets.get(secret::OBS_BACKUP_KEY)),
+        (None, Some(json)) => (
+            legacy_obs,
+            serde_json::from_str(json)
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+            secrets.get(secret::OBS_BACKUP_KEY),
+        ),
         (None, None) => {
             return Err(ApiError(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -215,8 +281,15 @@ fn backup_settings(secrets: &dyn SecretStore, backup: &ObsBackup) -> Result<Valu
             ));
         }
     };
-    let mut settings: Value = serde_json::from_str(&json)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // They hold a stream key: they only go back to the OBS they came from.
+    if from != obs {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "the saved settings are from the OBS at {from}; connect to that OBS to restore them"
+            ),
+        ));
+    }
     if let (Some(obj), Some(key)) = (settings.as_object_mut(), key) {
         obj.insert("key".into(), key.into());
     }
@@ -225,10 +298,9 @@ fn backup_settings(secrets: &dyn SecretStore, backup: &ObsBackup) -> Result<Valu
 
 /// Secret values in the saved OBS settings, for redaction.
 pub(crate) fn backup_secrets(secrets: &dyn SecretStore) -> Vec<String> {
-    let Some(settings) = secrets
-        .get(secret::OBS_BACKUP)
-        .and_then(|json| serde_json::from_str::<Value>(&json).ok())
-    else {
+    let Some((_, settings)) = load_for_obs::<Value>(secrets, secret::OBS_BACKUP, "", |json| {
+        serde_json::from_str(&json).ok()
+    }) else {
         return Vec::new();
     };
     ["key", "password", "bearer_token"]
@@ -242,7 +314,7 @@ async fn build_status(st: &AppState, obs: Result<Obs, ObsError>) -> ObsStatus {
     let config = st.config();
     let mut s = ObsStatus {
         has_backup: config.obs.backup.is_some(),
-        password_saved: st.shared.secrets.get(secret::OBS_PASSWORD).is_some(),
+        password_saved: password_for(st.shared.secrets.as_ref(), &config).is_some(),
         ..Default::default()
     };
     let server = server_for_obs(st, &config).await.ok();
@@ -286,6 +358,7 @@ async fn connect(
             "enter the OBS host, usually 127.0.0.1",
         ));
     }
+    let _wizard = st.shared.obs_lock.lock().await;
     let saved = st.config();
     let same_obs = obs_id(&host, body.port) == obs_id(&saved.obs.host, saved.obs.port);
     // An empty password means "keep the saved one", which only ever goes to the
@@ -305,10 +378,12 @@ async fn connect(
     let obs = Obs::connect(&t).await?;
     // Connected: remember the settings.
     if !body.password.is_empty() {
-        st.shared
-            .secrets
-            .set(secret::OBS_PASSWORD, &body.password)
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        save_for_obs(
+            st.shared.secrets.as_ref(),
+            secret::OBS_PASSWORD,
+            &obs_id(&host, body.port),
+            &body.password,
+        )?;
     } else if !same_obs {
         // The saved password belonged to the previous OBS.
         st.shared
@@ -356,6 +431,9 @@ async fn configure(
     State(st): State<AppState>,
     Json(body): Json<ConfigureBody>,
 ) -> Result<Json<ConfigureResult>, ApiError> {
+    // One wizard step at a time: the OBS in the settings stays the one this step
+    // talks to (settings changes from the dashboard do not touch it).
+    let _wizard = st.shared.obs_lock.lock().await;
     let config = st.config();
     let server = server_for_obs(&st, &config).await?;
     let obs = Obs::connect(&target(&st, &config)).await?;
@@ -382,10 +460,12 @@ async fn configure(
             obs: Some(obs_id(&config.obs.host, config.obs.port)),
             settings_json: None,
         };
-        st.shared
-            .secrets
-            .set(secret::OBS_BACKUP, &info.stream.settings.to_string())
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        save_for_obs(
+            st.shared.secrets.as_ref(),
+            secret::OBS_BACKUP,
+            &obs_id(&config.obs.host, config.obs.port),
+            &info.stream.settings,
+        )?;
         let _ = st.shared.secrets.delete(secret::OBS_BACKUP_KEY);
 
         if body.import_key
@@ -398,7 +478,7 @@ async fn configure(
             messages.push("Your Twitch stream key was moved into stream-delay.".to_string());
         }
 
-        let config = change(&st, |c| {
+        change(&st, |c| {
             c.obs.backup = Some(backup.clone());
             if imported_key {
                 c.destination.key_mode = KeyMode::Stored;
@@ -409,9 +489,7 @@ async fn configure(
                 }
             }
         })?;
-        if imported_key {
-            st.relay().set_destination(st.destination(&config))?;
-        }
+        st.sync_destination()?;
 
         obs.stream_to(&server, &links.obs_key).await?;
         info!("OBS now streams to {server}");
@@ -442,6 +520,7 @@ async fn configure(
 }
 
 async fn restore(State(st): State<AppState>) -> Result<Json<ObsStatus>, ApiError> {
+    let _wizard = st.shared.obs_lock.lock().await;
     let config = st.config();
     let Some(backup) = config.obs.backup.clone() else {
         return Err(ApiError::bad_request(
@@ -459,7 +538,11 @@ async fn restore(State(st): State<AppState>) -> Result<Json<ObsStatus>, ApiError
             ),
         ));
     }
-    let settings = backup_settings(st.shared.secrets.as_ref(), &backup)?;
+    let settings = backup_settings(
+        st.shared.secrets.as_ref(),
+        &backup,
+        &obs_id(&config.obs.host, config.obs.port),
+    )?;
     let obs = Obs::connect(&target(&st, &config)).await?;
     obs.restore(&StreamSettings {
         service_type: backup.service_type,
@@ -508,11 +591,29 @@ mod tests {
         assert_eq!(backup.settings_json, None);
         assert_eq!(backup.obs.as_deref(), Some("127.0.0.1:4456"));
         assert_eq!(secrets.get(secret::OBS_BACKUP_KEY), None);
-        let settings = backup_settings(&secrets, &backup).unwrap();
+        let settings = backup_settings(&secrets, &backup, "127.0.0.1:4456").unwrap();
         assert_eq!(settings["key"], "live_1_abc");
         assert_eq!(settings["password"], "pw");
         assert_eq!(backup_secrets(&secrets), vec!["live_1_abc", "pw"]);
         assert!(!migrate_backup(&mut config, &secrets), "only once");
+        // Saved with the OBS they came from, and only restored to it.
+        let e = backup_settings(&secrets, &backup, "127.0.0.1:4455").unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn a_password_is_only_used_with_its_obs() {
+        let secrets = MemorySecrets::default();
+        let mut config = Config::default();
+        config.obs.port = 4455;
+        // Saved by an older version: belongs to the OBS in the settings.
+        secrets.set(secret::OBS_PASSWORD, "legacy").unwrap();
+        assert_eq!(password_for(&secrets, &config).as_deref(), Some("legacy"));
+        save_for_obs(&secrets, secret::OBS_PASSWORD, "127.0.0.1:4456", "pw-b").unwrap();
+        assert_eq!(password_for(&secrets, &config), None);
+        config.obs.port = 4456;
+        assert_eq!(password_for(&secrets, &config).as_deref(), Some("pw-b"));
+        assert_eq!(saved_password(&secrets).as_deref(), Some("pw-b"));
     }
 
     #[test]

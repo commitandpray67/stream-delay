@@ -286,8 +286,17 @@ impl App {
                 restart_required: AtomicBool::new(false),
                 overlays: watch::channel(0).0,
                 update_check: RwLock::new(None),
+                applied_destination: std::sync::Mutex::new(None),
+                obs_lock: tokio::sync::Mutex::new(()),
             }),
         };
+        // What the relay was started with.
+        *state
+            .shared
+            .applied_destination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            state.destination(&state.config());
         let router = routes::router(state.clone());
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, router).await {
@@ -422,6 +431,11 @@ const SERVICE_DOMAINS: &[&[&str]] = &[&["twitch.tv", "live-video.net"], &["youtu
 /// for `old` must not be sent to it. Clearing the destination is no change (the key
 /// goes nowhere), but setting one after an empty or invalid URL is: otherwise
 /// clearing it first would carry the key over to any server.
+///
+/// A service's own ingest servers (see `SERVICE_DOMAINS`) count as one. Anywhere
+/// else only the same endpoint does: scheme, host, port and application. Another
+/// port or application can be another service on the same machine, and RTMPS to
+/// RTMP would send the key unencrypted.
 pub(crate) fn different_server(old: &str, new: &str) -> bool {
     let Ok(b) = RtmpUrl::parse(new) else {
         return false;
@@ -429,7 +443,7 @@ pub(crate) fn different_server(old: &str, new: &str) -> bool {
     let Ok(a) = RtmpUrl::parse(old) else {
         return true;
     };
-    let (a, b) = (a.host.to_ascii_lowercase(), b.host.to_ascii_lowercase());
+    let (host_a, host_b) = (a.host.to_ascii_lowercase(), b.host.to_ascii_lowercase());
     let service = |host: &str| {
         SERVICE_DOMAINS.iter().position(|domains| {
             domains
@@ -437,7 +451,10 @@ pub(crate) fn different_server(old: &str, new: &str) -> bool {
                 .any(|d| host == *d || host.strip_suffix(d).is_some_and(|p| p.ends_with('.')))
         })
     };
-    a != b && (service(&a).is_none() || service(&a) != service(&b))
+    if let Some(s) = service(&host_a) {
+        return service(&host_b) != Some(s);
+    }
+    !(a.scheme == b.scheme && host_a == host_b && a.port == b.port && a.app == b.app)
 }
 
 /// True when `url` is a valid address on the same server or service as `known`.
@@ -472,6 +489,48 @@ pub(crate) fn destination(c: &Config, key: Option<String>) -> Option<Destination
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_for_a_custom_server_stays_with_its_endpoint() {
+        let key_for = "rtmps://relay.example:443/private";
+        // The same endpoint, spelled differently.
+        assert!(!different_server(key_for, "rtmps://Relay.Example/private"));
+        for other in [
+            "rtmps://relay.example:8443/private",
+            "rtmps://relay.example/other",
+            // Unencrypted.
+            "rtmp://relay.example:443/private",
+            "rtmp://relay.example/private",
+            "rtmps://other.example/private",
+        ] {
+            assert!(different_server(key_for, other), "{other}");
+        }
+        // A service's own servers share its keys, over RTMP or RTMPS.
+        for (a, b) in [
+            (
+                "rtmp://live.twitch.tv/app",
+                "rtmps://ingest.global-contribute.live-video.net/app",
+            ),
+            (
+                "rtmp://live.twitch.tv/app",
+                "rtmp://fra05.contribute.live-video.net/app",
+            ),
+            (
+                "rtmp://a.rtmp.youtube.com/live2",
+                "rtmps://a.rtmps.youtube.com:443/live2",
+            ),
+        ] {
+            assert!(!different_server(a, b), "{a} -> {b}");
+        }
+        assert!(different_server(
+            "rtmp://live.twitch.tv/app",
+            "rtmp://a.rtmp.youtube.com/live2"
+        ));
+        assert!(different_server(
+            "rtmp://live.twitch.tv/app",
+            "rtmp://live.twitch.tv.evil.example/app"
+        ));
+    }
 
     #[test]
     fn links_use_reachable_bracketed_addresses() {

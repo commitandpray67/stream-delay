@@ -224,68 +224,89 @@ async fn update_config(
             format!("could not update the saved stream key, so nothing was changed: {e}"),
         )
     };
+    let secrets = st.shared.secrets.as_ref();
+    let forget_key = update
+        .destination
+        .as_ref()
+        .is_some_and(|d| url_key.is_none() && different_server(&old_url, &d.url));
+    // The saved key as it was, to put back if the settings cannot be saved.
+    let key_before = if url_key.is_some() || forget_key {
+        Some(
+            secrets
+                .try_get(secret::DESTINATION_KEY)
+                .map_err(secret_err)?,
+        )
+    } else {
+        None
+    };
     if let (Some(key), Some(d)) = (&url_key, &update.destination) {
-        dest_key::save(st.shared.secrets.as_ref(), &d.url, key).map_err(secret_err)?;
-    } else if let Some(d) = &update.destination
-        && different_server(&old_url, &d.url)
-    {
+        dest_key::save(secrets, &d.url, key).map_err(secret_err)?;
+    } else if forget_key {
         // The key is saved for the old server and is never sent to another one;
         // it is forgotten too, and if that fails, nothing changes.
-        st.shared
-            .secrets
+        secrets
             .delete(secret::DESTINATION_KEY)
             .map_err(secret_err)?;
         info!("destination server changed; the stored stream key was removed");
     }
-    let (new_config, (destination_changed, keep_buffer_changed, restart)) = st
-        .change_config_locked(&lock, |c| {
-            let mut restart = false;
-            let mut destination_changed = false;
-            let mut keep_buffer_changed = false;
-            if let Some(d) = &update.destination {
-                destination_changed = *d != c.destination;
-                c.destination = d.clone();
+    let changed = st.change_config_locked(&lock, |c| {
+        let mut restart = false;
+        let mut keep_buffer_changed = false;
+        if let Some(d) = &update.destination {
+            c.destination = d.clone();
+        }
+        if let Some(d) = &update.delay {
+            restart |= d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
+            keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
+            c.delay = d.clone();
+        }
+        if let Some(o) = &update.overlay {
+            c.overlay = o.clone();
+        }
+        if let Some(h) = &update.hotkeys {
+            c.hotkeys = h.clone();
+        }
+        if let Some(g) = update.grace_seconds {
+            restart |= g != c.ingest.grace_seconds;
+            c.ingest.grace_seconds = g;
+        }
+        if let Some(l) = update.allow_lan {
+            restart |= l != c.api.allow_lan;
+            c.api.allow_lan = l;
+        }
+        (keep_buffer_changed, restart)
+    });
+    let (new_config, (keep_buffer_changed, restart)) = match changed {
+        Ok(changed) => changed,
+        Err(mut e) => {
+            // The settings stay as they were, so the saved key does too.
+            if let Some(before) = key_before {
+                let restored = match before {
+                    Some(raw) => secrets.set(secret::DESTINATION_KEY, &raw),
+                    None => secrets.delete(secret::DESTINATION_KEY),
+                };
+                if let Err(r) = restored {
+                    tracing::error!("could not put the saved stream key back: {r}");
+                    e.1 = format!(
+                        "{} The saved stream key had already been changed and could not be \
+                         put back ({r}): enter it again on the Setup tab.",
+                        e.1
+                    );
+                }
             }
-            if let Some(d) = &update.delay {
-                restart |=
-                    d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
-                keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
-                c.delay = d.clone();
-            }
-            if let Some(o) = &update.overlay {
-                c.overlay = o.clone();
-            }
-            if let Some(h) = &update.hotkeys {
-                c.hotkeys = h.clone();
-            }
-            if let Some(g) = update.grace_seconds {
-                restart |= g != c.ingest.grace_seconds;
-                c.ingest.grace_seconds = g;
-            }
-            if let Some(l) = update.allow_lan {
-                restart |= l != c.api.allow_lan;
-                c.api.allow_lan = l;
-            }
-            (destination_changed, keep_buffer_changed, restart)
-        })?;
+            return Err(e);
+        }
+    };
     if restart {
         st.shared.restart_required.store(true, Ordering::Relaxed);
     }
-    if destination_changed {
-        apply_destination(&st, &new_config)?;
-    }
+    // Another address, or the same one with a new key.
+    st.sync_destination()?;
     if keep_buffer_changed {
         st.relay().set_keep_history(new_config.delay.keep_buffer)?;
     }
     drop(lock);
     Ok(Json(public_config(&st)))
-}
-
-fn apply_destination(st: &AppState, c: &Config) -> Result<(), ApiError> {
-    let dest = st.destination(c);
-    info!(?dest, "destination updated");
-    st.relay().set_destination(dest)?;
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,7 +328,7 @@ async fn set_key(
     // For the destination in the settings file, like the key field it is typed in.
     dest_key::save(st.shared.secrets.as_ref(), &st.saved_destination_url(), key)
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    apply_destination(&st, &st.config())?;
+    st.sync_destination()?;
     st.shared.config_tx.send_modify(|_| {});
     drop(lock);
     Ok(Json(public_config(&st)))
@@ -319,7 +340,7 @@ async fn delete_key(State(st): State<AppState>) -> Result<Json<PublicConfig>, Ap
         .secrets
         .delete(secret::DESTINATION_KEY)
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    apply_destination(&st, &st.config())?;
+    st.sync_destination()?;
     st.shared.config_tx.send_modify(|_| {});
     drop(lock);
     Ok(Json(public_config(&st)))
@@ -375,5 +396,139 @@ mod tests {
         assert_eq!(v["scope"], "admin");
         assert!(v["config"]["ingest"]["key"].is_null());
         assert_eq!(v["urls"]["obs_key"], "ingest-secret");
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use http_body_util::BodyExt;
+    use streamdelay_config::{MemorySecrets, SecretStore};
+    use streamdelay_relay::{DestinationKey, RelayConfig};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    const TOKEN: &str = "0123456789abcdef";
+
+    async fn setup(
+        path: Option<std::path::PathBuf>,
+    ) -> (AppState, axum::Router, Arc<MemorySecrets>) {
+        let relay = streamdelay_relay::start(RelayConfig {
+            ingest_bind: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mut config = Config::default();
+        config.api.token = TOKEN.into();
+        let secrets = Arc::new(MemorySecrets::default());
+        let st = crate::state(relay, config, secrets.clone(), 7788, path);
+        (st.clone(), crate::routes::router(st), secrets)
+    }
+
+    async fn call(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, String) {
+        let r = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:7788")
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(r).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into())
+    }
+
+    fn dest(url: &str) -> String {
+        format!(r#"{{"destination":{{"service":"custom","url":"{url}","key_mode":"stored"}}}}"#)
+    }
+
+    fn applied_key(st: &AppState) -> Option<String> {
+        match st.shared.applied_destination.lock().unwrap().clone()?.key {
+            DestinationKey::Fixed(k) => Some(k),
+            DestinationKey::Passthrough => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_key_in_the_same_url_reaches_the_relay() {
+        let (st, app, _) = setup(None).await;
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/api/v1/config",
+            &dest("rtmp://live.twitch.tv/app/live_1_a"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(applied_key(&st).as_deref(), Some("live_1_a"));
+        // Only the key changes: the address in the settings stays the same.
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/api/v1/config",
+            &dest("rtmp://live.twitch.tv/app/live_1_b"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(applied_key(&st).as_deref(), Some("live_1_b"));
+        // And through the key field.
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/api/v1/destination/key",
+            r#"{"key":"live_1_c"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(applied_key(&st).as_deref(), Some("live_1_c"));
+        let (s, _) = call(&app, "DELETE", "/api/v1/destination/key", "").await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(applied_key(&st).as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn a_change_that_cannot_be_saved_keeps_the_key_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let (st, app, secrets) = setup(Some(path.clone())).await;
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/api/v1/destination/key",
+            r#"{"key":"live_1_a"}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let saved = secrets.get(secret::DESTINATION_KEY).unwrap();
+        // From now on the settings file cannot be written.
+        std::fs::create_dir(dir.path().join("config.toml.tmp")).unwrap();
+        for update in [
+            // Another server: the key would be forgotten.
+            dest("rtmp://ingest.example.net/live"),
+            // A new key in the URL: it would replace the saved one.
+            dest("rtmp://live.twitch.tv/app/live_1_b"),
+        ] {
+            let (s, body) = call(&app, "PUT", "/api/v1/config", &update).await;
+            assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+            assert!(body.contains("nothing was changed"), "{body}");
+            assert_eq!(
+                secrets.get(secret::DESTINATION_KEY).as_deref(),
+                Some(saved.as_str())
+            );
+            assert_eq!(st.config().destination.url, "rtmp://live.twitch.tv/app");
+            assert_eq!(applied_key(&st).as_deref(), Some("live_1_a"));
+        }
     }
 }

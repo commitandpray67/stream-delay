@@ -448,3 +448,71 @@ async fn unreachable_obs_is_reported_not_fatal() {
     assert_eq!(s, StatusCode::BAD_GATEWAY);
     assert!(r["error"].as_str().unwrap().contains("WebSocket"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_wizard_steps_never_mix_up_two_obs() {
+    let (app, a, secrets, _dir) = setup().await;
+    let (b, b_port) = spawn_obs(
+        "rtmp_common",
+        json!({"service": "Twitch", "server": "auto", "key": "live_2_other"}),
+    )
+    .await;
+    a.lock().unwrap().auth = true;
+    b.lock().unwrap().auth = true;
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    let a_port = cfg["config"]["obs"]["port"].as_u64().unwrap();
+    let b_port = u64::from(b_port);
+    let connect = |port: u64, password: &str| json!({"host": "127.0.0.1", "port": port, "password": password});
+    // What each OBS receives when given its own password.
+    call(
+        &app,
+        "POST",
+        "/api/v1/obs/connect",
+        Some(connect(b_port, "pass-b")),
+    )
+    .await;
+    call(
+        &app,
+        "POST",
+        "/api/v1/obs/connect",
+        Some(connect(a_port, "pass-a")),
+    )
+    .await;
+    let auth_a = a.lock().unwrap().auth_seen.last().cloned().unwrap();
+    let auth_b = b.lock().unwrap().auth_seen.last().cloned().unwrap();
+    assert_ne!(auth_a, auth_b);
+
+    for _ in 0..20 {
+        let (ra, rb) = tokio::join!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/obs/connect",
+                Some(connect(a_port, "pass-a"))
+            ),
+            call(
+                &app,
+                "POST",
+                "/api/v1/obs/connect",
+                Some(connect(b_port, "pass-b"))
+            ),
+        );
+        assert_eq!(ra.0, StatusCode::OK, "{}", ra.1);
+        assert_eq!(rb.0, StatusCode::OK, "{}", rb.1);
+        // Whichever OBS the settings name now gets its own password.
+        let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+        let port = cfg["config"]["obs"]["port"].as_u64().unwrap();
+        let (s, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(status["reachable"], true, "{status}");
+        let (obs, want) = if port == a_port {
+            (&a, &auth_a)
+        } else {
+            (&b, &auth_b)
+        };
+        assert_eq!(obs.lock().unwrap().auth_seen.last().unwrap(), want);
+        let saved: Value =
+            serde_json::from_str(&secrets.get(secret::OBS_PASSWORD).unwrap()).unwrap();
+        assert_eq!(saved["obs"], format!("127.0.0.1:{port}"));
+    }
+}
