@@ -4627,6 +4627,7 @@ name = "streamdelay-relay"
 version = "0.2.0"
 dependencies = [
  "bytes",
+ "proptest",
  "rustls",
  "serde",
  "socket2",

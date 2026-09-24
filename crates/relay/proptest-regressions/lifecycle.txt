@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 86bf9fc6e0020c700fed79b9bdb609fed93fd08da53d06844bbaf0ca1c4fcd88 # shrinks to steps = [(Publish { takeover: false }, Facts { destination: false, has_mark: false, end_reached: false, backlog_empty: false, drained: false, has_buffered: false, output_wanted: false, connected: false, delay: 0ns }), (Leave { stopped: false }, Facts { destination: false, has_mark: false, end_reached: false, backlog_empty: false, drained: false, has_buffered: false, output_wanted: false, connected: false, delay: 0ns }), (EndNow, Facts { destination: false, has_mark: false, end_reached: false, backlog_empty: false, drained: false, has_buffered: false, output_wanted: false, connected: false, delay: 0ns }), (Publish { takeover: false }, Facts { destination: false, has_mark: false, end_reached: false, backlog_empty: false, drained: false, has_buffered: false, output_wanted: false, connected: false, delay: 0ns })]

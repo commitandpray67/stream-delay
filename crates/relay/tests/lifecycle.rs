@@ -779,3 +779,41 @@ async fn small_kept_messages_cannot_hold_more_memory_than_the_buffer_may_use() {
     );
     p.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_stream_while_a_restarts_previous_end_airs_ends_after_it() {
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(10)).await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(3)).await;
+    let last = p.frame - 1;
+    p.stop().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // OBS starts again while the first stream's end airs, and the streamer
+    // clicks End stream: the first end airs, and nothing of the new stream does.
+    let mut next = Publisher::connect(relay.ingest_addr(), "x").await;
+    next.base = 100_000;
+    next.stream_for(Duration::from_millis(500)).await;
+    relay.end_stream_after_air().await.unwrap();
+    assert!(relay.state().ending);
+    next.stream_for(Duration::from_secs(5)).await;
+    wait_until("the stream ended", Duration::from_secs(3), || {
+        relay.state().ended
+    })
+    .await;
+    {
+        let l = log.lock().unwrap();
+        assert_eq!(l.connections, 1, "a new broadcast started after End stream");
+        assert_eq!(l.unpublished, 1);
+        let ids = aired(&l);
+        assert_consecutive(&ids);
+        assert_eq!(
+            *ids.last().unwrap(),
+            last,
+            "the first stream's end did not air"
+        );
+    }
+    next.stop().await;
+    relay.shutdown().await;
+}

@@ -11,6 +11,7 @@ mod core;
 mod egress;
 mod ingest;
 mod io;
+mod lifecycle;
 
 use std::fmt;
 use std::net::SocketAddr;
