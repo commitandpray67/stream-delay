@@ -6,6 +6,7 @@
 //! header for the first chunk of a message, which every RTMP peer accepts.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use thiserror::Error;
@@ -37,6 +38,113 @@ const ARENA_BLOCK: usize = 1024 * 1024;
 const ARENA_MAX_MESSAGE: usize = ARENA_BLOCK / 2;
 /// Unused blocks kept for reuse; any beyond this go back to the allocator.
 const MAX_SPARE_BLOCKS: usize = 4;
+/// With the pool at its limit, bytes of messages allocated one by one before
+/// looking for a free block again (looking scans every block in use).
+const RETRY_AFTER: usize = ARENA_BLOCK / 4;
+
+/// The blocks complete messages are copied into (see `ARENA_BLOCK`), shared by
+/// every decoder feeding the same buffer: one per ingest connection.
+///
+/// A block stays allocated for as long as any message in it is kept, so one
+/// small message kept for minutes holds a whole block, whatever became of the
+/// messages around it. The pool bounds how many blocks can be in use at once,
+/// across connections (closed ones included, since what they sent may still be
+/// buffered). Past the limit, messages are allocated one by one, which costs
+/// about their own size, until blocks free up.
+#[derive(Clone)]
+pub struct ArenaPool(Arc<Mutex<Pool>>);
+
+struct Pool {
+    /// Full blocks, oldest first (the unused rest of each), kept to be reused
+    /// once no message uses them any more.
+    retired: VecDeque<BytesMut>,
+    /// Blocks decoders are filling.
+    active: usize,
+    /// Blocks allocated so far (the rest were reused).
+    allocated: usize,
+    max_blocks: usize,
+}
+
+impl ArenaPool {
+    /// A pool whose blocks in use hold at most about `max_bytes`.
+    pub fn new(max_bytes: usize) -> Self {
+        Self(Arc::new(Mutex::new(Pool {
+            retired: VecDeque::new(),
+            active: 0,
+            allocated: 0,
+            max_blocks: (max_bytes / ARENA_BLOCK).max(1),
+        })))
+    }
+
+    /// A pool without a limit (a decoder's own, unless given a shared one).
+    pub fn unlimited() -> Self {
+        Self::new(usize::MAX)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Pool> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Bytes held by blocks that messages may still be using.
+    pub fn bytes_in_use(&self) -> usize {
+        let mut p = self.lock();
+        let free = p
+            .retired
+            .iter_mut()
+            .map(|b| b.try_reclaim(ARENA_BLOCK))
+            .filter(|&reclaimed| reclaimed)
+            .count();
+        (p.active + p.retired.len() - free) * ARENA_BLOCK
+    }
+
+    /// Blocks allocated so far.
+    pub fn blocks_allocated(&self) -> usize {
+        self.lock().allocated
+    }
+
+    /// Retires `full` (a decoder's block, or none) and returns a block to copy
+    /// messages into: a retired one no message uses any more, or a new one while
+    /// fewer than the limit are in use. `None` at the limit.
+    fn next_block(&self, full: Option<BytesMut>) -> Option<BytesMut> {
+        let mut p = self.lock();
+        if let Some(full) = full {
+            p.active -= 1;
+            p.retired.push_back(full);
+        }
+        let mut reuse = None;
+        let mut spare = 0;
+        // `try_reclaim` succeeds only for a block this handle alone still refers to.
+        p.retired.retain_mut(|b| {
+            if !b.try_reclaim(ARENA_BLOCK) {
+                return true;
+            }
+            if reuse.is_none() {
+                reuse = Some(std::mem::take(b));
+                return false;
+            }
+            spare += 1;
+            spare <= MAX_SPARE_BLOCKS
+        });
+        let block = match reuse {
+            Some(b) => b,
+            // Every retired block is in use.
+            None if p.active + p.retired.len() < p.max_blocks => {
+                p.allocated += 1;
+                BytesMut::with_capacity(ARENA_BLOCK)
+            }
+            None => return None,
+        };
+        p.active += 1;
+        Some(block)
+    }
+
+    /// Takes back the block a decoder was filling when it went away.
+    fn give_back(&self, block: BytesMut) {
+        let mut p = self.lock();
+        p.active -= 1;
+        p.retired.push_back(block);
+    }
+}
 const EXTENDED: u32 = 0x00FF_FFFF;
 
 /// A complete RTMP message.
@@ -92,13 +200,11 @@ pub struct ChunkDecoder {
     /// Sum of `partial.len()` over all streams.
     pending: usize,
     /// Unused rest of the current block that complete messages are copied into
-    /// (none until the first message).
+    /// (none until the first message, or while the pool is at its limit).
     arena: Option<BytesMut>,
-    /// Full blocks, oldest first (the unused rest of each), kept to be reused
-    /// once no message uses them any more.
-    retired: VecDeque<BytesMut>,
-    /// Blocks allocated so far (the rest were reused).
-    blocks_allocated: usize,
+    pool: ArenaPool,
+    /// See `RETRY_AFTER`.
+    retry_after: usize,
     /// Largest audio or video message accepted.
     max_media_len: usize,
     /// Largest message of any other type (commands, metadata, control).
@@ -119,8 +225,8 @@ impl ChunkDecoder {
             buf: BytesMut::new(),
             pending: 0,
             arena: None,
-            retired: VecDeque::new(),
-            blocks_allocated: 0,
+            pool: ArenaPool::unlimited(),
+            retry_after: 0,
             max_media_len: usize::MAX,
             max_other_len: usize::MAX,
         }
@@ -132,6 +238,16 @@ impl ChunkDecoder {
     pub fn set_max_message_len(&mut self, media: usize, other: usize) {
         self.max_media_len = media;
         self.max_other_len = other;
+    }
+
+    /// Copies messages into blocks from `pool`, shared with other decoders, from
+    /// now on.
+    pub fn set_arena_pool(&mut self, pool: ArenaPool) {
+        if let Some(block) = self.arena.take() {
+            self.pool.give_back(block);
+        }
+        self.pool = pool;
+        self.retry_after = 0;
     }
 
     pub fn push(&mut self, data: &[u8]) {
@@ -323,20 +439,26 @@ impl ChunkDecoder {
         if st.partial.len() >= st.length as usize {
             st.in_progress = false;
             self.pending -= st.partial.len();
-            let payload = if st.partial.len() <= ARENA_MAX_MESSAGE {
-                let arena = match &mut self.arena {
-                    Some(a) if a.capacity() >= st.partial.len() => a,
-                    slot => {
-                        let full = slot.take();
-                        let block = next_block(&mut self.retired, full, &mut self.blocks_allocated);
-                        slot.insert(block)
-                    }
-                };
-                arena.extend_from_slice(&st.partial);
-                release(&mut st.partial);
-                arena.split().freeze()
+            let len = st.partial.len();
+            let arena = if len <= ARENA_MAX_MESSAGE {
+                arena_with_room(&mut self.arena, &self.pool, &mut self.retry_after, len)
             } else {
-                st.partial.split().freeze()
+                None
+            };
+            let payload = match arena {
+                Some(arena) => {
+                    arena.extend_from_slice(&st.partial);
+                    release(&mut st.partial);
+                    arena.split().freeze()
+                }
+                // The pool is at its limit: a copy of its own, exactly its size.
+                None if len <= ARENA_MAX_MESSAGE => {
+                    self.retry_after = self.retry_after.saturating_sub(len.max(1));
+                    let payload = Bytes::copy_from_slice(&st.partial);
+                    release(&mut st.partial);
+                    payload
+                }
+                None => st.partial.split().freeze(),
             };
             return Ok(ChunkResult::Complete(Message {
                 csid,
@@ -350,32 +472,35 @@ impl ChunkDecoder {
     }
 }
 
-/// Retires the full block `full` and returns one to copy messages into: a retired
-/// block no message uses any more, or a new one.
-fn next_block(
-    retired: &mut VecDeque<BytesMut>,
-    full: Option<BytesMut>,
-    allocated: &mut usize,
-) -> BytesMut {
-    retired.extend(full);
-    let mut reuse = None;
-    let mut spare = 0;
-    // `try_reclaim` succeeds only for a block this handle alone still refers to.
-    retired.retain_mut(|b| {
-        if !b.try_reclaim(ARENA_BLOCK) {
-            return true;
+/// The current block if it has room for `len` more bytes, else a new one from
+/// `pool` (the full one goes back to it). `None` while the pool is at its limit;
+/// it is asked again once `RETRY_AFTER` bytes were allocated on their own.
+fn arena_with_room<'a>(
+    arena: &'a mut Option<BytesMut>,
+    pool: &ArenaPool,
+    retry_after: &mut usize,
+    len: usize,
+) -> Option<&'a mut BytesMut> {
+    if !arena.as_ref().is_some_and(|a| a.capacity() >= len) {
+        if *retry_after > 0 {
+            return None;
         }
-        if reuse.is_none() {
-            reuse = Some(std::mem::take(b));
-            return false;
+        *arena = pool.next_block(arena.take());
+        if arena.is_none() {
+            *retry_after = RETRY_AFTER;
         }
-        spare += 1;
-        spare <= MAX_SPARE_BLOCKS
-    });
-    reuse.unwrap_or_else(|| {
-        *allocated += 1;
-        BytesMut::with_capacity(ARENA_BLOCK)
-    })
+    }
+    arena.as_mut()
+}
+
+impl Drop for ChunkDecoder {
+    fn drop(&mut self) {
+        // What this connection sent may still be buffered: its block stays
+        // counted until no message uses it.
+        if let Some(block) = self.arena.take() {
+            self.pool.give_back(block);
+        }
+    }
 }
 
 /// Empties a message buffer for reuse. One larger than a block is freed instead:
@@ -828,16 +953,60 @@ mod tests {
         // Three or four blocks hold the four messages kept at any time; 20 would
         // be allocated without reuse.
         assert!(
-            dec.blocks_allocated <= 4,
+            dec.pool.blocks_allocated() <= 4,
             "{} blocks allocated",
-            dec.blocks_allocated
+            dec.pool.blocks_allocated()
         );
-        assert!(dec.retired.len() <= 4 + MAX_SPARE_BLOCKS);
+        assert!(dec.pool.lock().retired.len() <= 4 + MAX_SPARE_BLOCKS);
         // Messages still in use are never overwritten.
         for m in &kept {
             let first = m.payload[0];
             assert!(m.payload.iter().all(|b| *b == first));
         }
+    }
+
+    #[test]
+    fn a_shared_pool_bounds_blocks_held_by_small_kept_messages() {
+        // A tiny message kept, and two large ones dropped right away, filling a
+        // block each time: without a limit, each tiny message would hold a block.
+        let pool = ArenaPool::new(4 * ARENA_BLOCK);
+        let mut kept = Vec::new();
+        for connection in 0..2u32 {
+            let mut enc = ChunkEncoder::new();
+            enc.set_chunk_size(64 * 1024);
+            let mut dec = ChunkDecoder::new();
+            dec.set_chunk_size(64 * 1024).unwrap();
+            dec.set_arena_pool(pool.clone());
+            for i in 0..50u32 {
+                let mut out = BytesMut::new();
+                enc.write(&mut out, 4, i, 8, 1, &[0x2f, i as u8]);
+                enc.write(&mut out, 6, i, 15, 1, &vec![1u8; 524_288]);
+                enc.write(&mut out, 6, i, 15, 1, &vec![2u8; 524_286]);
+                dec.push(&out);
+                while let Some(m) = dec.next_message().unwrap() {
+                    if m.type_id == 8 {
+                        kept.push((connection, i, m));
+                    }
+                }
+                assert!(
+                    pool.bytes_in_use() <= 4 * ARENA_BLOCK,
+                    "{} bytes of blocks in use",
+                    pool.bytes_in_use()
+                );
+            }
+            // The next connection's decoder shares the limit with this one, whose
+            // blocks stay counted while its messages are kept.
+        }
+        assert_eq!(kept.len(), 100);
+        for (_, i, m) in &kept {
+            assert_eq!(&m.payload[..], &[0x2f, *i as u8]);
+        }
+        drop(kept);
+        assert_eq!(
+            pool.bytes_in_use(),
+            0,
+            "blocks free again once nothing is kept"
+        );
     }
 
     #[test]

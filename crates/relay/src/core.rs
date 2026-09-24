@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use streamdelay_engine::{Engine, EngineError, Kind, OutMsg};
-use streamdelay_rtmp::RtmpUrl;
 use streamdelay_rtmp::amf0::Amf0Value;
+use streamdelay_rtmp::{ArenaPool, RtmpUrl};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
@@ -88,14 +88,21 @@ pub(crate) struct IngestTx {
     events: mpsc::UnboundedSender<Event>,
     budget: Arc<Semaphore>,
     budget_bytes: usize,
+    /// Blocks every ingest connection copies messages into; see [`ArenaPool`].
+    pub(crate) arena: ArenaPool,
 }
 
 impl IngestTx {
-    pub(crate) fn new(events: mpsc::UnboundedSender<Event>, budget_bytes: usize) -> Self {
+    pub(crate) fn new(
+        events: mpsc::UnboundedSender<Event>,
+        budget_bytes: usize,
+        arena: ArenaPool,
+    ) -> Self {
         Self {
             events,
             budget: Arc::new(Semaphore::new(budget_bytes)),
             budget_bytes,
+            arena,
         }
     }
 
@@ -858,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn media_waits_for_room_in_the_queue_budget() {
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
-        let ingest = IngestTx::new(tx, 1000);
+        let ingest = IngestTx::new(tx, 1000, ArenaPool::unlimited());
         // Two messages of 372 bytes (500 with their overhead) fill it.
         let a = ingest.reserve(372).await.unwrap();
         let b = ingest.reserve(372).await.unwrap();

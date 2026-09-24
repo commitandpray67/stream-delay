@@ -754,3 +754,28 @@ async fn a_destination_repeating_the_stream_key_never_gets_it_shown() {
     assert!(!format!("{:?}", relay.state()).contains("DoNotShowThis"));
     p.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn small_kept_messages_cannot_hold_more_memory_than_the_buffer_may_use() {
+    // Tiny audio messages the buffer keeps, each followed by two large messages
+    // the relay drops, which fill the rest of a 1 MiB block. Each tiny message
+    // would otherwise keep its whole block allocated.
+    let (sink, _log, _kill) = start_sink().await;
+    let mut config = relay_config(sink, key(), Duration::from_secs(5));
+    config.engine.ram_cap_bytes = 4 * 1024 * 1024;
+    let relay = start_relay_with(config).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    for i in 0..100u8 {
+        p.send_audio_and_junk(&[0xaf, 0x01, i], 2, 524_280).await;
+    }
+    // Everything has been taken in once the buffer holds the last message.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let limit = 4 * 1024 * 1024 + 32 * 1024 * 1024;
+    let held = relay.ingest_block_bytes();
+    assert!(held <= limit, "{held} bytes held, limit {limit}");
+    assert!(
+        relay.state().delay.buffered_bytes > 0,
+        "the audio is still kept"
+    );
+    p.stop().await;
+}

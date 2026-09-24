@@ -333,6 +333,18 @@ impl Publisher {
         }
     }
 
+    /// Sends one audio message with `payload`, and `n` data messages of `size`
+    /// bytes that the relay drops (their first value does not decode).
+    pub async fn send_audio_and_junk(&mut self, payload: &[u8], n: usize, size: usize) {
+        let ts = self.started.elapsed().as_millis() as u32;
+        self.session.send_media(MediaKind::Audio, ts, payload);
+        for i in 0..n {
+            self.session.send_data(ts, &vec![0xff - i as u8; size]);
+        }
+        let o = self.session.take_output();
+        self.tcp.write_all(&o).await.unwrap();
+    }
+
     /// When frame `id` (including `base`) was captured.
     pub fn captured_at(&self, id: u32) -> Instant {
         self.started + Duration::from_millis(u64::from(id - self.base) * 33)

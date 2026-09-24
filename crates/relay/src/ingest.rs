@@ -311,6 +311,7 @@ async fn handle(
         .await
         .map_err(|_| not_publishing())??;
     let mut session = ServerSession::new(ServerConfig::default());
+    session.set_arena_pool(events.arena.clone());
     let mut connect_props: Vec<(String, Amf0Value)> = Vec::new();
     let mut unwrap = [TsUnwrapper::new(), TsUnwrapper::new(), TsUnwrapper::new()];
     let mut publishing = false;

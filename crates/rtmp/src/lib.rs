@@ -11,6 +11,6 @@ pub mod session;
 pub mod ts;
 pub mod url;
 
-pub use chunk::{ChunkDecoder, ChunkEncoder, Message};
+pub use chunk::{ArenaPool, ChunkDecoder, ChunkEncoder, Message};
 pub use session::{ClientEvent, ClientSession, MediaKind, ServerEvent, ServerSession};
 pub use url::RtmpUrl;

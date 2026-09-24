@@ -183,12 +183,20 @@ pub struct RelayHandle {
     control: mpsc::UnboundedSender<Control>,
     state: watch::Receiver<RelayState>,
     ingest_addr: SocketAddr,
+    arena: streamdelay_rtmp::ArenaPool,
 }
 
 impl RelayHandle {
     /// The address the ingest server is listening on.
     pub fn ingest_addr(&self) -> SocketAddr {
         self.ingest_addr
+    }
+
+    /// Memory held by the blocks received messages are kept in (see
+    /// [`streamdelay_rtmp::ArenaPool`]): at most the buffer's RAM cap plus the
+    /// ingest queue budget.
+    pub fn ingest_block_bytes(&self) -> usize {
+        self.arena.bytes_in_use()
     }
 
     pub async fn command(&self, cmd: Command) -> Result<Ack, RelayError> {
@@ -315,10 +323,18 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     };
     let (state_tx, state_rx) = watch::channel(initial);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Blocks for what the buffer keeps and what waits for the core: whatever
+    // pattern of messages a publisher sends, they cannot hold more.
+    let arena = streamdelay_rtmp::ArenaPool::new(
+        config
+            .engine
+            .ram_cap_bytes
+            .saturating_add(core::INGEST_QUEUE_BUDGET),
+    );
     tokio::spawn(ingest::listen(
         listener,
         config.publish_timeout,
-        core::IngestTx::new(events_tx.clone(), core::INGEST_QUEUE_BUDGET),
+        core::IngestTx::new(events_tx.clone(), core::INGEST_QUEUE_BUDGET, arena.clone()),
         shutdown_rx,
     ));
     tokio::spawn(core::run(
@@ -334,5 +350,6 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
         control: control_tx,
         state: state_rx,
         ingest_addr,
+        arena,
     })
 }

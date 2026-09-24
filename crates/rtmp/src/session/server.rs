@@ -81,6 +81,12 @@ impl ServerSession {
         }
     }
 
+    /// Copies received messages into blocks from `pool`, shared with other
+    /// sessions; see [`crate::ArenaPool`].
+    pub fn set_arena_pool(&mut self, pool: crate::ArenaPool) {
+        self.link.decoder.set_arena_pool(pool);
+    }
+
     pub fn app(&self) -> &str {
         &self.app
     }
