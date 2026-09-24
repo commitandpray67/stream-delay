@@ -28,6 +28,10 @@ jobs:
     env:
       # The sanitizers need nightly; rust-toolchain.toml would otherwise pick stable.
       RUSTUP_TOOLCHAIN: nightly
+      # cargo-fuzz builds for the target it was itself built for, and the one the
+      # install action provides is a static musl binary; the address sanitizer
+      # needs glibc.
+      TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
@@ -43,14 +47,14 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - name: Build
-        run: cargo fuzz build
+        run: cargo fuzz build --target "$TARGET"
       - name: Fuzz
         env:
           PER_TARGET: ${{ inputs.seconds || (github.event_name == 'pull_request' && '60') || '300' }}
         run: |
           for t in $(cargo fuzz list); do
             echo "::group::$t"
-            cargo fuzz run "$t" -- -max_total_time="$PER_TARGET"
+            cargo fuzz run --target "$TARGET" "$t" -- -max_total_time="$PER_TARGET"
             echo "::endgroup::"
           done
       - name: Upload crashing inputs

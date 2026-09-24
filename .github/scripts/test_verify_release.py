@@ -156,8 +156,35 @@ class Release(unittest.TestCase):
         self.fails("windows-x86_64-nsis")
 
     def test_every_platform_is_offered(self):
-        self.edit_manifest(lambda m: m["platforms"].pop("darwin-x86_64"))
-        self.fails("no update for darwin-x86_64")
+        original = (self.root / "latest.json").read_text()
+        for platform in v.PLATFORMS:
+            with self.subTest(platform):
+                (self.root / "latest.json").write_text(original)
+                self.edit_manifest(lambda m: m["platforms"].pop(platform))
+                self.fails(f"no update for {platform}")
+
+    def test_installer_specific_entries_are_checked(self):
+        # Installed copies ask for these before the plain "<os>-<arch>" ones.
+        original = (self.root / "latest.json").read_text()
+        appimage = f"https://github.com/{REPO}/releases/download/{TAG}/stream-delay_{VERSION}_amd64.AppImage"
+        for platform in ["linux-x86_64-deb", "linux-x86_64-rpm", "windows-x86_64-msi", "darwin-aarch64-app"]:
+            for edit in [
+                lambda m: m["platforms"][platform].update(url="https://example.invalid/wrong"),
+                lambda m: m["platforms"][platform].update(url=appimage),
+                lambda m: m["platforms"][platform].update(signature="invalid"),
+            ]:
+                with self.subTest(platform):
+                    (self.root / "latest.json").write_text(original)
+                    self.edit_manifest(edit)
+                    self.fails(platform)
+
+    def test_unknown_entries_are_refused(self):
+        self.edit_manifest(
+            lambda m: m["platforms"].update(
+                {"linux-aarch64": {"url": "https://example.invalid/x", "signature": "x"}}
+            )
+        )
+        self.fails("does not know: linux-aarch64")
 
     def test_the_manifest_offers_this_version(self):
         self.edit_manifest(lambda m: m.update(version="1.2.2"))

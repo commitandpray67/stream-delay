@@ -10,7 +10,8 @@
         DIR holds every asset of release TAG (for example v0.3.0) of REPOSITORY
         (owner/name): all installers and headless archives are there, every
         updater bundle is signed with PUBKEY, and latest.json offers the version
-        to every platform with those signatures, each downloaded from exactly
+        in every entry installed copies may use (and no other), with those
+        signatures, each downloaded from exactly
         https://github.com/REPOSITORY/releases/download/TAG/<file>.
 
 Signatures are minisign signatures, which Tauri produces. Only the Python
@@ -202,13 +203,22 @@ SIGNED = [
 ]
 INSTALLERS = SIGNED + ["stream-delay_{v}_universal.dmg"]
 
-# Every platform installed copies ask for, and the bundle it must get.
+# Every entry installed copies may use, and the bundle it must give. An installed
+# copy asks for "<os>-<arch>-<installer>" first (how it was installed: deb, rpm,
+# appimage, msi, nsis, app), then for "<os>-<arch>", so both kinds are checked,
+# and no other entry is accepted.
 PLATFORMS = {
     "linux-x86_64": "stream-delay_{v}_amd64.AppImage",
+    "linux-x86_64-appimage": "stream-delay_{v}_amd64.AppImage",
+    "linux-x86_64-deb": "stream-delay_{v}_amd64.deb",
+    "linux-x86_64-rpm": "stream-delay-{v}-1.x86_64.rpm",
     "windows-x86_64": "stream-delay_{v}_x64_en-US.msi",
+    "windows-x86_64-msi": "stream-delay_{v}_x64_en-US.msi",
     "windows-x86_64-nsis": "stream-delay_{v}_x64-setup.exe",
     "darwin-aarch64": "stream-delay_universal.app.tar.gz",
+    "darwin-aarch64-app": "stream-delay_universal.app.tar.gz",
     "darwin-x86_64": "stream-delay_universal.app.tar.gz",
+    "darwin-x86_64-app": "stream-delay_universal.app.tar.gz",
 }
 
 
@@ -231,6 +241,9 @@ def check_release(root: Path, tag: str, repository: str, key):
     if manifest.get("version") != version:
         raise Invalid(f"latest.json offers version {manifest.get('version')!r}, not {version}")
     platforms = manifest.get("platforms") or {}
+    unexpected = sorted(set(platforms) - set(PLATFORMS))
+    if unexpected:
+        raise Invalid("latest.json has entries this check does not know: " + ", ".join(unexpected))
     for platform, bundle in PLATFORMS.items():
         bundle = bundle.format(v=version)
         entry = platforms.get(platform)
