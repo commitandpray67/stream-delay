@@ -6,11 +6,12 @@
         made with the key in the PUBKEY environment variable (the content of
         TAURI_UPDATER_PUBKEY). Used by dry runs, on what each platform built.
 
-    verify_release.py release DIR VERSION
-        DIR holds every asset of release VERSION (for example 0.3.0): all
-        installers and headless archives are there, every updater bundle is
-        signed with PUBKEY, and latest.json offers VERSION to every platform with
-        those signatures.
+    verify_release.py release DIR TAG REPOSITORY
+        DIR holds every asset of release TAG (for example v0.3.0) of REPOSITORY
+        (owner/name): all installers and headless archives are there, every
+        updater bundle is signed with PUBKEY, and latest.json offers the version
+        to every platform with those signatures, each downloaded from exactly
+        https://github.com/REPOSITORY/releases/download/TAG/<file>.
 
 Signatures are minisign signatures, which Tauri produces. Only the Python
 standard library is used, so the check runs on any runner as it is.
@@ -211,7 +212,8 @@ PLATFORMS = {
 }
 
 
-def check_release(root: Path, version: str, key):
+def check_release(root: Path, tag: str, repository: str, key):
+    version = tag.removeprefix("v")
     names = {p.name for p in root.iterdir() if p.is_file()}
     expected = [f"streamdelayd-v{version}-{t}" for t in HEADLESS]
     expected += [n.format(v=version) for n in INSTALLERS]
@@ -234,8 +236,9 @@ def check_release(root: Path, version: str, key):
         entry = platforms.get(platform)
         if not entry:
             raise Invalid(f"latest.json has no update for {platform}")
-        if entry.get("url", "").rsplit("/", 1)[-1] != bundle:
-            raise Invalid(f"latest.json points {platform} at {entry.get('url')!r}, not {bundle}")
+        url = f"https://github.com/{repository}/releases/download/{tag}/{bundle}"
+        if entry.get("url") != url:
+            raise Invalid(f"latest.json points {platform} at {entry.get('url')!r}, not {url}")
         if entry.get("signature", "").strip() != (root / f"{bundle}.sig").read_text().strip():
             raise Invalid(f"latest.json has another signature for {platform} than {bundle}.sig")
     print(f"ok  latest.json offers {version} to {', '.join(PLATFORMS)}")
@@ -246,8 +249,8 @@ def main(argv) -> int:
         if len(argv) == 3 and argv[1] == "signatures":
             n = check_signatures(Path(argv[2]), key_from_env())
             print(f"{n} signatures verified")
-        elif len(argv) == 4 and argv[1] == "release":
-            check_release(Path(argv[2]), argv[3].removeprefix("v"), key_from_env())
+        elif len(argv) == 5 and argv[1] == "release":
+            check_release(Path(argv[2]), argv[3], argv[4], key_from_env())
         else:
             print(__doc__, file=sys.stderr)
             return 2

@@ -330,7 +330,7 @@ jobs:
           rm -f all/SHA256SUMS.txt
           # Every installer and archive, update signatures made with the project's
           # key, and latest.json offering this version to every platform.
-          python3 .github/scripts/verify_release.py release all "${{ github.ref_name }}"
+          python3 .github/scripts/verify_release.py release all "${{ github.ref_name }}" "${{ github.repository }}"
       - name: Add checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

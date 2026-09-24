@@ -40,6 +40,14 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
+  release-scripts:
+    name: Release checks (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Test the release verifier
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
   rust:
     name: Rust (${{ matrix.os }})
     strategy:
