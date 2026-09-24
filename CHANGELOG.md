@@ -50,9 +50,19 @@ All notable changes to stream-delay are listed here. The format follows
   up when a stream starts or reconnects, and says what the delay really is when
   the buffer was too short for the one asked for. Its badge shows the delay you
   set rather than one stretched by a keyframe.
+- The desktop app's log file starts again at 16 MB, keeping the full one as
+  `stream-delay.1.log`, instead of growing for as long as the app runs.
 
 ### Fixed
 
+- **Dump buffer also throws away what was queued for a slow upload.** When the
+  upload had fallen behind, up to about 10 s already handed to the connection
+  to Twitch still aired after a dump. Now the connection is dropped and made
+  again at once (viewers see a short interruption), and the dump masks instead
+  of rewinding, since what Twitch had received is unknown.
+- On Linux, memory no longer creeps up over hours of streaming: the buffer's
+  blocks are always returned to the system when freed. Before, the process
+  could hold about twice the buffered video after a few hours.
 - The OBS setup wizard took an OBS at this computer's own network address (the
   one OBS's WebSocket settings show) for one on another computer: it offered to
   set up an OBS that already streamed to stream-delay, then refused.
@@ -74,6 +84,10 @@ All notable changes to stream-delay are listed here. The format follows
 - OBS setup wizard steps run one at a time, and the saved OBS password and
   settings backup are stored with the OBS they belong to: two steps at once
   (two tabs) could pair one OBS's password with another's address.
+- Saving a secret no longer loses the previous one when the keychain accepts the
+  new value but the private file cannot be updated: the keychain gets its old
+  value back. A file that cannot be read now stops the save before the keychain
+  is touched.
 
 ### Security
 
@@ -105,10 +119,20 @@ All notable changes to stream-delay are listed here. The format follows
   you**: their access list names only your account and inherits nothing from
   the folder. They used to take the folder's permissions, which a custom
   settings location could leave open to others.
+- **Error messages about a damaged settings or secrets file no longer quote it.**
+  The parser's message showed the offending line, which could hold the API
+  token or a stream key, in logs and on screen; it now gives the line number
+  and the reason only.
+- **What an encoder sends before giving the stream key is kept out of logs**
+  beyond 64 characters, a second `connect` on one connection is refused, and
+  log lines kept for diagnostics are capped at 2 KB: one connection could make
+  stream-delay keep megabytes of text of its choosing.
 - **Releases:** a tag builds nothing unless CI passes on that commit and the
   versions and changelog match it; releases require the updater keys; every
   asset and update signature is checked before the checksums are added, and
-  every update is offered from this release's own GitHub URLs; and the
+  every update, including the entries for each kind of installation (deb, rpm,
+  AppImage, MSI, setup, app), is offered from this release's own GitHub URLs;
+  every installer is installed and started on clean machines; and the
   container image is pushed only once the release is published. v0.2.0 lost
   three of its command-line archives and its `SHA256SUMS.txt` to a packaging
   bug, now fixed.
