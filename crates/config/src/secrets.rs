@@ -7,13 +7,19 @@ use std::sync::Mutex;
 
 use tracing::{debug, warn};
 
-use crate::write_private;
+use crate::replace_private;
 
 const SERVICE: &str = "dev.stream-delay";
 
 /// Where secrets are kept.
 pub trait SecretStore: Send + Sync {
+    /// The value, or `None` if there is none or it cannot be read.
     fn get(&self, name: &str) -> Option<String>;
+    /// Like [`SecretStore::get`], but tells a value that cannot be read (an error)
+    /// from no value (`Ok(None)`).
+    fn try_get(&self, name: &str) -> Result<Option<String>, String> {
+        Ok(self.get(name))
+    }
     fn set(&self, name: &str, value: &str) -> Result<(), String>;
     fn delete(&self, name: &str) -> Result<(), String>;
     /// Human-readable description, for the UI.
@@ -31,15 +37,27 @@ pub trait Keychain: Send + Sync {
 
 /// Keychain-backed store that falls back to a private file.
 ///
-/// A value is in one of the two places. When the keychain refuses a write, the
-/// value goes to the file, and the file then takes precedence: reads look there
-/// first, so an older copy the keychain still holds never comes back. A value
-/// written to the keychain is removed from the file. Deleting fails unless both
-/// copies are gone.
+/// Each value is kept in one place. When the keychain refuses a value, it goes
+/// to the file, which reads look at first; an older copy the keychain still
+/// holds is removed, and if that fails the value is not saved at all, so an
+/// outdated one can never come back from the keychain later. A value the
+/// keychain takes is removed from the file. Deleting fails, changing nothing,
+/// unless the keychain copy could be removed.
+///
+/// The file is replaced whole on every write (see [`replace_private`]). One that
+/// no longer parses is moved aside to `secrets.toml.damaged`, for recovery,
+/// rather than overwritten.
 pub struct Secrets {
     keychain: Option<Box<dyn Keychain>>,
     file: PathBuf,
     lock: Mutex<()>,
+}
+
+/// What the secrets file holds.
+enum FileState {
+    Readable(BTreeMap<String, String>),
+    /// It exists but does not parse.
+    Damaged(String),
 }
 
 impl Secrets {
@@ -63,18 +81,41 @@ impl Secrets {
         }
     }
 
-    /// The file's secrets. One that cannot be parsed counts as empty (nothing in
-    /// it can be read back either) and is replaced on the next write; one that
-    /// cannot be read is an error, as it may hold a value that must not be
-    /// shadowed or kept.
-    fn read_file(&self) -> Result<BTreeMap<String, String>, String> {
+    /// The file's content. An error if it cannot be read at all.
+    fn read_file(&self) -> Result<FileState, String> {
         match fs::read_to_string(&self.file) {
-            Ok(t) => Ok(toml::from_str(&t).unwrap_or_else(|e| {
-                warn!("ignoring unreadable {}: {e}", self.file.display());
-                BTreeMap::new()
-            })),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Ok(t) => Ok(match toml::from_str(&t) {
+                Ok(map) => FileState::Readable(map),
+                Err(e) => FileState::Damaged(e.to_string()),
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(FileState::Readable(BTreeMap::new()))
+            }
             Err(e) => Err(format!("{}: {e}", self.file.display())),
+        }
+    }
+
+    /// The file's secrets, to change and write back. A damaged file is moved
+    /// aside first; one that cannot be read is an error.
+    fn load_for_write(&self) -> Result<BTreeMap<String, String>, String> {
+        match self.read_file()? {
+            FileState::Readable(map) => Ok(map),
+            FileState::Damaged(why) => {
+                let mut aside = self.file.as_os_str().to_owned();
+                aside.push(".damaged");
+                fs::rename(&self.file, &aside).map_err(|e| {
+                    format!(
+                        "{} is damaged ({why}) and could not be moved aside: {e}",
+                        self.file.display()
+                    )
+                })?;
+                warn!(
+                    "{} was damaged ({why}); it was moved to {} and a new one started",
+                    self.file.display(),
+                    PathBuf::from(aside).display()
+                );
+                Ok(BTreeMap::new())
+            }
         }
     }
 
@@ -83,69 +124,104 @@ impl Secrets {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let text = toml::to_string(map).map_err(|e| e.to_string())?;
-        write_private(&self.file, text.as_bytes()).map_err(|e| e.to_string())
+        replace_private(&self.file, text.as_bytes()).map_err(|e| e.to_string())
     }
 
     /// Removes `name` from the file, if it is there.
     fn remove_from_file(&self, name: &str) -> Result<(), String> {
-        let mut map = self.read_file()?;
+        let mut map = self.load_for_write()?;
         if map.remove(name).is_some() {
             self.write_file(&map)?;
         }
         Ok(())
     }
+
+    fn get_locked(&self, name: &str) -> Result<Option<String>, String> {
+        let file_error = match self.read_file() {
+            Ok(FileState::Readable(map)) => match map.get(name) {
+                Some(v) => return Ok(Some(v.clone())),
+                None => None,
+            },
+            // Nothing in it is readable; values are kept in one place only, so the
+            // keychain holds none of what it held.
+            Ok(FileState::Damaged(why)) => {
+                Some(format!("{} is damaged: {why}", self.file.display()))
+            }
+            Err(e) => Some(e),
+        };
+        let from_keychain = match &self.keychain {
+            Some(k) => k.get(name).map_err(|e| format!("keychain: {e}"))?,
+            None => None,
+        };
+        match (from_keychain, file_error) {
+            (Some(v), _) => Ok(Some(v)),
+            (None, Some(e)) => Err(e),
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 impl SecretStore for Secrets {
     fn get(&self, name: &str) -> Option<String> {
-        let _g = self.lock.lock().ok()?;
-        match self.read_file() {
-            Ok(map) => {
-                if let Some(v) = map.get(name) {
-                    return Some(v.clone());
-                }
-            }
-            // Unreadable: the keychain may still hold the current value.
-            Err(e) => warn!("could not read the secrets file: {e}"),
-        }
-        match self.keychain.as_ref()?.get(name) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("could not read {name} from the keychain: {e}");
-                None
-            }
-        }
+        self.try_get(name).unwrap_or_else(|e| {
+            warn!("could not read {name}: {e}");
+            None
+        })
+    }
+
+    fn try_get(&self, name: &str) -> Result<Option<String>, String> {
+        let _g = self.lock.lock().map_err(|e| e.to_string())?;
+        self.get_locked(name)
     }
 
     fn set(&self, name: &str, value: &str) -> Result<(), String> {
         let _g = self.lock.lock().map_err(|e| e.to_string())?;
         if let Some(k) = &self.keychain {
             match k.set(name, value) {
-                // A copy left in the file would take precedence over this one.
-                Ok(()) => return self.remove_from_file(name),
+                Ok(()) => {
+                    // A copy left in the file would take precedence over this one.
+                    if let Err(e) = self.remove_from_file(name) {
+                        // Undo, so the file's value stays the one in effect.
+                        if let Err(undo) = k.delete(name) {
+                            warn!("could not undo saving {name} to the keychain: {undo}");
+                        }
+                        return Err(e);
+                    }
+                    return Ok(());
+                }
                 Err(e) => warn!("keychain write failed ({e}); using the private file"),
             }
         }
-        let mut map = self.read_file()?;
+        let mut map = self.load_for_write()?;
+        let before = map.clone();
         map.insert(name.into(), value.into());
         self.write_file(&map)?;
-        if let Some(k) = &self.keychain
-            && let Err(e) = k.delete(name)
-        {
-            // Harmless: the file copy takes precedence.
-            warn!("could not remove the older copy of {name} from the keychain: {e}");
+        if let Some(k) = &self.keychain {
+            // Two copies must not be kept: the older one would come back if the
+            // file were ever lost. Keep the old state if it cannot be removed.
+            let older = k.get(name).map(|v| v.is_some());
+            if older != Ok(false)
+                && let Err(e) = k.delete(name)
+            {
+                if let Err(undo) = self.write_file(&before) {
+                    warn!("could not undo saving {name} to the private file: {undo}");
+                }
+                return Err(format!(
+                    "the keychain refused it and still holds an older copy that could not be removed: {e}"
+                ));
+            }
         }
         Ok(())
     }
 
     fn delete(&self, name: &str) -> Result<(), String> {
         let _g = self.lock.lock().map_err(|e| e.to_string())?;
-        self.remove_from_file(name)?;
+        // The keychain first: if that fails, nothing has changed.
         if let Some(k) = &self.keychain {
             k.delete(name)
                 .map_err(|e| format!("could not remove it from the keychain: {e}"))?;
         }
-        Ok(())
+        self.remove_from_file(name)
     }
 
     fn describe(&self) -> String {
@@ -325,33 +401,60 @@ mod tests {
     }
 
     #[test]
-    fn a_value_written_to_the_file_wins_over_an_older_keychain_copy() {
+    fn a_value_is_never_kept_in_two_places() {
+        use std::sync::atomic::Ordering::Relaxed;
         let dir = tempfile::tempdir().unwrap();
         let (s, k) = flaky(dir.path());
         s.set("k", "old").unwrap();
-        // The keychain refuses the new value, and even removing the old one.
-        k.fail_set.store(true, std::sync::atomic::Ordering::Relaxed);
-        k.fail_delete
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // The keychain refuses the new value and cannot remove the old one:
+        // nothing is saved, rather than two copies.
+        k.fail_set.store(true, Relaxed);
+        k.fail_delete.store(true, Relaxed);
+        assert!(s.set("k", "new").is_err());
+        assert_eq!(s.get("k").as_deref(), Some("old"));
+        // It can remove the old one: the new value goes to the file alone.
+        k.fail_delete.store(false, Relaxed);
         s.set("k", "new").unwrap();
         assert_eq!(s.get("k").as_deref(), Some("new"));
-        // Deleting must remove both copies, or say it could not.
-        assert!(s.delete("k").is_err());
-        assert_eq!(s.get("k").as_deref(), Some("old"));
-        // The keychain works again: a new value there replaces the file copy.
-        k.fail_set
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        k.fail_delete
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(k.get("k").unwrap(), None);
+        // So losing the file can never bring the old value back.
+        fs::write(dir.path().join("secrets.toml"), "not = [toml").unwrap();
+        assert_eq!(s.get("k"), None);
+        assert!(
+            s.try_get("k").is_err(),
+            "a damaged file is an error, not an empty one"
+        );
+        // The keychain works again: the damaged file is set aside, not lost.
+        k.fail_set.store(false, Relaxed);
         s.set("k", "newest").unwrap();
         assert_eq!(s.get("k").as_deref(), Some("newest"));
-        assert!(
-            !fs::read_to_string(dir.path().join("secrets.toml"))
-                .unwrap()
-                .contains("new")
+        assert_eq!(
+            fs::read_to_string(dir.path().join("secrets.toml.damaged")).unwrap(),
+            "not = [toml"
         );
+        // Deleting fails, changing nothing, unless the keychain copy goes.
+        k.fail_delete.store(true, Relaxed);
+        assert!(s.delete("k").is_err());
+        assert_eq!(s.get("k").as_deref(), Some("newest"));
+        k.fail_delete.store(false, Relaxed);
         s.delete("k").unwrap();
         assert_eq!(s.get("k"), None);
+        assert_eq!(s.try_get("k"), Ok(None));
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_file_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Secrets::new(dir.path(), false);
+        s.set("a", "1").unwrap();
+        // Where the new file is written first: a folder, so writing fails.
+        fs::create_dir(dir.path().join("secrets.toml.tmp")).unwrap();
+        assert!(s.set("b", "2").is_err());
+        assert_eq!(s.get("a").as_deref(), Some("1"));
+        assert_eq!(s.get("b"), None);
+        fs::remove_dir(dir.path().join("secrets.toml.tmp")).unwrap();
+        s.set("b", "2").unwrap();
+        assert_eq!(s.get("b").as_deref(), Some("2"));
     }
 
     #[test]

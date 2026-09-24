@@ -354,10 +354,21 @@ impl Config {
             fs::create_dir_all(dir).map_err(err)?;
         }
         let text = toml::to_string_pretty(self).expect("config always serializes");
-        let tmp = path.with_extension("toml.tmp");
-        write_private(&tmp, text.as_bytes()).map_err(err)?;
-        fs::rename(&tmp, path).map_err(err)
+        replace_private(path, text.as_bytes()).map_err(err)
     }
+}
+
+/// Replaces `path` with a private file holding `data` (see [`write_private`]):
+/// written next to it first and then moved into place, so a crash or a full disk
+/// leaves either the old file or the new one, never a partial one.
+pub(crate) fn replace_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    write_private(&tmp, data)?;
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
 }
 
 /// Generates a random 128-bit API token.
@@ -387,7 +398,8 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
         // which also fails (so nothing is changed) if another user owns it.
         f.set_permissions(fs::Permissions::from_mode(0o600))?;
         f.set_len(0)?;
-        f.write_all(data)
+        f.write_all(data)?;
+        f.sync_all()
     }
     #[cfg(windows)]
     {
@@ -403,7 +415,8 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
             .open(path)?;
         windows_acl::restrict_to_current_user(&f)?;
         f.set_len(0)?;
-        f.write_all(data)
+        f.write_all(data)?;
+        f.sync_all()
     }
     #[cfg(not(any(unix, windows)))]
     {
