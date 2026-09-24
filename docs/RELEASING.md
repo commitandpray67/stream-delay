@@ -5,22 +5,24 @@ Releases are built by [`.github/workflows/release.yml`](../.github/workflows/rel
 - Desktop installers from `tauri-action`: Windows NSIS and MSI, a universal macOS DMG/app, and Linux AppImage, deb and rpm.
 - Headless `streamdelayd` archives for Linux (x86_64, aarch64), Windows and macOS (Apple Silicon, Intel).
 - `latest.json` and update bundles signed with the project's updater key (below). A tag build fails without the key rather than release an app that could never update.
-- `SHA256SUMS.txt` covering every asset. It is added last, after [`verify_release.py`](../.github/scripts/verify_release.py) has checked the draft: every installer and headless archive is there, every update bundle's signature verifies against `TAURI_UPDATER_PUBKEY`, and `latest.json` offers this version to every platform with those signatures, each downloaded from exactly `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. CI runs the verifier's own tests on every push. A draft without `SHA256SUMS.txt` failed that check: see the workflow run before publishing anything.
+- `SHA256SUMS.txt` covering every asset. It is added last, after [`verify_release.py`](../.github/scripts/verify_release.py) has checked the draft: every installer and headless archive is there, every update bundle's signature verifies against `TAURI_UPDATER_PUBKEY`, and `latest.json` offers this version to every platform with those signatures, each downloaded from exactly `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. CI runs the verifier's own tests on every push. Then [`smoke_desktop.py`](../.github/scripts/smoke_desktop.py) installs the draft's installers on clean Ubuntu 22.04, Ubuntu 24.04, Windows and macOS machines, as users would (the deb with apt, which also checks its dependencies; the AppImage; the setup `.exe` and the MSI; the app from the DMG and from the update bundle), starts each, and checks that it reports this version, serves the dashboard with the web UI, accepts RTMP connections and opens its window. A draft without `SHA256SUMS.txt` failed one of these checks: see the workflow run before publishing anything.
 
 Review the draft, then publish it **as a normal release, not a pre-release**: the app looks for updates at `releases/latest`, which skips pre-releases. Say "beta" in the notes instead.
 
 Publishing it runs [`publish-image.yml`](../.github/workflows/publish-image.yml), which pushes the multi-arch container image `ghcr.io/<owner>/stream-delay:<version>` (and `:edge`), packaged from the release's Linux archives after checking them against its `SHA256SUMS.txt`. Nothing is public before you publish. To push an image again, run that workflow by hand with the tag.
 
-**Dry run:** a push to `main` or a `claude/**` branch that changes the release workflow, its verification script, `Dockerfile.release` or `tauri.conf.json` runs the same builds without publishing anything. The installers and binaries are attached to the workflow run as artifacts (Actions → the run → Artifacts), which is also a quick way to get a test build. Dry runs sign update bundles with a key generated for that run, never the real one, and verify every signature against it, so their installers cannot update to or from real releases.
+**Dry run:** a push to `main` or a `claude/**` branch that changes the release workflow, its verification script, `Dockerfile.release` or `tauri.conf.json` runs the same builds and install tests without publishing anything. The installers and binaries are attached to the workflow run as artifacts (Actions → the run → Artifacts), which is also a quick way to get a test build. Dry runs sign update bundles with a key generated for that run, never the real one, and verify every signature against it, so their installers cannot update to or from real releases.
 
 ## Checklist
 
 1. Update `version` in `Cargo.toml` (workspace), `apps/desktop/src-tauri/tauri.conf.json`, `ui/package.json` and `apps/desktop/package.json`. MSI installers need a plain `x.y.z` version.
 2. Make sure CI is green on `main`, including the end-to-end job, and the last release dry run passed. (The release runs CI again on the tagged commit.)
-3. Test on a real Twitch account with `?bandwidthtest=true` on each OS you can reach, following [`docs/testing.md`](testing.md), and run the 12-hour soak (`DURATION=43200 tests/soak/run.sh`).
+3. Run the 12-hour soak (`DURATION=43200 tests/soak/run.sh`) on the release commit's `streamdelayd`.
 4. Move the `Unreleased` section of `CHANGELOG.md` under the new version and date.
 5. `git tag v0.x.y && git push origin v0.x.y`.
-6. When the workflow has finished, check that the draft has `SHA256SUMS.txt` (see above). Paste the changelog entry into the draft release notes, then publish (not as a pre-release). The container image follows.
+6. When the workflow has finished, check that the draft has `SHA256SUMS.txt` (see above).
+7. Install the draft's installers and test on a real Twitch account with `?bandwidthtest=true` on each OS you can reach, following [`docs/testing.md`](testing.md). Nothing is public yet: if something is wrong, delete the draft and the tag, fix it, and tag again.
+8. Paste the changelog entry into the draft release notes, then publish (not as a pre-release). The container image follows.
 
 ## One-time setup
 

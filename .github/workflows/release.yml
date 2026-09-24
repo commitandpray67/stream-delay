@@ -2,14 +2,17 @@ name: Release
 
 # Push a tag like v0.1.0 to build installers and headless binaries. The tag's
 # commit must pass CI first. Everything lands in a draft GitHub release, which is
-# checked (every asset there, every update signed with the project's key) before
-# its checksums are added; publish it as a normal release (not a pre-release),
-# since the updater only looks at the latest full release. Publishing it pushes
-# the container image (publish-image.yml): nothing is public before that.
+# checked (every asset there, every update signed with the project's key), and
+# whose installers are installed and started on clean machines, before its
+# checksums are added: a draft without SHA256SUMS.txt failed a check. Publish it
+# as a normal release (not a pre-release), since the updater only looks at the
+# latest full release. Publishing it pushes the container image
+# (publish-image.yml): nothing is public before that.
 #
 # Pushes to main or claude/** that touch the release setup run the same builds as
 # a dry run: installers and binaries are uploaded as artifacts of the workflow run
-# (downloadable from its page) and nothing is published.
+# (downloadable from its page), installed and started the same way, and nothing
+# is published.
 #
 # The signing secrets (updater key, Apple credentials) belong in the `release`
 # environment, which only v* tags may use (docs/RELEASING.md). A branch push can
@@ -22,6 +25,7 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - ".github/scripts/verify_release.py"
+      - ".github/scripts/smoke_desktop.py"
       - "Dockerfile.release"
       - "apps/desktop/src-tauri/tauri.conf.json"
   workflow_dispatch:
@@ -232,6 +236,7 @@ jobs:
             ${{ matrix.bundle }}/**/*.AppImage
             ${{ matrix.bundle }}/**/*.deb
             ${{ matrix.bundle }}/**/*.rpm
+            ${{ matrix.bundle }}/**/*.app.tar.gz
             ${{ matrix.bundle }}/**/*.sig
           if-no-files-found: error
       - name: Check update signatures
@@ -297,7 +302,7 @@ jobs:
           if-no-files-found: error
 
   publish-headless:
-    name: Attach binaries and checksums
+    name: Attach binaries and check the release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [desktop, headless]
     permissions:
@@ -331,6 +336,78 @@ jobs:
           # Every installer and archive, update signatures made with the project's
           # key, and latest.json offering this version to every platform.
           python3 .github/scripts/verify_release.py release all "${{ github.ref_name }}" "${{ github.repository }}"
+      # What was checked, for the install test and the checksums.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: all
+          retention-days: 7
+          if-no-files-found: error
+
+  # Installs the installers as users do, on machines that have none of the build
+  # tools, and starts the installed app (.github/scripts/smoke_desktop.py).
+  smoke:
+    name: Install and start (${{ matrix.name }})
+    needs: [desktop-dry-run, publish-headless]
+    # A dry run skips publish-headless, a release desktop-dry-run.
+    if: ${{ !failure() && !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Ubuntu 22.04, os: ubuntu-22.04, artifact: desktop-Linux }
+          - { name: Ubuntu 24.04, os: ubuntu-24.04, artifact: desktop-Linux }
+          - { name: Windows, os: windows-latest, artifact: desktop-Windows }
+          - { name: macOS, os: macos-latest, artifact: desktop-macOS }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: This dry run's installers
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ matrix.artifact }}
+          path: installers
+      - name: The draft release's installers
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: installers
+      - name: A display and session bus
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb dbus-x11
+      - name: Install and start
+        shell: bash
+        run: |
+          # The version the installers must report.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' apps/desktop/src-tauri/tauri.conf.json)
+          fi
+          case "$RUNNER_OS" in
+            Linux) xvfb-run -a dbus-run-session -- python3 .github/scripts/smoke_desktop.py installers "$version" ;;
+            # python3 can be the Microsoft Store placeholder.
+            Windows) python .github/scripts/smoke_desktop.py installers "$version" ;;
+            *) python3 .github/scripts/smoke_desktop.py installers "$version" ;;
+          esac
+
+  checksums:
+    name: Add checksums
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [smoke]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: all
       - name: Add checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
