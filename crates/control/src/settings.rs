@@ -7,15 +7,16 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use streamdelay_config::{
-    Config, DelayConfig, DestinationConfig, HotkeyConfig, OverlayConfig, SERVICES, secret,
+    Config, DelayConfig, DestinationConfig, HotkeyConfig, OverlayConfig, SERVICES,
 };
 use streamdelay_relay::RtmpUrl;
 use tracing::info;
 
+use crate::AppState;
 use crate::app::{Urls, different_server, split_url_key, urls};
 use crate::auth::Scope;
+use crate::changes::KeyChange;
 use crate::routes::ApiError;
-use crate::{AppState, dest_key};
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -198,112 +199,85 @@ fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// What applying a [`SettingsUpdate`] changed that the settings file does not
+/// cover.
+struct Applied {
+    keep_buffer_changed: bool,
+    /// Takes effect at the next start.
+    restart: bool,
+}
+
+impl SettingsUpdate {
+    fn apply(&self, c: &mut Config) -> Applied {
+        let mut applied = Applied {
+            keep_buffer_changed: false,
+            restart: false,
+        };
+        if let Some(d) = &self.destination {
+            c.destination = d.clone();
+        }
+        if let Some(d) = &self.delay {
+            applied.restart |=
+                d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
+            applied.keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
+            c.delay = d.clone();
+        }
+        if let Some(o) = &self.overlay {
+            c.overlay = o.clone();
+        }
+        if let Some(h) = &self.hotkeys {
+            c.hotkeys = h.clone();
+        }
+        if let Some(g) = self.grace_seconds {
+            applied.restart |= g != c.ingest.grace_seconds;
+            c.ingest.grace_seconds = g;
+        }
+        if let Some(l) = self.allow_lan {
+            applied.restart |= l != c.api.allow_lan;
+            c.api.allow_lan = l;
+        }
+        applied
+    }
+}
+
 async fn update_config(
     State(st): State<AppState>,
     Json(mut update): Json<SettingsUpdate>,
 ) -> Result<Json<PublicConfig>, ApiError> {
-    // One change at a time, from the stream key to the relay: a concurrent one
-    // could otherwise pair a key with the wrong destination.
+    // One change at a time, from reading the settings to the relay: a concurrent
+    // one could otherwise pair a key with the wrong destination.
     let lock = st.lock_settings();
     validate(&update, &st.config()).map_err(ApiError::bad_request)?;
-    // A key typed into the URL (rtmp://host/app/<key>) is stored like one entered
-    // in the key field, so the URL shown to the UI and saved in config.toml never
-    // contains it.
-    let mut url_key = None;
+    let mut key = KeyChange::Keep;
     if let Some(d) = &mut update.destination {
-        let (url, key) = split_url_key(&d.url);
+        // A key typed into the URL (rtmp://host/app/<key>) is stored like one
+        // entered in the key field, so the URL shown to the UI and saved in
+        // config.toml never contains it.
+        let (url, url_key) = split_url_key(&d.url);
         d.url = url;
-        url_key = key;
+        if let Some(k) = url_key {
+            key = KeyChange::Save {
+                server: d.url.clone(),
+                key: k,
+            };
+        } else if different_server(&st.saved_destination_url(), &d.url) {
+            // The saved key belongs to the destination in the settings file (the
+            // one in effect may be a command-line override), and is never sent to
+            // another server: it is forgotten too, and if that fails, nothing
+            // changes.
+            key = KeyChange::Forget;
+        }
     }
-    // The stored key belongs to the destination in the settings file (the one in
-    // effect may be a command-line override).
-    let old_url = st.saved_destination_url();
-    let secret_err = |e: String| {
-        ApiError(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not update the saved stream key, so nothing was changed: {e}"),
-        )
-    };
-    let secrets = st.shared.secrets.as_ref();
-    let forget_key = update
-        .destination
-        .as_ref()
-        .is_some_and(|d| url_key.is_none() && different_server(&old_url, &d.url));
-    // The saved key as it was, to put back if the settings cannot be saved.
-    let key_before = if url_key.is_some() || forget_key {
-        Some(
-            secrets
-                .try_get(secret::DESTINATION_KEY)
-                .map_err(secret_err)?,
-        )
-    } else {
-        None
-    };
-    if let (Some(key), Some(d)) = (&url_key, &update.destination) {
-        dest_key::save(secrets, &d.url, key).map_err(secret_err)?;
-    } else if forget_key {
-        // The key is saved for the old server and is never sent to another one;
-        // it is forgotten too, and if that fails, nothing changes.
-        secrets
-            .delete(secret::DESTINATION_KEY)
-            .map_err(secret_err)?;
+    let forget = matches!(key, KeyChange::Forget);
+    let (config, applied) = st.change_settings_locked(&lock, key, |c| update.apply(c))?;
+    if forget {
         info!("destination server changed; the stored stream key was removed");
     }
-    let changed = st.change_config_locked(&lock, |c| {
-        let mut restart = false;
-        let mut keep_buffer_changed = false;
-        if let Some(d) = &update.destination {
-            c.destination = d.clone();
-        }
-        if let Some(d) = &update.delay {
-            restart |= d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
-            keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
-            c.delay = d.clone();
-        }
-        if let Some(o) = &update.overlay {
-            c.overlay = o.clone();
-        }
-        if let Some(h) = &update.hotkeys {
-            c.hotkeys = h.clone();
-        }
-        if let Some(g) = update.grace_seconds {
-            restart |= g != c.ingest.grace_seconds;
-            c.ingest.grace_seconds = g;
-        }
-        if let Some(l) = update.allow_lan {
-            restart |= l != c.api.allow_lan;
-            c.api.allow_lan = l;
-        }
-        (keep_buffer_changed, restart)
-    });
-    let (new_config, (keep_buffer_changed, restart)) = match changed {
-        Ok(changed) => changed,
-        Err(mut e) => {
-            // The settings stay as they were, so the saved key does too.
-            if let Some(before) = key_before {
-                let restored = match before {
-                    Some(raw) => secrets.set(secret::DESTINATION_KEY, &raw),
-                    None => secrets.delete(secret::DESTINATION_KEY),
-                };
-                if let Err(r) = restored {
-                    tracing::error!("could not put the saved stream key back: {r}");
-                    e.1 = format!(
-                        "{} The saved stream key had already been changed and could not be \
-                         put back ({r}): enter it again on the Setup tab.",
-                        e.1
-                    );
-                }
-            }
-            return Err(e);
-        }
-    };
-    if restart {
+    if applied.restart {
         st.shared.restart_required.store(true, Ordering::Relaxed);
     }
-    // Another address, or the same one with a new key.
-    st.sync_destination()?;
-    if keep_buffer_changed {
-        st.relay().set_keep_history(new_config.delay.keep_buffer)?;
+    if applied.keep_buffer_changed {
+        st.relay().set_keep_history(config.delay.keep_buffer)?;
     }
     drop(lock);
     Ok(Json(public_config(&st)))
@@ -318,31 +292,12 @@ async fn set_key(
     State(st): State<AppState>,
     Json(body): Json<KeyBody>,
 ) -> Result<Json<PublicConfig>, ApiError> {
-    let key = body.key.trim();
-    if key.is_empty() || key.len() > 512 || key.chars().any(char::is_control) {
-        return Err(ApiError::bad_request(
-            "that does not look like a stream key",
-        ));
-    }
-    let lock = st.lock_settings();
-    // For the destination in the settings file, like the key field it is typed in.
-    dest_key::save(st.shared.secrets.as_ref(), &st.saved_destination_url(), key)
-        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    st.sync_destination()?;
-    st.shared.config_tx.send_modify(|_| {});
-    drop(lock);
+    st.save_destination_key(&body.key)?;
     Ok(Json(public_config(&st)))
 }
 
 async fn delete_key(State(st): State<AppState>) -> Result<Json<PublicConfig>, ApiError> {
-    let lock = st.lock_settings();
-    st.shared
-        .secrets
-        .delete(secret::DESTINATION_KEY)
-        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    st.sync_destination()?;
-    st.shared.config_tx.send_modify(|_| {});
-    drop(lock);
+    st.forget_destination_key()?;
     Ok(Json(public_config(&st)))
 }
 
@@ -406,7 +361,7 @@ mod transaction_tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use http_body_util::BodyExt;
-    use streamdelay_config::{MemorySecrets, SecretStore};
+    use streamdelay_config::{MemorySecrets, SecretStore, secret};
     use streamdelay_relay::{DestinationKey, RelayConfig};
     use tower::ServiceExt;
 

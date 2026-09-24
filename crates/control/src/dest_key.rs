@@ -1,56 +1,47 @@
 //! The destination stream key. It is kept in the secret store together with the
-//! server it was saved for, and only ever used for that server: even if removing
-//! it fails when the destination changes, it cannot reach the new one.
+//! server it was saved for (see [`bound`]), and only ever used for that server:
+//! even if removing it fails when the destination changes, it cannot reach the
+//! new one.
 
-use serde::{Deserialize, Serialize};
-use streamdelay_config::{SecretStore, secret};
+use streamdelay_config::{SecretError, SecretStore, secret};
 
 use crate::app::{different_server, split_url_key};
+use crate::bound::{self, Saved};
 
-#[derive(Serialize, Deserialize)]
-struct Bound {
-    server: String,
-    key: String,
-}
-
-/// What the store holds: a key and the server it belongs to. `None` for the
-/// server means a plain key saved by an older version.
-fn read(secrets: &dyn SecretStore) -> Option<(Option<String>, String)> {
-    let raw = secrets.get(secret::DESTINATION_KEY)?;
-    Some(match serde_json::from_str::<Bound>(&raw) {
-        Ok(b) => (Some(b.server), b.key),
-        Err(_) => (None, raw),
-    })
+fn read(secrets: &dyn SecretStore) -> Option<Saved<String>> {
+    bound::load(secrets, secret::DESTINATION_KEY, Some)
 }
 
 /// Saves `key` for the server of the destination URL `server`.
-pub(crate) fn save(secrets: &dyn SecretStore, server: &str, key: &str) -> Result<(), String> {
-    let bound = Bound {
-        server: split_url_key(server).0,
-        key: key.to_string(),
-    };
-    let text = serde_json::to_string(&bound).map_err(|e| e.to_string())?;
-    secrets.set(secret::DESTINATION_KEY, &text)
+pub(crate) fn save(secrets: &dyn SecretStore, server: &str, key: &str) -> Result<(), SecretError> {
+    bound::save(
+        secrets,
+        secret::DESTINATION_KEY,
+        &split_url_key(server).0,
+        &key,
+    )
 }
 
 /// The saved key, if it belongs to `url`'s server. A plain key saved by an older
 /// version belongs to `legacy_server` (the destination in the settings file).
 pub(crate) fn for_url(secrets: &dyn SecretStore, url: &str, legacy_server: &str) -> Option<String> {
-    let (server, key) = read(secrets)?;
-    let server = server.as_deref().unwrap_or(legacy_server);
-    (!key.is_empty() && !different_server(server, url)).then_some(key)
+    let saved = read(secrets)?;
+    let server = saved.owner.as_deref().unwrap_or(legacy_server);
+    (!saved.value.is_empty() && !different_server(server, url)).then_some(saved.value)
 }
 
 /// The saved key whatever its server, for redaction.
 pub(crate) fn any(secrets: &dyn SecretStore) -> Option<String> {
-    read(secrets).map(|(_, key)| key).filter(|k| !k.is_empty())
+    read(secrets).map(|s| s.value).filter(|k| !k.is_empty())
 }
 
 /// Binds a plain key saved by an older version to `server`, the destination it
 /// was used for. Returns true if there was one.
-pub(crate) fn bind_legacy(secrets: &dyn SecretStore, server: &str) -> Result<bool, String> {
+pub(crate) fn bind_legacy(secrets: &dyn SecretStore, server: &str) -> Result<bool, SecretError> {
     match read(secrets) {
-        Some((None, key)) if !key.is_empty() => save(secrets, server, &key).map(|()| true),
+        Some(Saved { owner: None, value }) if !value.is_empty() => {
+            save(secrets, server, &value).map(|()| true)
+        }
         _ => Ok(false),
     }
 }

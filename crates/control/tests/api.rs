@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use std::sync::Arc;
 
-use streamdelay_config::{Config, Secrets};
+use streamdelay_config::{Config, SecretError, Secrets};
 use streamdelay_relay::RelayConfig;
 use tower::ServiceExt;
 
@@ -723,12 +723,12 @@ impl streamdelay_config::SecretStore for UnreliableStore {
     fn get(&self, name: &str) -> Option<String> {
         self.inner.get(name)
     }
-    fn set(&self, name: &str, value: &str) -> Result<(), String> {
+    fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
         self.inner.set(name, value)
     }
-    fn delete(&self, name: &str) -> Result<(), String> {
+    fn delete(&self, name: &str) -> Result<(), SecretError> {
         match *self.delete.lock().unwrap() {
-            "fail" => Err("the keychain is locked".into()),
+            "fail" => Err(SecretError::Keychain("the keychain is locked".into())),
             "ignore" => Ok(()),
             _ => self.inner.delete(name),
         }

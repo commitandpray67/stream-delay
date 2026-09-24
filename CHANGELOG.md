@@ -39,9 +39,10 @@ All notable changes to stream-delay are listed here. The format follows
   after it airs** (formerly *Air up to now, then go live*), and a **No delay**
   status (formerly **Live**).
 - **Stopping and restarting the stream in OBS before its end has aired** lets
-  the old broadcast finish, then starts a new one for the new stream. The old
-  broadcast used to carry on with no data while OBS was stopped, and Twitch
-  drops a connection that goes quiet for about 30 s.
+  the old broadcast finish, then starts a new one for the new stream (unless
+  you click **End stream** meanwhile). The old broadcast used to carry on with
+  no data while OBS was stopped, and Twitch drops a connection that goes quiet
+  for about 30 s.
 - The overlay's pop-up appears only when you change the delay, once the change
   is in effect ("Stream delay: 15 s", "Stream delay removed"). It no longer pops
   up when a stream starts or reconnects, and says what the delay really is when
@@ -59,7 +60,8 @@ All notable changes to stream-delay are listed here. The format follows
   takes effect anyway: the dashboard could show a new destination while the
   stream still went to the old one. Nothing changes, and the dashboard says why.
   Changes made at the same moment, and their stream keys, are applied one after
-  the other; a stream key the change had already saved or removed is put back.
+  the other; a stream key the change had already saved or removed (or the OBS
+  wizard had imported) is put back.
 - **A new stream key in an unchanged destination URL is used at once.** Before,
   the relay kept publishing with the old key until the next restart.
 - `secrets.toml` is replaced whole on every write, so a crash or a full disk can

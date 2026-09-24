@@ -243,8 +243,8 @@ async fn configure_imports_key_adds_overlay_and_restores() {
     // For Twitch only.
     let saved: serde_json::Value =
         serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
-    assert_eq!(saved["key"], "live_987_secret");
-    assert_eq!(saved["server"], "rtmp://live.twitch.tv/app");
+    assert_eq!(saved["value"], "live_987_secret");
+    assert_eq!(saved["for"], "rtmp://live.twitch.tv/app");
     assert!(!r.to_string().contains("live_987_secret"));
     let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
     assert_eq!(cfg["destination_key_set"], true);
@@ -513,6 +513,6 @@ async fn concurrent_wizard_steps_never_mix_up_two_obs() {
         assert_eq!(obs.lock().unwrap().auth_seen.last().unwrap(), want);
         let saved: Value =
             serde_json::from_str(&secrets.get(secret::OBS_PASSWORD).unwrap()).unwrap();
-        assert_eq!(saved["obs"], format!("127.0.0.1:{port}"));
+        assert_eq!(saved["for"], format!("127.0.0.1:{port}"));
     }
 }

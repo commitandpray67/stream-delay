@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use secrets::{Keychain, MemorySecrets, SecretStore, Secrets};
+pub use secrets::{Keychain, MemorySecrets, SecretError, SecretStore, Secrets};
 pub use streamdelay_engine::DelayMode;
 
 /// Names of stored secrets.

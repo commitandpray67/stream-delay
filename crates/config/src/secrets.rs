@@ -2,14 +2,37 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::replace_private;
 
 const SERVICE: &str = "dev.stream-delay";
+
+/// Why a secret could not be read, saved or removed.
+#[derive(Debug, Error)]
+pub enum SecretError {
+    /// The system keychain failed.
+    #[error("the system keychain: {0}")]
+    Keychain(String),
+    /// The secrets file could not be read or written.
+    #[error("{}: {source}", path.display())]
+    File { path: PathBuf, source: io::Error },
+    /// The secrets file exists but does not parse.
+    #[error("{} is damaged: {why}", path.display())]
+    Damaged { path: PathBuf, why: String },
+    /// The keychain refused a new value and still holds an older one that could
+    /// not be removed; keeping both would let the older one come back.
+    #[error(
+        "the system keychain refused it, and still holds an older copy that could not be \
+         removed ({0})"
+    )]
+    StaleCopy(String),
+}
 
 /// Where secrets are kept.
 pub trait SecretStore: Send + Sync {
@@ -17,16 +40,17 @@ pub trait SecretStore: Send + Sync {
     fn get(&self, name: &str) -> Option<String>;
     /// Like [`SecretStore::get`], but tells a value that cannot be read (an error)
     /// from no value (`Ok(None)`).
-    fn try_get(&self, name: &str) -> Result<Option<String>, String> {
+    fn try_get(&self, name: &str) -> Result<Option<String>, SecretError> {
         Ok(self.get(name))
     }
-    fn set(&self, name: &str, value: &str) -> Result<(), String>;
-    fn delete(&self, name: &str) -> Result<(), String>;
+    fn set(&self, name: &str, value: &str) -> Result<(), SecretError>;
+    fn delete(&self, name: &str) -> Result<(), SecretError>;
     /// Human-readable description, for the UI.
     fn describe(&self) -> String;
 }
 
-/// An OS credential store, as [`Secrets`] uses it.
+/// An OS credential store, as [`Secrets`] uses it. Its errors are the system's
+/// own messages.
 pub trait Keychain: Send + Sync {
     /// `Ok(None)` when there is no such entry.
     fn get(&self, name: &str) -> Result<Option<String>, String>;
@@ -81,34 +105,40 @@ impl Secrets {
         }
     }
 
+    fn lock(&self) -> MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn file_error(&self, source: io::Error) -> SecretError {
+        SecretError::File {
+            path: self.file.clone(),
+            source,
+        }
+    }
+
     /// The file's content. An error if it cannot be read at all.
-    fn read_file(&self) -> Result<FileState, String> {
+    fn read_file(&self) -> Result<FileState, SecretError> {
         match fs::read_to_string(&self.file) {
             Ok(t) => Ok(match toml::from_str(&t) {
                 Ok(map) => FileState::Readable(map),
                 Err(e) => FileState::Damaged(e.to_string()),
             }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 Ok(FileState::Readable(BTreeMap::new()))
             }
-            Err(e) => Err(format!("{}: {e}", self.file.display())),
+            Err(e) => Err(self.file_error(e)),
         }
     }
 
     /// The file's secrets, to change and write back. A damaged file is moved
     /// aside first; one that cannot be read is an error.
-    fn load_for_write(&self) -> Result<BTreeMap<String, String>, String> {
+    fn load_for_write(&self) -> Result<BTreeMap<String, String>, SecretError> {
         match self.read_file()? {
             FileState::Readable(map) => Ok(map),
             FileState::Damaged(why) => {
                 let mut aside = self.file.as_os_str().to_owned();
                 aside.push(".damaged");
-                fs::rename(&self.file, &aside).map_err(|e| {
-                    format!(
-                        "{} is damaged ({why}) and could not be moved aside: {e}",
-                        self.file.display()
-                    )
-                })?;
+                fs::rename(&self.file, &aside).map_err(|e| self.file_error(e))?;
                 warn!(
                     "{} was damaged ({why}); it was moved to {} and a new one started",
                     self.file.display(),
@@ -119,16 +149,19 @@ impl Secrets {
         }
     }
 
-    fn write_file(&self, map: &BTreeMap<String, String>) -> Result<(), String> {
+    fn write_file(&self, map: &BTreeMap<String, String>) -> Result<(), SecretError> {
         if let Some(dir) = self.file.parent() {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            fs::create_dir_all(dir).map_err(|e| self.file_error(e))?;
         }
-        let text = toml::to_string(map).map_err(|e| e.to_string())?;
-        replace_private(&self.file, text.as_bytes()).map_err(|e| e.to_string())
+        let text = toml::to_string(map).map_err(|e| SecretError::Damaged {
+            path: self.file.clone(),
+            why: e.to_string(),
+        })?;
+        replace_private(&self.file, text.as_bytes()).map_err(|e| self.file_error(e))
     }
 
     /// Removes `name` from the file, if it is there.
-    fn remove_from_file(&self, name: &str) -> Result<(), String> {
+    fn remove_from_file(&self, name: &str) -> Result<(), SecretError> {
         let mut map = self.load_for_write()?;
         if map.remove(name).is_some() {
             self.write_file(&map)?;
@@ -136,7 +169,7 @@ impl Secrets {
         Ok(())
     }
 
-    fn get_locked(&self, name: &str) -> Result<Option<String>, String> {
+    fn get_locked(&self, name: &str) -> Result<Option<String>, SecretError> {
         let file_error = match self.read_file() {
             Ok(FileState::Readable(map)) => match map.get(name) {
                 Some(v) => return Ok(Some(v.clone())),
@@ -144,13 +177,14 @@ impl Secrets {
             },
             // Nothing in it is readable; values are kept in one place only, so the
             // keychain holds none of what it held.
-            Ok(FileState::Damaged(why)) => {
-                Some(format!("{} is damaged: {why}", self.file.display()))
-            }
+            Ok(FileState::Damaged(why)) => Some(SecretError::Damaged {
+                path: self.file.clone(),
+                why,
+            }),
             Err(e) => Some(e),
         };
         let from_keychain = match &self.keychain {
-            Some(k) => k.get(name).map_err(|e| format!("keychain: {e}"))?,
+            Some(k) => k.get(name).map_err(SecretError::Keychain)?,
             None => None,
         };
         match (from_keychain, file_error) {
@@ -169,13 +203,13 @@ impl SecretStore for Secrets {
         })
     }
 
-    fn try_get(&self, name: &str) -> Result<Option<String>, String> {
-        let _g = self.lock.lock().map_err(|e| e.to_string())?;
+    fn try_get(&self, name: &str) -> Result<Option<String>, SecretError> {
+        let _g = self.lock();
         self.get_locked(name)
     }
 
-    fn set(&self, name: &str, value: &str) -> Result<(), String> {
-        let _g = self.lock.lock().map_err(|e| e.to_string())?;
+    fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        let _g = self.lock();
         if let Some(k) = &self.keychain {
             match k.set(name, value) {
                 Ok(()) => {
@@ -206,20 +240,17 @@ impl SecretStore for Secrets {
                 if let Err(undo) = self.write_file(&before) {
                     warn!("could not undo saving {name} to the private file: {undo}");
                 }
-                return Err(format!(
-                    "the keychain refused it and still holds an older copy that could not be removed: {e}"
-                ));
+                return Err(SecretError::StaleCopy(e));
             }
         }
         Ok(())
     }
 
-    fn delete(&self, name: &str) -> Result<(), String> {
-        let _g = self.lock.lock().map_err(|e| e.to_string())?;
+    fn delete(&self, name: &str) -> Result<(), SecretError> {
+        let _g = self.lock();
         // The keychain first: if that fails, nothing has changed.
         if let Some(k) = &self.keychain {
-            k.delete(name)
-                .map_err(|e| format!("could not remove it from the keychain: {e}"))?;
+            k.delete(name).map_err(SecretError::Keychain)?;
         }
         self.remove_from_file(name)
     }
@@ -240,21 +271,24 @@ pub struct MemorySecrets {
     map: Mutex<BTreeMap<String, String>>,
 }
 
+impl MemorySecrets {
+    fn map(&self) -> MutexGuard<'_, BTreeMap<String, String>> {
+        self.map.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 impl SecretStore for MemorySecrets {
     fn get(&self, name: &str) -> Option<String> {
-        self.map.lock().ok()?.get(name).cloned()
+        self.map().get(name).cloned()
     }
 
-    fn set(&self, name: &str, value: &str) -> Result<(), String> {
-        self.map
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(name.into(), value.into());
+    fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        self.map().insert(name.into(), value.into());
         Ok(())
     }
 
-    fn delete(&self, name: &str) -> Result<(), String> {
-        self.map.lock().map_err(|e| e.to_string())?.remove(name);
+    fn delete(&self, name: &str) -> Result<(), SecretError> {
+        self.map().remove(name);
         Ok(())
     }
 
@@ -410,7 +444,7 @@ mod tests {
         // nothing is saved, rather than two copies.
         k.fail_set.store(true, Relaxed);
         k.fail_delete.store(true, Relaxed);
-        assert!(s.set("k", "new").is_err());
+        assert!(matches!(s.set("k", "new"), Err(SecretError::StaleCopy(_))));
         assert_eq!(s.get("k").as_deref(), Some("old"));
         // It can remove the old one: the new value goes to the file alone.
         k.fail_delete.store(false, Relaxed);
@@ -439,7 +473,7 @@ mod tests {
         k.fail_delete.store(false, Relaxed);
         s.delete("k").unwrap();
         assert_eq!(s.get("k"), None);
-        assert_eq!(s.try_get("k"), Ok(None));
+        assert_eq!(s.try_get("k").unwrap(), None);
     }
 
     #[test]

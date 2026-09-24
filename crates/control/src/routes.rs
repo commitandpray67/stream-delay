@@ -14,6 +14,7 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
+use streamdelay_config::SecretError;
 use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError, RelayState};
 use tokio::sync::watch;
 
@@ -33,6 +34,12 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<SecretError> for ApiError {
+    fn from(e: SecretError) -> Self {
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     }
 }
 
