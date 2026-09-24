@@ -207,18 +207,30 @@ def linux(root: Path, version: str) -> None:
     run_app(appimage.name, [appimage], version, {**env, "APPIMAGE_EXTRACT_AND_RUN": "1"})
 
 
+def msiexec(*args) -> None:
+    r = subprocess.run(["msiexec", *args, "/qn", "/norestart"])
+    # 3010: done, and Windows wants a restart.
+    if r.returncode not in (0, 3010):
+        raise Failed(f"msiexec {args[0]} failed with code {r.returncode}")
+
+
 def windows(root: Path, version: str) -> None:
+    # One installer at a time, as users install one or the other: the MSI
+    # installs into a folder another installer left behind in the registry.
+    msi = one(root, f"*_{version}_x64_en-US.msi").resolve()
+    folder = Path(os.environ["ProgramFiles"]) / "stream-delay"
+    print(f"installing {msi.name}", flush=True)
+    msiexec("/i", str(msi))
+    run_app(msi.name, [installed_exe(folder)], version)
+    print(f"uninstalling {msi.name}", flush=True)
+    msiexec("/x", str(msi))
+    if list(folder.glob("*.exe")):
+        raise Failed(f"uninstalling left {folder} behind")
+
     setup = one(root, f"*_{version}_x64-setup.exe")
     print(f"installing {setup.name}", flush=True)
     subprocess.run([str(setup), "/S"], check=True)
     run_app(setup.name, [installed_exe(Path(os.environ["LOCALAPPDATA"]) / "stream-delay")], version)
-
-    msi = one(root, f"*_{version}_x64_en-US.msi")
-    print(f"installing {msi.name}", flush=True)
-    r = subprocess.run(["msiexec", "/i", str(msi), "/qn", "/norestart"])
-    if r.returncode not in (0, 3010):
-        raise Failed(f"msiexec failed with code {r.returncode}")
-    run_app(msi.name, [installed_exe(Path(os.environ["ProgramFiles"]) / "stream-delay")], version)
 
 
 def macos(root: Path, version: str) -> None:

@@ -422,6 +422,8 @@ jobs:
   container:
     name: Container image (build only)
     needs: [headless]
+    # Also in dry runs, where the jobs headless waits for are skipped.
+    if: ${{ !failure() && !cancelled() }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
