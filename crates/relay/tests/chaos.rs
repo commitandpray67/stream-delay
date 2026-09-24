@@ -25,7 +25,19 @@ struct FaultProxy {
 
 impl FaultProxy {
     async fn start(target: SocketAddr) -> Self {
+        Self::start_with(target, None).await
+    }
+
+    /// With a receive buffer of `rcvbuf` bytes towards the relay: what the relay
+    /// has written but the stalled proxy not yet read, like a destination's.
+    async fn start_with(target: SocketAddr, rcvbuf: Option<usize>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if let Some(size) = rcvbuf {
+            // Connections accepted later take it over.
+            socket2::SockRef::from(&listener)
+                .set_recv_buffer_size(size)
+                .unwrap();
+        }
         let addr = listener.local_addr().unwrap();
         let generation = Arc::new(AtomicU64::new(0));
         let stalled = Arc::new(AtomicBool::new(false));
@@ -455,4 +467,74 @@ async fn a_dropped_destination_connection_is_retried_at_once() {
     );
     p.stop().await;
     relay.shutdown().await;
+}
+
+/// A dump must keep everything recorded before it that viewers have not seen
+/// from reaching them, including what is already queued for a destination that
+/// has fallen behind (it had been emitted, so the delay buffer no longer held
+/// it). Only what the destination's own buffer holds is out of reach.
+async fn dump_on_a_stalled_upload(mode: DelayMode) {
+    let (sink, log, _kill) = start_sink().await;
+    let proxy = FaultProxy::start_with(sink, Some(64 * 1024)).await;
+    let relay = start_relay(
+        proxy.addr,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    relay.set_delay(1000, DelayMode::Mask).await.unwrap();
+    p.stream_for(Duration::from_secs(3)).await;
+    proxy.stall(true);
+    // Far more than the upload takes: the queue for the destination fills.
+    let full = Instant::now() + Duration::from_secs(10);
+    while relay.state().egress.backlog_bytes < 4_000_000 {
+        assert!(Instant::now() < full, "the queue never filled");
+        p.stream_sized(Duration::from_millis(100), 128 * 1024).await;
+    }
+    let before: std::collections::HashSet<u32> = video_frames(&log.lock().unwrap())
+        .into_iter()
+        .map(|(_, f, _)| f)
+        .collect();
+    let last_before_dump = p.frame - 1;
+    relay.dump(mode).await.unwrap();
+    let dumped = Instant::now();
+    proxy.stall(false);
+    p.stream_for(Duration::from_secs(5)).await;
+
+    {
+        let l = log.lock().unwrap();
+        let leaked: Vec<(u32, usize, usize)> = l
+            .media
+            .iter()
+            .filter(|m| m.kind == MediaKind::Video && m.at > dumped)
+            .filter_map(|m| Some((frame_of(&m.payload)?, m.payload.len(), m.conn)))
+            .filter(|&(f, ..)| f <= last_before_dump && !before.contains(&f))
+            .collect();
+        let bytes: usize = leaked.iter().map(|&(_, len, _)| len).sum();
+        // What the proxy's receive buffer held (twice the size asked for, on Linux).
+        assert!(
+            bytes <= 160 * 1024,
+            "{bytes} bytes recorded before the dump aired after it (frame, size, connection): {leaked:?}"
+        );
+        assert!(
+            video_frames(&l)
+                .iter()
+                .any(|&(_, f, _)| f > last_before_dump),
+            "the stream did not go on after the dump"
+        );
+        check_connections(&l);
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mask_dump_on_a_stalled_upload_airs_nothing_from_before_it() {
+    dump_on_a_stalled_upload(DelayMode::Mask).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rewind_dump_on_a_stalled_upload_airs_nothing_new_from_before_it() {
+    dump_on_a_stalled_upload(DelayMode::Rewind).await;
 }

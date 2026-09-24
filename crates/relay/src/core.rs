@@ -6,14 +6,14 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
-use streamdelay_engine::{Engine, EngineError, Kind, OutMsg};
+use streamdelay_engine::{Command, DelayMode, Engine, EngineError, Kind, OutMsg};
 use streamdelay_rtmp::amf0::Amf0Value;
 use streamdelay_rtmp::{ArenaPool, RtmpUrl};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-use crate::egress::{self, Counters, EgressCtl, Target};
+use crate::egress::{self, Counters, EgressCtl, Queued, Target};
 use crate::lifecycle::{Effect, Facts, Lifecycle, Tick};
 use crate::{
     Control, Destination, DestinationKey, EgressState, EgressStatus, IngestState, RelayConfig,
@@ -181,7 +181,7 @@ struct Core {
     /// When broadcasts start and end.
     life: Lifecycle,
     egress_ctl: mpsc::UnboundedSender<EgressCtl>,
-    media_tx: mpsc::UnboundedSender<(u64, OutMsg)>,
+    media_tx: mpsc::UnboundedSender<Queued>,
     counters: Arc<Counters>,
     generation: u64,
     state: RelayState,
@@ -307,6 +307,12 @@ impl Core {
         let now = self.now();
         match c {
             Control::Command(cmd, reply) => {
+                let cmd = match cmd {
+                    Command::Dump(mode) if self.engine.can_dump() => {
+                        Command::Dump(self.cut_output(mode))
+                    }
+                    cmd => cmd,
+                };
                 let r: Result<_, EngineError> = self.engine.command(now, cmd);
                 if let Ok(ack) = &r {
                     info!(?cmd, ?ack, "delay command");
@@ -581,6 +587,26 @@ impl Core {
         }
     }
 
+    /// For a dump: media handed to the destination connection but not written
+    /// yet (queued, or being written) has reached no one, and never must. The
+    /// connection is then reset, dropping it along with what the OS still holds
+    /// from before the dump, and made again at once. What viewers saw is then
+    /// unknown, so a rewind, which replays what aired, becomes a mask. Returns the
+    /// mode to dump with.
+    fn cut_output(&mut self, mode: DelayMode) -> DelayMode {
+        // Only this task adds to it, and the egress takes off what it has
+        // written only once written: zero means nothing is on its way.
+        let unsent = self.counters.backlog.load(Ordering::SeqCst) > 0;
+        if unsent {
+            let _ = self.egress_ctl.send(EgressCtl::Cut);
+        }
+        if mode == DelayMode::Rewind && (unsent || !self.engine.output_is_connected()) {
+            info!("the destination was behind; masking instead of rewinding");
+            return DelayMode::Mask;
+        }
+        mode
+    }
+
     /// Runs the engine, forwards due messages and manages the egress connection.
     fn pump(&mut self) -> Option<u64> {
         let now = self.now();
@@ -598,7 +624,10 @@ impl Core {
             self.counters
                 .backlog
                 .fetch_add(m.payload.len() as u64, Ordering::Relaxed);
-            let _ = self.media_tx.send((self.generation, m));
+            let _ = self.media_tx.send(Queued {
+                generation: self.generation,
+                msg: m,
+            });
         }
         // The 250 ms state tick also re-runs this, so connect decisions never stall.
         self.manage_egress(now);

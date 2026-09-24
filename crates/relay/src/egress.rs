@@ -56,6 +56,19 @@ pub(crate) enum EgressCtl {
     /// End the broadcast at once ("end stream"): reset the connection, so what the
     /// OS has not sent yet is discarded rather than delivered.
     Abort,
+    /// A dump while media was on its way: reset the connection, so that neither
+    /// the queue nor what the OS still holds reaches the destination, and connect
+    /// again at once.
+    Cut,
+}
+
+/// Media for the destination, as the core queues it.
+pub(crate) struct Queued {
+    /// The connection it was made for (see [`Engine::output_connected`]).
+    ///
+    /// [`Engine::output_connected`]: streamdelay_engine::Engine::output_connected
+    pub generation: u64,
+    pub msg: OutMsg,
 }
 
 /// A second handle on the destination socket, for [`EgressCtl::Abort`].
@@ -78,13 +91,24 @@ impl Aborter {
 /// Counters shared with the core task.
 #[derive(Default)]
 pub(crate) struct Counters {
+    /// Media queued for the destination and not written yet, including what is
+    /// being written.
     pub backlog: AtomicU64,
     pub written: AtomicU64,
+}
+
+impl Counters {
+    fn drop_queued(&self, q: &Queued) {
+        self.backlog
+            .fetch_sub(q.msg.payload.len() as u64, Ordering::Relaxed);
+    }
 }
 
 enum RunEnd {
     Stopped,
     Retarget(Target),
+    /// Connect again at once (see [`EgressCtl::Cut`]).
+    Restart,
     Failed(Failure),
 }
 
@@ -175,7 +199,7 @@ fn retry_wait(failures: &mut usize, refused: bool) -> Duration {
 
 pub(crate) async fn run(
     mut ctl: mpsc::UnboundedReceiver<EgressCtl>,
-    mut media: mpsc::UnboundedReceiver<(u64, OutMsg)>,
+    mut media: mpsc::UnboundedReceiver<Queued>,
     events: mpsc::UnboundedSender<Event>,
     counters: Arc<Counters>,
     stall_timeout: Duration,
@@ -193,12 +217,12 @@ pub(crate) async fn run(
                         failures = 0;
                         target = Some(t);
                     }
-                    Some(EgressCtl::Stop | EgressCtl::Abort) => {}
+                    Some(EgressCtl::Stop | EgressCtl::Abort | EgressCtl::Cut) => {}
                     None => return,
                 },
                 m = media.recv() => {
-                    let Some((_, m)) = m else { return };
-                    counters.backlog.fetch_sub(m.payload.len() as u64, Ordering::Relaxed);
+                    let Some(q) = m else { return };
+                    counters.drop_queued(&q);
                 }
             }
             continue;
@@ -208,20 +232,33 @@ pub(crate) async fn run(
         info!(destination = %t.url.redacted(), "connecting to destination");
         // Stop and End stream must win over a connection attempt: a publish that
         // completes after them would start a broadcast nobody wants.
-        let connected = tokio::select! {
-            biased;
-            c = ctl.recv() => {
-                target = match c {
-                    Some(EgressCtl::Start(t)) => Some(t),
-                    Some(EgressCtl::Stop | EgressCtl::Abort) | None => {
-                        info!("connection attempt cancelled");
-                        stopped(&events, &mut media, &counters);
-                        None
-                    }
-                };
+        let connected = {
+            let connecting = tokio::time::timeout(CONNECT_TIMEOUT, connect(&t));
+            tokio::pin!(connecting);
+            loop {
+                tokio::select! {
+                    biased;
+                    c = ctl.recv() => match c {
+                        // Nothing is sent yet, and what is queued was made for
+                        // another connection.
+                        Some(EgressCtl::Cut) => {}
+                        Some(EgressCtl::Start(t)) => break Err(Some(t)),
+                        Some(EgressCtl::Stop | EgressCtl::Abort) | None => break Err(None),
+                    },
+                    r = &mut connecting => break Ok(r),
+                }
+            }
+        };
+        let connected = match connected {
+            Ok(r) => r,
+            Err(next) => {
+                if next.is_none() {
+                    info!("connection attempt cancelled");
+                    stopped(&events, &mut media, &counters);
+                }
+                target = next;
                 continue;
             }
-            r = tokio::time::timeout(CONNECT_TIMEOUT, connect(&t)) => r,
         };
         let (stream, session, aborter) = match connected {
             Ok(Ok(c)) => c,
@@ -244,7 +281,15 @@ pub(crate) async fn run(
             }
         };
         // The destination accepted the stream just as a stop arrived: end it at once.
-        if let Ok(c) = ctl.try_recv() {
+        let pending = loop {
+            match ctl.try_recv() {
+                // Nothing sent yet.
+                Ok(EgressCtl::Cut) => {}
+                Ok(c) => break Some(c),
+                Err(_) => break None,
+            }
+        };
+        if let Some(c) = pending {
             let end = ended_by(Some(c), &aborter);
             drop(stream);
             drop(aborter);
@@ -295,6 +340,9 @@ pub(crate) async fn run(
                 stopped(&events, &mut media, &counters);
             }
             RunEnd::Retarget(t) => target = Some(t),
+            RunEnd::Restart => {
+                info!("reset the destination connection for a dump; connecting again")
+            }
             RunEnd::Failed(f) => {
                 warn!("destination connection lost: {}", f.message);
                 if started.elapsed() >= STABLE_CONNECTION {
@@ -318,13 +366,11 @@ fn status(events: &mpsc::UnboundedSender<Event>, s: EgressStatus, error: Option<
 /// for the connection that ended, so the backlog it reports is already empty.
 fn stopped(
     events: &mpsc::UnboundedSender<Event>,
-    media: &mut mpsc::UnboundedReceiver<(u64, OutMsg)>,
+    media: &mut mpsc::UnboundedReceiver<Queued>,
     counters: &Counters,
 ) {
-    while let Ok((_, m)) = media.try_recv() {
-        counters
-            .backlog
-            .fetch_sub(m.payload.len() as u64, Ordering::Relaxed);
+    while let Ok(q) = media.try_recv() {
+        counters.drop_queued(&q);
     }
     status(events, EgressStatus::Idle, None);
 }
@@ -333,7 +379,7 @@ fn stopped(
 /// stopped).
 async fn wait_backoff(
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
-    media: &mut mpsc::UnboundedReceiver<(u64, OutMsg)>,
+    media: &mut mpsc::UnboundedReceiver<Queued>,
     events: &mpsc::UnboundedSender<Event>,
     counters: &Counters,
     current: Target,
@@ -348,14 +394,14 @@ async fn wait_backoff(
             _ = &mut sleep => return Some(current),
             c = ctl.recv() => match c {
                 Some(EgressCtl::Start(t)) => return Some(t),
+                Some(EgressCtl::Cut) => {}
                 Some(EgressCtl::Stop | EgressCtl::Abort) | None => {
                     stopped(events, media, counters);
                     return None;
                 }
             },
             m = media.recv() => {
-                let (_, m) = m?;
-                counters.backlog.fetch_sub(m.payload.len() as u64, Ordering::Relaxed);
+                counters.drop_queued(&m?);
             }
         }
     }
@@ -452,6 +498,10 @@ fn ended_by(c: Option<EgressCtl>, aborter: &Aborter) -> RunEnd {
             aborter.arm();
             RunEnd::Stopped
         }
+        Some(EgressCtl::Cut) => {
+            aborter.arm();
+            RunEnd::Restart
+        }
         Some(EgressCtl::Stop) | None => RunEnd::Stopped,
     }
 }
@@ -513,7 +563,7 @@ async fn publish(
     generation: u64,
     stall_timeout: Duration,
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
-    media: &mut mpsc::UnboundedReceiver<(u64, OutMsg)>,
+    media: &mut mpsc::UnboundedReceiver<Queued>,
     events: &mpsc::UnboundedSender<Event>,
     counters: &Counters,
 ) -> (RunEnd, Option<u64>) {
@@ -526,6 +576,9 @@ async fn publish(
         tokio::select! {
             biased;
             c = ctl.recv() => {
+                if matches!(c, Some(EgressCtl::Cut)) {
+                    return (ended_by(c, aborter), last_written);
+                }
                 // Unpublish cleanly if the destination still takes data, but don't
                 // wait on one that has stalled: dropping the connection also ends
                 // the broadcast. An abort skips this, so nothing more is sent.
@@ -572,11 +625,12 @@ async fn publish(
                 }
                 let mut batch_last = None;
                 let mut bytes = 0u64;
-                for (g, m) in batch.drain(..) {
-                    bytes += m.payload.len() as u64;
-                    if g != generation {
+                for q in batch.drain(..) {
+                    bytes += q.msg.payload.len() as u64;
+                    if q.generation != generation {
                         continue;
                     }
+                    let m = q.msg;
                     match m.kind {
                         Kind::Audio => session.send_media(MediaKind::Audio, m.timestamp, &m.payload),
                         Kind::Video => session.send_media(MediaKind::Video, m.timestamp, &m.payload),
@@ -592,9 +646,10 @@ async fn publish(
                 match result {
                     Written::Done => {}
                     Written::Failed(e) => return (RunEnd::Failed(Failure::new(format!("write failed: {e}"))), last_written),
-                    // Told to stop mid-write (End stream on a slow upload): the RTMP
-                    // stream is cut mid-message, so there is no clean unpublish;
-                    // dropping the connection ends the broadcast.
+                    // Told to stop mid-write (End stream on a slow upload), or a
+                    // dump while this media was being written: the RTMP stream is
+                    // cut mid-message, so there is no clean unpublish; dropping the
+                    // connection ends the broadcast (or restarts it for a dump).
                     Written::Interrupted(c) => return (ended_by(c, aborter), last_written),
                 }
                 counters.written.fetch_add(out.len() as u64, Ordering::Relaxed);
@@ -655,7 +710,12 @@ mod tests {
                 payload: Bytes::from(vec![0u8; 1000]),
                 seq: Some(u64::from(i)),
             };
-            media_tx.send((0, m)).unwrap();
+            media_tx
+                .send(Queued {
+                    generation: 0,
+                    msg: m,
+                })
+                .unwrap();
         }
         ctl_tx.send(EgressCtl::Stop).unwrap();
         let target = Target {

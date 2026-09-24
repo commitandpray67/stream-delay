@@ -663,6 +663,7 @@ impl Engine {
                 self.set_pending(Pending::None);
                 self.out.target = self.out.delay;
             }
+            Command::Dump(_) if !self.can_dump() => return Err(EngineError::NothingToDump),
             Command::Dump(mode) => {
                 if !self.out.started {
                     // Nothing has aired yet: throwing the buffer away is enough.
@@ -676,18 +677,7 @@ impl Engine {
                     self.set_pending(Pending::None);
                     return Ok(self.ack());
                 }
-                // Back to the delay asked for; while it is being removed, keep
-                // the protection that was in effect.
-                let delay = if self.out.target > 0 {
-                    self.out.target
-                } else {
-                    self.out.delay
-                };
-                // Live (as the snapshot counts it): what is in flight airs before
-                // anyone could react.
-                if delay < 500 * MS {
-                    return Err(EngineError::NothingToDump);
-                }
+                let delay = self.dump_delay();
                 self.out.history_short = false;
                 self.out.target = delay;
                 if mode == DelayMode::Rewind && self.replay_instead(now, delay) {
@@ -756,6 +746,25 @@ impl Engine {
         }
         self.run_pending(now);
         Ok(self.ack())
+    }
+
+    /// The delay a dump goes back to: the one asked for, or while it is being
+    /// removed, the protection that was in effect.
+    fn dump_delay(&self) -> u64 {
+        if self.out.target > 0 {
+            self.out.target
+        } else {
+            self.out.delay
+        }
+    }
+
+    /// False when a dump would be refused: live (as the snapshot counts it), what
+    /// is in flight airs before anyone could react.
+    pub fn can_dump(&self) -> bool {
+        !self.out.started
+            || self.out.end_mark.is_some()
+            || !self.ingest_active
+            || self.dump_delay() >= 500 * MS
     }
 
     fn ack(&self) -> Ack {

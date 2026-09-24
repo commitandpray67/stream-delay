@@ -76,6 +76,13 @@ same delay.
   Without the overlay in your scenes, viewers would see you live meanwhile; the
   dock says so before you confirm.
 
+If your upload has fallen behind, part of what viewers haven't seen is already
+queued for Twitch rather than in the buffer. The dump throws that away too, by
+dropping the connection to Twitch and making it again at once: viewers see a
+short interruption instead. What Twitch had already received by then can't be
+taken back, and since stream-delay can't tell how much that was, the dump masks
+instead of rewinding.
+
 Press it as soon as you can: only what is still in the buffer can be thrown away.
 It takes two clicks in the dock and dashboard (the first time, it explains itself
 instead of the first click), and is also in the tray menu, the API and the command
