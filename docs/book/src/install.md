@@ -82,8 +82,11 @@ On the streaming PC, run stream-delay with `--ingest 0.0.0.0:1935 --ingest-key â
 (or the Docker image). In OBS on the gaming PC, use
 `rtmp://<streaming-pc-ip>:1935/live` and the ingest key. If you leave out
 `--ingest-key`, one is generated; `streamdelayd urls` and the Setup tab show it. To control it from
-another device, enable *Allow control from other devices* on the Advanced tab and
-restart stream-delay.
+another device, or for OBS on the gaming PC to load the overlay, stream-delay's
+web server has to listen on the network too: run it with
+`--api 0.0.0.0:7788 --allow-lan` (or set `bind = "0.0.0.0:7788"` under `[api]`
+in the settings file and enable *Allow control from other devices* on the
+Advanced tab), and restart it.
 
 ## Where things are stored
 

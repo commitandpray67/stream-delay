@@ -13,7 +13,7 @@ use streamdelay_relay::RtmpUrl;
 use tracing::info;
 
 use crate::AppState;
-use crate::app::{Urls, different_server, split_url_key, urls};
+use crate::app::{Urls, different_server, shown_url, split_url_key, urls};
 use crate::auth::Scope;
 use crate::changes::KeyChange;
 use crate::routes::ApiError;
@@ -52,14 +52,15 @@ pub(crate) fn public_config(st: &AppState) -> PublicConfig {
     config.api.token = String::new();
     // Shown as `urls.obs_key` instead, which diagnostics leave out.
     config.ingest.key = None;
-    // Keys are moved out of the URL when it is saved; never show one regardless.
-    config.destination.url = split_url_key(&config.destination.url).0;
+    let key_url = split_url_key(&config.destination.url).0;
+    // Keys are moved out of the URL when it is saved; never show one regardless,
+    // nor the values of its query.
+    config.destination.url = shown_url(&config.destination.url);
     // Only there until moved to the secret store; may hold a server password.
     if let Some(backup) = &mut config.obs.backup {
         backup.settings_json = None;
     }
-    let key_set = st.key_override(&config.destination.url).is_some()
-        || st.stored_key(&config.destination.url).is_some();
+    let key_set = st.key_override(&key_url).is_some() || st.stored_key(&key_url).is_some();
     PublicConfig {
         scope: Scope::Admin,
         config,
@@ -247,6 +248,13 @@ async fn update_config(
     // One change at a time, from reading the settings to the relay: a concurrent
     // one could otherwise pair a key with the wrong destination.
     let lock = st.lock_settings();
+    if let Some(d) = &mut update.destination {
+        // The URL as shown, its query hidden, stands for the saved one.
+        let saved = st.saved_destination_url();
+        if d.url.trim() != saved && d.url.trim() == shown_url(&saved) {
+            d.url = saved;
+        }
+    }
     validate(&update, &st.config()).map_err(ApiError::bad_request)?;
     let mut key = KeyChange::Keep;
     if let Some(d) = &mut update.destination {
@@ -451,6 +459,53 @@ mod transaction_tests {
         let (s, _) = call(&app, "DELETE", "/api/v1/destination/key", "").await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(applied_key(&st).as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn credentials_in_the_url_query_are_never_shown() {
+        const SENTINEL: &str = "SENTINEL_credential_123";
+        let (st, app, _) = setup(None).await;
+        let url = format!("rtmps://ingest.example/live?auth={SENTINEL}");
+        let (s, body) = call(&app, "PUT", "/api/v1/config", &dest(&url)).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert!(!body.contains(SENTINEL), "{body}");
+        assert!(body.contains("rtmps://ingest.example/live?…"), "{body}");
+        assert_eq!(st.config().destination.url, url);
+        // Saving the settings as shown keeps the query.
+        let (s, body) = call(
+            &app,
+            "PUT",
+            "/api/v1/config",
+            &dest("rtmps://ingest.example/live?…"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(st.config().destination.url, url);
+        // The relay takes it up in its own time.
+        for _ in 0..100 {
+            if st.relay().state().egress.destination.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Every view of the settings and state.
+        for path in ["/api/v1/config", "/api/v1/state", "/api/v1/diagnostics"] {
+            let (s, body) = call(&app, "GET", path, "").await;
+            assert_eq!(s, StatusCode::OK, "{path}");
+            assert!(!body.contains(SENTINEL), "{path}: {body}");
+        }
+        let state = st.relay().state();
+        assert_eq!(
+            state.egress.destination.as_deref(),
+            Some("rtmps://ingest.example/live?…")
+        );
+        let applied = st.shared.applied_destination.lock().unwrap().clone();
+        assert!(!format!("{applied:?}").contains(SENTINEL));
+        // Another query is a change like any other.
+        let other = "rtmps://ingest.example/live?auth=other";
+        let (s, _) = call(&app, "PUT", "/api/v1/config", &dest(other)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(st.config().destination.url, other);
     }
 
     #[tokio::test]

@@ -171,12 +171,16 @@ async fn go_live(State(st): State<AppState>, body: Bytes) -> Result<Json<Ack>, A
 
 /// Ends the broadcast: now, without airing what is buffered, or with
 /// `{"when": "after-air"}` once what stream-delay has received so far has aired.
-async fn end_stream(State(st): State<AppState>, body: Bytes) -> Result<Json<RelayState>, ApiError> {
+async fn end_stream(
+    State(st): State<AppState>,
+    Extension(scope): Extension<Scope>,
+    body: Bytes,
+) -> Result<Json<RelayState>, ApiError> {
     match when(&body)? {
         GoLiveWhen::Now => st.relay().end_stream().await?,
         GoLiveWhen::AfterAir => st.relay().end_stream_after_air().await?,
     }
-    Ok(Json(st.relay().state()))
+    Ok(Json(visible_state(st.relay().state(), scope)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -220,9 +224,12 @@ async fn check_updates(State(st): State<AppState>) -> Json<serde_json::Value> {
     }
 }
 
-async fn resume(State(st): State<AppState>) -> Result<Json<RelayState>, ApiError> {
+async fn resume(
+    State(st): State<AppState>,
+    Extension(scope): Extension<Scope>,
+) -> Result<Json<RelayState>, ApiError> {
     st.relay().resume().await?;
-    Ok(Json(st.relay().state()))
+    Ok(Json(visible_state(st.relay().state(), scope)))
 }
 
 async fn cancel(State(st): State<AppState>) -> Result<Json<Ack>, ApiError> {

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
-use streamdelay_engine::{Command, DelayMode, Engine, EngineError, Kind, OutMsg};
+use streamdelay_engine::{Ack, Command, DelayMode, Engine, EngineError, Kind, OutMsg};
 use streamdelay_rtmp::amf0::Amf0Value;
 use streamdelay_rtmp::{ArenaPool, RtmpUrl};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -25,11 +25,9 @@ use crate::{
 /// empty.
 const MAX_EGRESS_BACKLOG: u64 = 8 * 1024 * 1024;
 
-/// Media queued for the destination from which a dump takes it to be behind:
-/// the queue only grows past a few frames once the OS's send buffer is full.
-/// Below it, the queue is the destination's usual lag (it takes a moment to
-/// pick up each frame, longer on Windows).
-const BEHIND_BACKLOG: u64 = 512 * 1024;
+/// How long a dump waits for the egress to answer (it answers at once, unless
+/// something is wrong): then it goes ahead as if the connection had been reset.
+const CUT_ANSWER_WAIT: Duration = Duration::from_secs(2);
 
 /// A publisher that has sent nothing for this long is taken to be a dead
 /// connection the network has not reported yet (the encoder's computer lost
@@ -58,6 +56,14 @@ impl Rejection {
             bad_key: false,
         }
     }
+}
+
+/// See [`Core::start_dump`].
+struct PendingDump {
+    mode: DelayMode,
+    /// Everyone who asked for a dump meanwhile.
+    replies: Vec<oneshot::Sender<Result<Ack, EngineError>>>,
+    since: Instant,
 }
 
 /// Shortens error text for the state.
@@ -175,6 +181,14 @@ pub(crate) enum Event {
     EgressConnected {
         reply: oneshot::Sender<u64>,
     },
+    /// Answer to [`EgressCtl::Cut`]: whether the connection was reset, and the
+    /// last message the destination surely has on the current connection.
+    CutDone {
+        /// The dump answered (see [`Counters::cut`]).
+        cut: u64,
+        reset: bool,
+        delivered: Option<u64>,
+    },
     EgressDisconnected {
         last_written: Option<u64>,
         error: Option<String>,
@@ -205,8 +219,10 @@ struct Core {
     media_tx: mpsc::UnboundedSender<Queued>,
     counters: Arc<Counters>,
     generation: u64,
-    /// Dumps so far (see [`Core::cut_output`]).
+    /// Dumps so far (see [`Counters::cut`]).
     cut: u64,
+    /// A dump waiting for the egress (see [`Core::start_dump`]).
+    dump: Option<PendingDump>,
     state: RelayState,
     state_tx: watch::Sender<RelayState>,
     last_written_total: u64,
@@ -265,6 +281,7 @@ pub(crate) async fn run(
         counters,
         generation: 0,
         cut: 0,
+        dump: None,
         state_tx,
         last_written_total: 0,
         last_rate_at: now,
@@ -310,7 +327,10 @@ pub(crate) async fn run(
             Some(ev) = events.recv() => core.event(ev),
             _ = async { tokio::time::sleep_until(sleep_until.unwrap_or_else(Instant::now)).await },
                 if sleep_until.is_some() => {}
-            _ = tick.tick() => core.publish_state(),
+            _ = tick.tick() => {
+                core.check_dump();
+                core.publish_state();
+            }
         }
         wake = core.pump();
     }
@@ -330,10 +350,16 @@ impl Core {
     fn control(&mut self, c: Control) {
         let now = self.now();
         match c {
+            Control::Command(Command::Dump(mode), reply)
+                if self.engine.can_dump() && self.life.egress_on() =>
+            {
+                self.start_dump(mode, reply);
+            }
             Control::Command(cmd, reply) => {
                 let cmd = match cmd {
-                    Command::Dump(mode) if self.engine.can_dump() => {
-                        Command::Dump(self.cut_output(mode))
+                    // Nothing is being sent: what viewers saw is what was sent.
+                    Command::Dump(DelayMode::Rewind) if !self.engine.output_is_connected() => {
+                        Command::Dump(DelayMode::Mask)
                     }
                     cmd => cmd,
                 };
@@ -485,6 +511,17 @@ impl Core {
                 let _ = reply.send(self.generation);
                 self.publish_state();
             }
+            Event::CutDone {
+                cut,
+                reset,
+                delivered,
+            } => {
+                // An answer that came too late, to a dump that went ahead
+                // without it (see [`Core::check_dump`]), is not for this one.
+                if cut == self.cut {
+                    self.finish_dump(reset, delivered);
+                }
+            }
             Event::EgressDisconnected {
                 last_written,
                 error,
@@ -612,30 +649,65 @@ impl Core {
         }
     }
 
-    /// For a dump: media handed to the destination connection but not taken to
-    /// be written yet has reached no one, and never must. It is dropped unsent,
-    /// and counts as not aired, so a rewind does not replay it either.
-    ///
-    /// If the destination is behind, the OS also holds media from before the
-    /// dump: the connection is then reset, dropping that too, and made again at
-    /// once. What viewers saw is then unknown, so a rewind, which replays what
-    /// aired, becomes a mask. Returns the mode to dump with.
-    fn cut_output(&mut self, mode: DelayMode) -> DelayMode {
+    /// A dump, while a broadcast is on: media handed to the destination
+    /// connection must not air either if it has not left this computer. The
+    /// queue is taken back at once ([`Counters::cut`]); the egress then says what
+    /// the destination has, resetting the connection if media from before the
+    /// dump may be waiting in the OS ([`EgressCtl::Cut`]). Until it answers,
+    /// nothing more is queued, and the engine dumps only then.
+    fn start_dump(&mut self, mode: DelayMode, reply: oneshot::Sender<Result<Ack, EngineError>>) {
+        if let Some(pending) = &mut self.dump {
+            pending.replies.push(reply);
+            return;
+        }
         self.cut += 1;
         self.counters.cut.store(self.cut, Ordering::SeqCst);
-        let behind = self.counters.backlog.load(Ordering::SeqCst) >= BEHIND_BACKLOG;
-        if behind {
-            let _ = self.egress_ctl.send(EgressCtl::Cut);
-        } else {
-            // A batch the egress took after this reads is written: it was
-            // leaving as the dump came.
-            self.engine.unsend(self.counters.taken_seq());
+        let _ = self.egress_ctl.send(EgressCtl::Cut(self.cut));
+        self.dump = Some(PendingDump {
+            mode,
+            replies: vec![reply],
+            since: Instant::now(),
+        });
+    }
+
+    /// Completes a dump once the egress has answered (see [`Core::start_dump`]).
+    fn finish_dump(&mut self, reset: bool, delivered: Option<u64>) {
+        let Some(pending) = self.dump.take() else {
+            return;
+        };
+        let now = self.now();
+        // What was emitted after `delivered` has not aired, and never will.
+        self.engine.unsend(delivered);
+        let mode = match pending.mode {
+            DelayMode::Rewind if !self.engine.output_is_connected() => DelayMode::Mask,
+            mode => mode,
+        };
+        if reset {
+            info!(
+                "the destination connection was reset for the dump: some of what was sent had not left yet"
+            );
         }
-        if mode == DelayMode::Rewind && (behind || !self.engine.output_is_connected()) {
-            info!("the destination was behind; masking instead of rewinding");
-            return DelayMode::Mask;
+        let cmd = Command::Dump(mode);
+        let r = self.engine.command(now, cmd);
+        if let Ok(ack) = &r {
+            info!(?cmd, ?ack, "delay command");
         }
-        mode
+        self.publish_state();
+        for reply in pending.replies {
+            let _ = reply.send(r.clone());
+        }
+    }
+
+    /// A dump the egress has not answered in time: nothing it wrote counts as
+    /// aired, and the dump masks.
+    fn check_dump(&mut self) {
+        if let Some(pending) = &mut self.dump
+            && pending.since.elapsed() >= CUT_ANSWER_WAIT
+        {
+            warn!("the destination connection did not answer the dump in time");
+            pending.mode = DelayMode::Mask;
+            self.finish_dump(true, None);
+        }
     }
 
     /// Runs the engine, forwards due messages and manages the egress connection.
@@ -645,7 +717,11 @@ impl Core {
         // the rest waits in the delay buffer (which has a memory cap) instead of
         // an unbounded queue, and airs once the upload catches up.
         let queued = self.counters.backlog.load(Ordering::Relaxed);
-        let room = MAX_EGRESS_BACKLOG.saturating_sub(queued);
+        // Nothing is queued while a dump waits for the egress.
+        let room = match self.dump {
+            Some(_) => 0,
+            None => MAX_EGRESS_BACKLOG.saturating_sub(queued),
+        };
         let wake = self.engine.poll_budget(
             now,
             &mut self.out,

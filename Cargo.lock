@@ -4550,6 +4550,7 @@ name = "streamdelay-control"
 version = "0.3.0"
 dependencies = [
  "axum",
+ "bytes",
  "futures-util",
  "http-body-util",
  "rand 0.9.5",
@@ -4560,6 +4561,7 @@ dependencies = [
  "streamdelay-config",
  "streamdelay-obs",
  "streamdelay-relay",
+ "streamdelay-rtmp",
  "subtle",
  "tempfile",
  "thiserror 2.0.20",
@@ -4642,6 +4644,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

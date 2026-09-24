@@ -28,6 +28,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 
 [dev-dependencies]
 tempfile = "3"
+streamdelay-rtmp.workspace = true
+bytes.workspace = true
 streamdelay-config.workspace = true
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -24,6 +24,8 @@ struct FakeObs {
     settings: Value,
     streaming: bool,
     inputs: Vec<String>,
+    /// The URL of each browser source.
+    urls: std::collections::HashMap<String, String>,
     /// Asks clients for a password (any is accepted).
     auth: bool,
     /// The authentication each client sent.
@@ -114,15 +116,26 @@ fn respond(obs: &Shared, ty: &str, data: &Value) -> Value {
         "CreateInput" => {
             assert_eq!(data["inputKind"], "browser_source");
             assert_eq!(data["sceneName"], "Game");
-            assert!(
-                data["inputSettings"]["url"]
-                    .as_str()
-                    .unwrap()
-                    .contains("/overlay?token=")
-            );
             assert_eq!(data["inputSettings"]["width"], 1920);
-            o.inputs.push(data["inputName"].as_str().unwrap().into());
+            let name = data["inputName"].as_str().unwrap().to_string();
+            let url = data["inputSettings"]["url"].as_str().unwrap().to_string();
+            o.inputs.push(name.clone());
+            o.urls.insert(name, url);
             json!({"inputUuid": "00000000-0000-0000-0000-000000000003", "sceneItemId": 7})
+        }
+        "GetInputSettings" => {
+            let name = data["inputName"].as_str().unwrap();
+            json!({
+                "inputSettings": {"url": o.urls.get(name), "width": 1920},
+                "inputKind": "browser_source",
+            })
+        }
+        "SetInputSettings" => {
+            assert_eq!(data["overlay"], true, "other settings are kept");
+            let name = data["inputName"].as_str().unwrap().to_string();
+            let url = data["inputSettings"]["url"].as_str().unwrap().to_string();
+            o.urls.insert(name, url);
+            Value::Null
         }
         other => panic!("unexpected request {other}"),
     }
@@ -135,6 +148,7 @@ async fn spawn_obs(service_type: &str, settings: Value) -> (Shared, u16) {
         settings,
         streaming: false,
         inputs: vec![],
+        urls: Default::default(),
         auth: false,
         auth_seen: vec![],
     }));
@@ -179,8 +193,26 @@ async fn setup_with_config(
     edit(&mut config);
     let dir = tempfile::tempdir().unwrap();
     let secrets = Arc::new(Secrets::new(dir.path(), false));
-    let router = streamdelay_control::router(relay, config, secrets.clone(), PORT);
+    // Settings are saved in the same directory (see `saves_fail`).
+    let router = streamdelay_control::router_saving_to(
+        relay,
+        config,
+        secrets.clone(),
+        PORT,
+        dir.path().join("config.toml"),
+    );
     (router, obs, secrets, dir)
+}
+
+/// From now on, settings cannot be saved in `dir`; secrets still can.
+fn saves_fail(dir: &tempfile::TempDir) {
+    std::fs::create_dir(dir.path().join("config.toml.tmp")).unwrap();
+}
+
+/// The overlay link the dashboard shows.
+async fn overlay_link(app: &axum::Router) -> String {
+    let (_, cfg) = call(app, "GET", "/api/v1/config", None).await;
+    cfg["urls"]["overlay"].as_str().unwrap().to_string()
 }
 
 async fn call(
@@ -239,6 +271,8 @@ async fn configure_imports_key_adds_overlay_and_restores() {
         );
         assert_eq!(o.inputs, vec!["Stream Delay Overlay".to_string()]);
     }
+    let link = overlay_link(&app).await;
+    assert_eq!(obs.lock().unwrap().urls["Stream Delay Overlay"], link);
     // The key moved into stream-delay's secret store, and is never echoed back.
     // For Twitch only.
     let saved: serde_json::Value =
@@ -515,4 +549,136 @@ async fn concurrent_wizard_steps_never_mix_up_two_obs() {
             serde_json::from_str(&secrets.get(secret::OBS_PASSWORD).unwrap()).unwrap();
         assert_eq!(saved["for"], format!("127.0.0.1:{port}"));
     }
+}
+
+#[tokio::test]
+async fn an_overlay_source_with_an_old_address_is_repaired() {
+    let (app, obs, _secrets, _dir) = setup().await;
+    {
+        let mut o = obs.lock().unwrap();
+        o.inputs.push("Stream Delay Overlay".into());
+        o.urls.insert(
+            "Stream Delay Overlay".into(),
+            "http://127.0.0.1:1/overlay?token=old".into(),
+        );
+    }
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["overlay_added"], false);
+    assert!(
+        r["message"]
+            .as_str()
+            .unwrap()
+            .contains("Updated the address"),
+        "{r}"
+    );
+    assert_eq!(obs.lock().unwrap().inputs.len(), 1);
+    let link = overlay_link(&app).await;
+    assert_eq!(obs.lock().unwrap().urls["Stream Delay Overlay"], link);
+}
+
+#[tokio::test]
+async fn an_obs_on_another_computer_gets_no_overlay_it_cannot_load() {
+    let (obs, obs_port) = spawn_obs("rtmp_common", json!({"service": "Twitch", "key": "k"})).await;
+    // The RTMP input takes streams from the network; the web pages do not.
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "0.0.0.0:0".parse().unwrap(),
+        ingest_key: Some("ingest-key-1234".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut config = Config::default();
+    config.api.token = TOKEN.into();
+    config.ingest.key = Some("ingest-key-1234".into());
+    config.obs.host = "192.0.2.10".into();
+    config.obs.port = obs_port;
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(Secrets::new(dir.path(), false));
+    let app = streamdelay_control::router(relay, config, secrets, PORT);
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("--allow-lan"), "{r}");
+    assert_eq!(obs.lock().unwrap().service_type, "rtmp_common");
+}
+
+#[tokio::test]
+async fn a_failed_save_keeps_the_saved_obs_password() {
+    let (app, home, secrets, dir) = setup().await;
+    home.lock().unwrap().auth = true;
+    let home_port = {
+        let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+        cfg["config"]["obs"]["port"].as_u64().unwrap()
+    };
+    let connect = |port: u64, password: &str| json!({"host": "127.0.0.1", "port": port, "password": password});
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/connect",
+        Some(connect(home_port, "pass-a-1234")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let saved = secrets.get(secret::OBS_PASSWORD).unwrap();
+
+    saves_fail(&dir);
+    let (_, other_port) = spawn_obs("rtmp_common", json!({})).await;
+    // Another OBS with its own password, and one without.
+    for password in ["pass-b-5678", ""] {
+        let (s, r) = call(
+            &app,
+            "POST",
+            "/api/v1/obs/connect",
+            Some(connect(u64::from(other_port), password)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("nothing was changed"),
+            "{r}"
+        );
+        assert_eq!(
+            secrets.get(secret::OBS_PASSWORD).as_deref(),
+            Some(saved.as_str())
+        );
+        let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+        assert_eq!(cfg["config"]["obs"]["port"].as_u64(), Some(home_port));
+    }
+}
+
+#[tokio::test]
+async fn a_failed_save_keeps_obs_and_its_backup_as_they_were() {
+    let (app, obs, secrets, dir) = setup().await;
+    saves_fail(&dir);
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    assert_eq!(secrets.get(secret::OBS_BACKUP), None);
+    assert_eq!(secrets.get(secret::DESTINATION_KEY), None);
+    assert_eq!(obs.lock().unwrap().service_type, "rtmp_common");
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    assert!(cfg["config"]["obs"]["backup"].is_null());
+}
+
+#[tokio::test]
+async fn a_restore_that_cannot_be_saved_keeps_the_backup_to_try_again() {
+    let (app, obs, secrets, dir) = setup().await;
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    saves_fail(&dir);
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("try again"), "{r}");
+    // OBS has its settings back; the backup is still there, and still named.
+    assert_eq!(obs.lock().unwrap().settings["key"], "live_987_secret");
+    assert!(secrets.get(secret::OBS_BACKUP).is_some());
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    assert!(cfg["config"]["obs"]["backup"].is_object());
+
+    std::fs::remove_dir(dir.path().join("config.toml.tmp")).unwrap();
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(obs.lock().unwrap().settings["key"], "live_987_secret");
+    assert_eq!(secrets.get(secret::OBS_BACKUP), None);
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    assert!(cfg["config"]["obs"]["backup"].is_null());
 }

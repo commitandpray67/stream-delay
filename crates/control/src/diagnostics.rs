@@ -235,6 +235,9 @@ fn known_secrets(st: &AppState) -> Vec<String> {
     let c = st.config();
     v.extend(c.ingest.key);
     v.extend(crate::app::split_url_key(&c.destination.url).1);
+    if let Ok(u) = streamdelay_relay::RtmpUrl::parse(&c.destination.url) {
+        v.extend(u.query_secrets());
+    }
     v.extend(
         [Scope::Admin, Scope::Control, Scope::Read].map(|s| st.shared.tokens.get(s).to_string()),
     );

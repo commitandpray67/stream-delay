@@ -28,9 +28,12 @@ const SEC: u64 = 1_000_000;
 
 /// Decoder configuration messages kept per encoder session, to resend after a
 /// splice. Real streams have one or two per track; the limits only keep a
-/// misbehaving encoder from holding data outside the memory cap.
+/// misbehaving encoder from holding much. What is kept counts against the
+/// memory cap (see [`Session::cost`]).
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 1024 * 1024;
+/// Largest stream metadata kept per session: an encoder's is about a kilobyte.
+const MAX_METADATA_BYTES: usize = 64 * 1024;
 
 /// Tunables for the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +144,7 @@ pub struct Ack {
     pub history_short: bool,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum EngineError {
     #[error("requested delay of {requested_ms} ms exceeds the maximum of {max_ms} ms")]
     TooLarge { requested_ms: u64, max_ms: u64 },
@@ -195,6 +198,14 @@ struct Session {
     has_video: bool,
     last_video_ts: Option<u64>,
     frame_ms: u64,
+}
+
+impl Session {
+    /// What it counts against the RAM cap, like buffered messages.
+    fn cost(&self) -> usize {
+        let headers: usize = self.headers.iter().map(|h| cost(h.payload.len())).sum();
+        cost(self.metadata.as_ref().map_or(0, Bytes::len)) + headers
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,7 +293,10 @@ pub struct Engine {
     base_seq: u64,
     next_seq: u64,
     bytes: usize,
+    /// Encoder sessions whose messages are buffered, and the current one. Their
+    /// headers and metadata take `session_bytes` (see [`Session::cost`]).
     sessions: Vec<Session>,
+    session_bytes: usize,
     ingest_active: bool,
     next_session: u32,
     out: Output,
@@ -299,6 +313,7 @@ impl Engine {
             next_seq: 0,
             bytes: 0,
             sessions: Vec::new(),
+            session_bytes: 0,
             ingest_active: false,
             next_session: 1,
             out: Output {
@@ -352,6 +367,14 @@ impl Engine {
         if !self.out.started {
             self.drop_buffer();
         }
+        // The last session gets no more messages: if none is buffered, nothing
+        // needs it (an encoder that reconnects over and over, sending no media,
+        // must not pile them up).
+        if let Some(last) = self.sessions.last()
+            && self.ring.back().is_none_or(|e| e.session != last.id)
+        {
+            self.sessions.pop();
+        }
         let id = self.next_session;
         self.next_session += 1;
         self.sessions.push(Session {
@@ -362,6 +385,7 @@ impl Engine {
             last_video_ts: None,
             frame_ms: 33,
         });
+        self.count_sessions();
         self.ingest_active = true;
         self.stats = snapshot::IngestTracker::default();
         id
@@ -376,11 +400,23 @@ impl Engine {
         self.ingest_active
     }
 
-    /// Stream metadata (`@setDataFrame onMetaData ...`).
+    /// Stream metadata (`@setDataFrame onMetaData ...`). Ignored if larger than
+    /// an encoder's would be.
     pub fn ingest_metadata(&mut self, _now: Time, payload: Bytes) {
-        if let Some(s) = self.sessions.last_mut() {
-            s.metadata = Some(payload);
+        if payload.len() > MAX_METADATA_BYTES {
+            return;
         }
+        if let Some(s) = self.sessions.last_mut() {
+            // A copy: the original shares its allocation with neighbouring
+            // messages, which would otherwise stay in memory as long as this.
+            s.metadata = Some(Bytes::copy_from_slice(&payload));
+            self.count_sessions();
+        }
+    }
+
+    /// Updates `session_bytes` after the sessions changed.
+    fn count_sessions(&mut self) {
+        self.session_bytes = self.sessions.iter().map(Session::cost).sum();
     }
 
     /// Appends one message from the publisher. `ts` is the unwrapped timestamp in ms.
@@ -453,6 +489,9 @@ impl Engine {
         self.stats.bytes(now, payload.len());
         self.bytes += cost(payload.len());
         let session = session.id;
+        if config.is_some() {
+            self.count_sessions();
+        }
         self.ring.push_back(Entry {
             seq,
             arrival: now,
@@ -571,6 +610,7 @@ impl Engine {
             .then(|| self.sessions.last().map(|s| s.id))
             .flatten();
         self.sessions.retain(|s| Some(s.id) == current);
+        self.count_sessions();
         self.out.next_seq = self.next_seq;
         self.out.need_sync = true;
     }
@@ -876,6 +916,7 @@ impl Engine {
         }
         self.next_session += 1;
         self.sessions.push(next);
+        self.count_sessions();
     }
 
     fn newest_sync_arrived_by(&self, t: Option<Time>) -> Option<u64> {
@@ -1342,7 +1383,8 @@ impl Engine {
         let capacity = (self.config.max_delay_ms + self.config.headroom_ms) * MS;
         let keep_from = self.keep_from(now);
         while let Some(front) = self.ring.front() {
-            let over_ram = self.bytes > self.config.ram_cap_bytes && self.ring.len() > 1;
+            let over_ram =
+                self.bytes + self.session_bytes > self.config.ram_cap_bytes && self.ring.len() > 1;
             // Evict a whole GOP once its successor keyframe is older than the capacity,
             // so the oldest entry is always a keyframe.
             let next_sync = self.syncs.iter().find(|&&s| s > front.seq).copied();
@@ -1367,13 +1409,23 @@ impl Engine {
                     self.syncs.pop_front();
                 }
             }
+            self.forget_sessions();
         }
-        // Forget sessions that no longer have buffered content.
-        if let Some(front) = self.ring.front() {
-            let oldest = front.session;
+    }
+
+    /// Forgets the sessions that no longer have buffered content. Sessions after
+    /// the oldest buffered message's all have some (see [`Engine::ingest_start`]),
+    /// except perhaps the current one.
+    fn forget_sessions(&mut self) {
+        let Some(front) = self.ring.front() else {
+            return;
+        };
+        let oldest = front.session;
+        if self.sessions.first().is_some_and(|s| s.id < oldest) {
             let current = self.sessions.last().map(|s| s.id);
             self.sessions
                 .retain(|s| s.id >= oldest || Some(s.id) == current);
+            self.count_sessions();
         }
     }
 

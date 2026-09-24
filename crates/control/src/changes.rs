@@ -6,7 +6,7 @@
 use std::sync::{MutexGuard, PoisonError};
 
 use axum::http::StatusCode;
-use streamdelay_config::{Config, ConfigError, SecretError, secret};
+use streamdelay_config::{Config, ConfigError, SecretError, SecretStore, secret};
 use streamdelay_relay::RelayError;
 use thiserror::Error;
 
@@ -35,9 +35,51 @@ pub(crate) enum ChangeError {
         save: Box<ConfigError>,
         restore: SecretError,
     },
+    #[error("could not update the secret store, so nothing was changed: {0}")]
+    Secret(SecretError),
+    #[error(
+        "{save} Saved passwords or settings had already been changed and could not be put \
+         back ({restore})."
+    )]
+    SecretsNotRestored {
+        save: Box<ChangeError>,
+        restore: SecretError,
+    },
     /// Saved and in effect, but the relay could not be given the destination.
     #[error(transparent)]
     Relay(#[from] RelayError),
+}
+
+/// Secrets as they were before a change, to put back if it cannot be saved.
+struct SecretsBefore(Vec<(&'static str, Option<String>)>);
+
+impl SecretsBefore {
+    /// Fails if one cannot be read: it could not be put back.
+    fn take(secrets: &dyn SecretStore, names: &[&'static str]) -> Result<Self, SecretError> {
+        names
+            .iter()
+            .map(|&name| Ok((name, secrets.try_get(name)?)))
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    /// Puts back all it can; returns the first error.
+    fn restore(self, secrets: &dyn SecretStore) -> Result<(), SecretError> {
+        let mut result = Ok(());
+        for (name, value) in self.0 {
+            let r = match value {
+                Some(raw) => secrets.set(name, &raw),
+                None => secrets.delete(name),
+            };
+            if let Err(e) = r {
+                tracing::error!("could not put the saved {name} back: {e}");
+                if result.is_ok() {
+                    result = Err(e);
+                }
+            }
+        }
+        result
+    }
 }
 
 impl From<ChangeError> for ApiError {
@@ -136,6 +178,37 @@ impl AppState {
         };
         self.sync_destination(lock)?;
         Ok(changed)
+    }
+
+    /// [`AppState::change_settings`], changing other secrets too: `update`
+    /// changes those named in `names` first, and they are put back as they were
+    /// if the settings cannot be saved.
+    pub(crate) fn change_settings_and_secrets<R>(
+        &self,
+        names: &[&'static str],
+        update: impl FnOnce(&dyn SecretStore) -> Result<(), SecretError>,
+        key: KeyChange,
+        change: impl FnOnce(&mut Config) -> R,
+    ) -> Result<(Config, R), ChangeError> {
+        let lock = self.lock_settings();
+        let secrets = self.shared.secrets.as_ref();
+        let before = SecretsBefore::take(secrets, names).map_err(ChangeError::Secret)?;
+        if let Err(e) = update(secrets) {
+            let _ = before.restore(secrets);
+            return Err(ChangeError::Secret(e));
+        }
+        match self.change_settings_locked(&lock, key, change) {
+            Ok(changed) => Ok(changed),
+            // Saved: the change stands.
+            Err(e @ ChangeError::Relay(_)) => Err(e),
+            Err(e) => Err(match before.restore(secrets) {
+                Ok(()) => e,
+                Err(restore) => ChangeError::SecretsNotRestored {
+                    save: Box::new(e),
+                    restore,
+                },
+            }),
+        }
     }
 
     /// Saves `key` as the stream key for the destination in the settings file

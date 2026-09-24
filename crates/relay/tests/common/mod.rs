@@ -23,6 +23,9 @@ pub struct Received {
     pub kind: MediaKind,
     pub ts: u32,
     pub payload: Bytes,
+    /// Bytes read on the connection, from its first, once this had arrived: its
+    /// last byte is at most this far in.
+    pub end: u64,
 }
 
 #[derive(Default)]
@@ -94,6 +97,7 @@ pub async fn start_sink_with(
                 let mut hs = ServerHandshake::new();
                 let mut out = BytesMut::new();
                 let mut buf = vec![0u8; 65536];
+                let mut read = 0u64;
                 let rest = loop {
                     let Ok(n) = tcp.read(&mut buf).await else {
                         return;
@@ -101,6 +105,7 @@ pub async fn start_sink_with(
                     if n == 0 {
                         return;
                     }
+                    read += n as u64;
                     let p = hs.feed(&buf[..n], &mut out).unwrap();
                     if tcp.write_all(&out.split()).await.is_err() {
                         return;
@@ -133,6 +138,7 @@ pub async fn start_sink_with(
                                 kind,
                                 ts: timestamp,
                                 payload,
+                                end: read,
                             }),
                             ServerEvent::Metadata { .. } => l.metadata += 1,
                             ServerEvent::Unpublish => l.unpublished += 1,
@@ -171,7 +177,10 @@ pub async fn start_sink_with(
                                 log.lock().unwrap().disconnected += 1;
                                 return;
                             }
-                            Ok(n) => data = buf[..n].to_vec(),
+                            Ok(n) => {
+                                read += n as u64;
+                                data = buf[..n].to_vec();
+                            }
                         },
                         _ = kill.changed() => return,
                     }

@@ -55,11 +55,15 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
-- **Dump buffer also throws away what was queued for a slow upload.** When the
-  upload had fallen behind, up to about 10 s already handed to the connection
-  to Twitch still aired after a dump. Now the connection is dropped and made
-  again at once (viewers see a short interruption), and the dump masks instead
-  of rewinding, since what Twitch had received is unknown.
+- **Dump buffer also throws away what was on its way to Twitch.** When the
+  upload had fallen behind or stalled, up to about 10 s already handed to the
+  connection to Twitch still aired after a dump. Now the dump asks the
+  operating system what it has not sent yet: if anything, or if a write was
+  under way, the connection is dropped and made again at once, which discards
+  it (viewers see a short interruption). This holds however little is waiting,
+  on a low-bitrate stream or after the encoder paused too. A Rewind dump still
+  rewinds, replaying only what Twitch acknowledged. The dump answers once this
+  is done.
 - On Linux, memory no longer creeps up over hours of streaming: the buffer's
   blocks are always returned to the system when freed. Before, the process
   could hold about twice the buffered video after a few hours.
@@ -84,6 +88,17 @@ All notable changes to stream-delay are listed here. The format follows
 - OBS setup wizard steps run one at a time, and the saved OBS password and
   settings backup are stored with the OBS they belong to: two steps at once
   (two tabs) could pair one OBS's password with another's address.
+- **The OBS wizard saves OBS's password and settings backup with its
+  settings, or not at all.** When the settings could not be saved, connecting
+  to another OBS had already replaced (or removed) the saved password of the
+  one in the settings, and restoring OBS had already deleted the backup the
+  settings still named. Now the previous ones stay, and a restore can be tried
+  again.
+- **The OBS wizard sets up the overlay for an OBS on another computer** with an
+  address that computer reaches this one at. It used to give it `127.0.0.1`,
+  that computer itself, and report success. When stream-delay's web pages are
+  not served to the network, it says so before changing anything. An overlay
+  source added earlier with an old address is updated.
 - Saving a secret no longer loses the previous one when the keychain accepts the
   new value but the private file cannot be updated: the keychain gets its old
   value back. A file that cannot be read now stops the save before the keychain
@@ -127,13 +142,34 @@ All notable changes to stream-delay are listed here. The format follows
   beyond 64 characters, a second `connect` on one connection is refused, and
   log lines kept for diagnostics are capped at 2 KB: one connection could make
   stream-delay keep megabytes of text of its choosing.
+- **Credentials in a destination URL's query** (`rtmps://host/app?auth=…`, used
+  by some servers) are hidden wherever the URL is shown: the state (which dock
+  and overlay links see), logs, error messages, the settings page and
+  diagnostics show `?…`. Saving the settings page keeps the real query. URLs
+  with a user name and password before the host are refused.
+- **Dock links no longer see the encoder's address in the replies to End
+  stream and Resume**, which returned the full state instead of what those
+  links are shown elsewhere.
+- **Memory an encoder's sessions keep is bounded.** Each reconnect kept its
+  stream metadata for as long as any earlier video was buffered, outside the
+  RAM cap: an encoder reconnecting over and over with large metadata and no
+  video could fill memory. Sessions without buffered media are dropped,
+  metadata is capped at 64 KB, and what sessions keep counts against the cap.
+- **API tokens you set yourself may only contain letters, digits and
+  `. _ ~ -`.** Links carry the token in their address, where `+`, `&`, `#` or
+  `%` changed or cut it, so the dashboard or its live updates did not work.
+  stream-delay now says so at startup. Generated tokens are unaffected.
 - **Releases:** a tag builds nothing unless CI passes on that commit and the
   versions and changelog match it; releases require the updater keys; every
   asset and update signature is checked before the checksums are added, and
   every update, including the entries for each kind of installation (deb, rpm,
   AppImage, MSI, setup, app), is offered from this release's own GitHub URLs;
   every installer is installed and started on clean machines; and the
-  container image is pushed only once the release is published. v0.2.0 lost
+  container image is pushed only once the release is published. A draft that
+  a rerun changed has no `SHA256SUMS.txt` unless the rerun passed everything:
+  every job that changes the draft removes it first (and never changes a
+  published release), and `release-checks.txt` names the commit and run that
+  passed. v0.2.0 lost
   three of its command-line archives and its `SHA256SUMS.txt` to a packaging
   bug, now fixed.
 

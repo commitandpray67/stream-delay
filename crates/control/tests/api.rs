@@ -793,3 +793,85 @@ async fn a_stored_key_never_reaches_another_server_even_when_removing_it_fails()
         "bound to Twitch, so only Twitch"
     );
 }
+
+/// An encoder publishing to `addr`, for as long as the connection is kept.
+async fn encoder(addr: std::net::SocketAddr) -> tokio::net::TcpStream {
+    use bytes::BytesMut;
+    use streamdelay_rtmp::handshake::{ClientHandshake, Progress};
+    use streamdelay_rtmp::session::{ClientConfig, ClientEvent, ClientSession};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut hs = ClientHandshake::new();
+    let mut out = BytesMut::new();
+    hs.start(&mut out);
+    tcp.write_all(&out.split()).await.unwrap();
+    let mut buf = vec![0u8; 65536];
+    let rest = loop {
+        let n = tcp.read(&mut buf).await.unwrap();
+        if let Progress::Done(rest) = hs.feed(&buf[..n], &mut out).unwrap() {
+            tcp.write_all(&out.split()).await.unwrap();
+            break rest;
+        }
+    };
+    let config = ClientConfig::new("live", format!("rtmp://{addr}/live"), "k");
+    let mut session = ClientSession::new(config);
+    let mut data = rest.to_vec();
+    loop {
+        let events = session.feed(&data).unwrap();
+        tcp.write_all(&session.take_output()).await.unwrap();
+        if events.contains(&ClientEvent::Publishing) {
+            return tcp;
+        }
+        let n = tcp.read(&mut buf).await.unwrap();
+        assert!(n > 0, "the relay closed the connection");
+        data = buf[..n].to_vec();
+    }
+}
+
+/// Every response that carries the relay state shows the encoder's address only
+/// to the dashboard.
+#[tokio::test]
+async fn only_the_dashboard_sees_the_encoder_address_anywhere() {
+    use streamdelay_control::{Scope, scoped_token};
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "127.0.0.1:0".parse().unwrap(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let ingest = relay.ingest_addr();
+    let mut config = Config::default();
+    config.api.token = TOKEN.into();
+    config.destination.url = String::new();
+    let dir = std::env::temp_dir().join(format!("sd-api-test-{}-peer", std::process::id()));
+    let app = streamdelay_control::router(relay, config, Arc::new(Secrets::new(&dir, false)), PORT);
+    let _encoder = encoder(ingest).await;
+    let state = || authed("GET", "/api/v1/state").body(Body::empty()).unwrap();
+    for _ in 0..100 {
+        if send(&app, state()).await.1["ingest"]["peer"].is_string() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(send(&app, state()).await.1["ingest"]["peer"].is_string());
+
+    let control = scoped_token(TOKEN, Scope::Control);
+    let read = scoped_token(TOKEN, Scope::Read);
+    let requests = [
+        ("GET", "/api/v1/state", &control),
+        ("GET", "/api/v1/state", &read),
+        ("POST", "/api/v1/stream/end", &control),
+        ("POST", "/api/v1/stream/resume", &control),
+    ];
+    for (method, path, token) in requests {
+        let r = with_token(method, path, token).body(Body::empty()).unwrap();
+        let (s, body) = send(&app, r).await;
+        assert_eq!(s, StatusCode::OK, "{method} {path}: {body}");
+        assert!(body["ingest"]["connected"].is_boolean(), "{body}");
+        assert!(
+            body["ingest"]["peer"].is_null(),
+            "{method} {path} shows the encoder's address: {body}"
+        );
+    }
+}

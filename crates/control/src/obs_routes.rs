@@ -9,12 +9,13 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use streamdelay_config::{Config, KeyMode, ObsBackup, SERVICES, SecretStore, secret};
-use streamdelay_obs::{Obs, ObsError, ObsTarget, StreamSettings};
+use streamdelay_obs::{Obs, ObsError, ObsTarget, SourceChange, StreamSettings};
 use streamdelay_relay::RtmpUrl;
 use tracing::{info, warn};
 
 use crate::AppState;
 use crate::app::{LOCAL_KEY, same_server, urls};
+use crate::auth::Scope;
 use crate::bound::{self, Saved};
 use crate::changes::KeyChange;
 use crate::routes::ApiError;
@@ -163,6 +164,46 @@ async fn server_for_obs(st: &AppState, c: &Config) -> Result<String, ApiError> {
     Ok(format!(
         "rtmp://{}/live",
         SocketAddr::new(ip, ingest.port())
+    ))
+}
+
+/// The overlay's address for the OBS in `c`. For an OBS on another computer,
+/// `127.0.0.1` would be that computer itself, and the page is only served to it
+/// if stream-delay accepts requests from the network.
+async fn overlay_for_obs(st: &AppState, c: &Config) -> Result<String, ApiError> {
+    if is_local(&c.obs.host).await {
+        return Ok(urls(st).overlay);
+    }
+    let bind = c.api.bind.ip();
+    if bind.is_loopback() || !st.shared.allow_lan {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "OBS runs on another computer, which would load the overlay from this one, but \
+             stream-delay's web pages are only served to this computer. Start stream-delay \
+             with --api 0.0.0.0:7788 --allow-lan (see Two-PC setups in the user guide), or \
+             set up OBS without the overlay."
+                .into(),
+        ));
+    }
+    let ip = if bind.is_unspecified() {
+        local_ip_towards(&c.obs.host, c.obs.port)
+            .await
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "could not find this computer's address on the way to {}",
+                        c.obs.host
+                    ),
+                )
+            })?
+    } else {
+        bind
+    };
+    Ok(format!(
+        "http://{}/overlay?token={}",
+        SocketAddr::new(ip, st.shared.port),
+        st.shared.tokens.get(Scope::Read)
     ))
 }
 
@@ -342,22 +383,27 @@ async fn connect(
         password,
     };
     let obs = Obs::connect(&t).await?;
-    // Connected: remember the settings.
-    if !body.password.is_empty() {
-        bound::save(
-            st.shared.secrets.as_ref(),
-            secret::OBS_PASSWORD,
-            &obs_id(&host, body.port),
-            &body.password,
-        )?;
-    } else if !same_obs {
-        // The saved password belonged to the previous OBS.
-        st.shared.secrets.delete(secret::OBS_PASSWORD)?;
-    }
-    change(&st, |c| {
-        c.obs.host = host.clone();
-        c.obs.port = body.port;
-    })?;
+    // Connected: remember the settings, and the password with them (if they
+    // cannot be saved, the one saved before stays).
+    let id = obs_id(&host, body.port);
+    st.change_settings_and_secrets(
+        &[secret::OBS_PASSWORD],
+        |secrets| {
+            if !body.password.is_empty() {
+                bound::save(secrets, secret::OBS_PASSWORD, &id, &body.password)
+            } else if !same_obs {
+                // The saved password belonged to the previous OBS.
+                secrets.delete(secret::OBS_PASSWORD)
+            } else {
+                Ok(())
+            }
+        },
+        KeyChange::Keep,
+        |c| {
+            c.obs.host = host.clone();
+            c.obs.port = body.port;
+        },
+    )?;
     Ok(Json(build_status(&st, Ok(obs)).await))
 }
 
@@ -395,7 +441,12 @@ async fn configure(
     // talks to (settings changes from the dashboard do not touch it).
     let _wizard = st.shared.obs_lock.lock().await;
     let config = st.config();
+    // Both addresses first: nothing changes unless OBS can reach them.
     let server = server_for_obs(&st, &config).await?;
+    let overlay = match body.add_overlay {
+        true => Some(overlay_for_obs(&st, &config).await?),
+        false => None,
+    };
     let obs = Obs::connect(&target(&st, &config)).await?;
     let info = obs.info().await?;
     if info.streaming {
@@ -415,18 +466,12 @@ async fn configure(
     } else {
         // Back up OBS's settings. They hold the stream key and maybe a server
         // password, so they are a secret, not part of the config file.
+        let id = obs_id(&config.obs.host, config.obs.port);
         let backup = ObsBackup {
             service_type: info.stream.service_type.clone(),
-            obs: Some(obs_id(&config.obs.host, config.obs.port)),
+            obs: Some(id.clone()),
             settings_json: None,
         };
-        bound::save(
-            st.shared.secrets.as_ref(),
-            secret::OBS_BACKUP,
-            &obs_id(&config.obs.host, config.obs.port),
-            &info.stream.settings,
-        )?;
-        let _ = st.shared.secrets.delete(secret::OBS_BACKUP_KEY);
 
         // A Twitch key, for Twitch (the destination is set to it below).
         let key = match info.stream.twitch_key() {
@@ -440,17 +485,27 @@ async fn configure(
             }
             _ => KeyChange::Keep,
         };
-        st.change_settings(key, |c| {
-            c.obs.backup = Some(backup.clone());
-            if imported_key {
-                c.destination.key_mode = KeyMode::Stored;
-                // A Twitch key only goes to Twitch.
-                if !same_server(SERVICES[0].url, &c.destination.url) {
-                    c.destination.service = "twitch".into();
-                    c.destination.url = SERVICES[0].url.into();
+        // Saved with the settings that name it, or not at all.
+        st.change_settings_and_secrets(
+            &[secret::OBS_BACKUP, secret::OBS_BACKUP_KEY],
+            |secrets| {
+                bound::save(secrets, secret::OBS_BACKUP, &id, &info.stream.settings)?;
+                let _ = secrets.delete(secret::OBS_BACKUP_KEY);
+                Ok(())
+            },
+            key,
+            |c| {
+                c.obs.backup = Some(backup.clone());
+                if imported_key {
+                    c.destination.key_mode = KeyMode::Stored;
+                    // A Twitch key only goes to Twitch.
+                    if !same_server(SERVICES[0].url, &c.destination.url) {
+                        c.destination.service = "twitch".into();
+                        c.destination.url = SERVICES[0].url.into();
+                    }
                 }
-            }
-        })?;
+            },
+        )?;
 
         obs.stream_to(&server, &links.obs_key).await?;
         info!("OBS now streams to {server}");
@@ -458,14 +513,17 @@ async fn configure(
     }
 
     let mut overlay_added = false;
-    if body.add_overlay {
-        overlay_added = obs
-            .add_browser_source(OVERLAY_SOURCE, &links.overlay)
-            .await?;
-        messages.push(if overlay_added {
-            format!("Added the \"{OVERLAY_SOURCE}\" browser source to your current scene.")
-        } else {
-            format!("The \"{OVERLAY_SOURCE}\" source already exists.")
+    if let Some(overlay) = overlay {
+        let change = obs.add_browser_source(OVERLAY_SOURCE, &overlay).await?;
+        overlay_added = change == SourceChange::Added;
+        messages.push(match change {
+            SourceChange::Added => {
+                format!("Added the \"{OVERLAY_SOURCE}\" browser source to your current scene.")
+            }
+            SourceChange::Updated => {
+                format!("Updated the address of the \"{OVERLAY_SOURCE}\" source.")
+            }
+            SourceChange::Unchanged => format!("The \"{OVERLAY_SOURCE}\" source already exists."),
         });
     }
     messages
@@ -510,9 +568,24 @@ async fn restore(State(st): State<AppState>) -> Result<Json<ObsStatus>, ApiError
         settings,
     })
     .await?;
-    let _ = st.shared.secrets.delete(secret::OBS_BACKUP);
-    let _ = st.shared.secrets.delete(secret::OBS_BACKUP_KEY);
-    change(&st, |c| c.obs.backup = None)?;
+    // The settings first: if they cannot be saved, the backup stays, and
+    // restoring again is safe.
+    change(&st, |c| c.obs.backup = None).map_err(|e| {
+        ApiError(
+            e.0,
+            format!(
+                "OBS's own stream settings are back, but stream-delay could not save its \
+                 settings, so it keeps the backup; try again: {}",
+                e.1
+            ),
+        )
+    })?;
+    // Nothing names the backup any more.
+    for name in [secret::OBS_BACKUP, secret::OBS_BACKUP_KEY] {
+        if let Err(e) = st.shared.secrets.delete(name) {
+            warn!("could not delete the saved {name}: {e}");
+        }
+    }
     info!("restored OBS's original stream settings");
     Ok(Json(build_status(&st, Ok(obs)).await))
 }
@@ -575,6 +648,72 @@ mod tests {
         config.obs.port = 4456;
         assert_eq!(password_for(&secrets, &config).as_deref(), Some("pw-b"));
         assert_eq!(saved_password(&secrets).as_deref(), Some("pw-b"));
+    }
+
+    #[tokio::test]
+    async fn the_overlay_address_is_one_obs_can_load() {
+        let state = |edit: fn(&mut Config)| async move {
+            let relay = streamdelay_relay::start(streamdelay_relay::RelayConfig {
+                ingest_bind: "127.0.0.1:0".parse().unwrap(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let mut config = Config::default();
+            config.api.token = "0123456789abcdef".into();
+            edit(&mut config);
+            let st = crate::state(
+                relay,
+                config.clone(),
+                std::sync::Arc::new(MemorySecrets::default()),
+                7788,
+                None,
+            );
+            (st, config)
+        };
+        let read = |st: &AppState| st.shared.tokens.get(Scope::Read).to_string();
+
+        // OBS on this computer: the usual link.
+        let (st, c) = state(|_| {}).await;
+        assert_eq!(overlay_for_obs(&st, &c).await.unwrap(), urls(&st).overlay);
+
+        // On another computer, which only pages served to the network reach.
+        let (st, c) = state(|c| c.obs.host = "192.0.2.10".into()).await;
+        let e = overlay_for_obs(&st, &c).await.unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT);
+        assert!(e.1.contains("--allow-lan"), "{}", e.1);
+        let (st, c) = state(|c| {
+            c.obs.host = "192.0.2.10".into();
+            c.api.bind = "0.0.0.0:7788".parse().unwrap();
+        })
+        .await;
+        assert_eq!(
+            overlay_for_obs(&st, &c).await.unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+        let (st, c) = state(|c| {
+            c.obs.host = "192.0.2.10".into();
+            c.api.bind = "192.0.2.5:7788".parse().unwrap();
+            c.api.allow_lan = true;
+        })
+        .await;
+        assert_eq!(
+            overlay_for_obs(&st, &c).await.unwrap(),
+            format!("http://192.0.2.5:7788/overlay?token={}", read(&st))
+        );
+        // Listening everywhere: the address OBS's computer reaches this one at.
+        let (st, c) = state(|c| {
+            c.obs.host = "192.0.2.10".into();
+            c.api.bind = "0.0.0.0:7788".parse().unwrap();
+            c.api.allow_lan = true;
+        })
+        .await;
+        if let Some(own) = local_ip_towards("192.0.2.10", 4455).await {
+            assert_eq!(
+                overlay_for_obs(&st, &c).await.unwrap(),
+                format!("http://{own}:7788/overlay?token={}", read(&st))
+            );
+        }
     }
 
     #[test]

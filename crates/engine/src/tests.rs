@@ -605,6 +605,65 @@ fn ram_cap_is_respected() {
 }
 
 #[test]
+fn reconnects_that_send_only_metadata_keep_nothing() {
+    let mut s = Sim::new(config());
+    s.connect();
+    s.advance(5 * SEC);
+    s.stop_encoder();
+    // After a GOP has aired, an encoder that reconnects over and over, sending
+    // new metadata each time and no media.
+    for i in 0..200u32 {
+        s.e.ingest_start(s.now);
+        let meta = Bytes::from(vec![i as u8; 60 * 1024]);
+        s.e.ingest_metadata(s.now, meta);
+        s.e.ingest_end(s.now);
+        s.now += 100 * MS;
+        s.poll();
+    }
+    // The session with buffered media, and the latest.
+    assert!(s.e.sessions.len() <= 2, "{} sessions", s.e.sessions.len());
+    assert!(
+        s.e.session_bytes < 2 * 64 * 1024,
+        "{} bytes kept for sessions",
+        s.e.session_bytes
+    );
+    // Metadata larger than an encoder's is not kept.
+    s.e.ingest_start(s.now);
+    s.e.ingest_metadata(s.now, Bytes::from(vec![0u8; 1024 * 1024]));
+    assert!(s.e.sessions.last().unwrap().metadata.is_none());
+}
+
+#[test]
+fn sessions_count_against_the_ram_cap() {
+    let cap = 1024 * 1024;
+    let mut s = Sim::new(EngineConfig {
+        ram_cap_bytes: cap,
+        ..config()
+    });
+    s.connect();
+    s.advance(5 * SEC);
+    s.stop_encoder();
+    // Reconnects that each send large metadata and one keyframe.
+    for i in 0..200u32 {
+        s.e.ingest_start(s.now);
+        s.e.ingest_metadata(s.now, Bytes::from(vec![i as u8; 60 * 1024]));
+        s.e.ingest(
+            s.now,
+            Kind::Video,
+            u64::from(i) * 33,
+            payload(&[0x17, 0x01, 0, 0, 0], 1_000_000 + i),
+        );
+        s.e.ingest_end(s.now);
+        s.now += 100 * MS;
+        s.poll();
+    }
+    // Over the cap by at most the newest message and session, which stay.
+    let used = s.e.bytes + s.e.session_bytes;
+    assert!(used <= cap + 128 * 1024, "{used} bytes in use");
+    assert!(s.e.sessions.len() < 30, "{} sessions", s.e.sessions.len());
+}
+
+#[test]
 fn snapshot_serializes() {
     let s = live_sim();
     let json = serde_json::to_value(s.snapshot()).unwrap();

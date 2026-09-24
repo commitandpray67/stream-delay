@@ -73,6 +73,11 @@ pub enum AppError {
          to use a generated one"
     )]
     WeakToken,
+    #[error(
+        "the API token may only contain letters, digits and . _ ~ - (it goes into links); \
+         leave it unset to use a generated one"
+    )]
+    TokenCharacters,
 }
 
 /// Shortest API token accepted. Generated tokens have 32 characters; a short one
@@ -218,6 +223,15 @@ impl App {
         }
         if config.api.token.chars().count() < MIN_TOKEN_LEN {
             return Err(AppError::WeakToken);
+        }
+        // Links and the WebSocket carry it in a query string unencoded.
+        if !config
+            .api
+            .token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b))
+        {
+            return Err(AppError::TokenCharacters);
         }
         if config.destination.key_mode == KeyMode::Passthrough
             && config.ingest.key.as_deref().is_some_and(|k| !k.is_empty())
@@ -412,6 +426,13 @@ pub(crate) fn urls(state: &AppState) -> Urls {
             .filter(|k| !k.is_empty())
             .unwrap_or_else(|| LOCAL_KEY.into()),
     }
+}
+
+/// A destination URL as it may be shown: without a stream key, and with the
+/// values of its query hidden (see [`RtmpUrl::redacted`]). Invalid URLs are
+/// returned unchanged.
+pub(crate) fn shown_url(url: &str) -> String {
+    RtmpUrl::parse(url).map_or_else(|_| url.to_string(), |u| u.redacted())
 }
 
 /// Splits a stream key embedded in a destination URL (`rtmp://host/app/<key>`)

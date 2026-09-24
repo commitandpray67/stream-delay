@@ -27,7 +27,9 @@ interrupt a live stream.
 
 If OBS runs on another computer, stream-delay has to accept streams from your
 network first (see [Two-PC setups](install.md#two-pc-setups)); the wizard then
-gives OBS this computer's address. Running the setup again later (for example
+gives OBS this computer's address. To add the overlay there too, its web server
+must listen on the network as well (same section); otherwise the wizard says so
+and changes nothing, and you can run it without the overlay. Running the setup again later (for example
 after stream-delay had to change its port) updates OBS and keeps the backup of
 your original settings.
 

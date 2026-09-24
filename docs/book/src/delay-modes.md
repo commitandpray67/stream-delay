@@ -76,12 +76,15 @@ same delay.
   Without the overlay in your scenes, viewers would see you live meanwhile; the
   dock says so before you confirm.
 
-If your upload has fallen behind, part of what viewers haven't seen is already
-queued for Twitch rather than in the buffer. The dump throws that away too, by
-dropping the connection to Twitch and making it again at once: viewers see a
-short interruption instead. What Twitch had already received by then can't be
-taken back, and since stream-delay can't tell how much that was, the dump masks
-instead of rewinding.
+Part of what viewers haven't seen may already be on its way to Twitch rather than
+in the buffer: queued for the connection, or handed to your computer's network
+stack and not sent yet (always a little, and seconds of video if your upload has
+fallen behind or stalled). The dump throws all of that away too. If anything
+was still waiting to leave your computer, it drops the connection to Twitch and
+makes it again at once, which discards it: viewers see a short interruption.
+What Twitch had already received can't be taken back; with Rewind, the replay
+repeats only what Twitch confirmed it received, and the stream then goes on
+from after the dump as usual.
 
 Press it as soon as you can: only what is still in the buffer can be thrown away.
 It takes two clicks in the dock and dashboard (the first time, it explains itself

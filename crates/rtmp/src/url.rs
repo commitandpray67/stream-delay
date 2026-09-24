@@ -26,10 +26,10 @@ pub struct RtmpUrl {
 }
 
 impl fmt::Debug for RtmpUrl {
-    // Never print the stream key.
+    // Never print the stream key, or the query (see [`RtmpUrl::redacted`]).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RtmpUrl")
-            .field("tc_url", &self.tc_url)
+            .field("tc_url", &self.redacted())
             .field(
                 "stream_key",
                 &self.stream_key.as_ref().map(|_| "<redacted>"),
@@ -48,6 +48,8 @@ pub enum UrlError {
     Port,
     #[error("URL has no application path (for example rtmp://host/app)")]
     App,
+    #[error("a user name or password in the URL is not supported")]
+    Credentials,
 }
 
 impl RtmpUrl {
@@ -61,6 +63,12 @@ impl RtmpUrl {
             return Err(UrlError::Scheme);
         };
         let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        if authority.contains('@') {
+            return Err(UrlError::Credentials);
+        }
+        if authority.contains(['?', '#']) {
+            return Err(UrlError::Host);
+        }
         let default_port = match scheme {
             Scheme::Rtmp => 1935,
             Scheme::Rtmps => 443,
@@ -96,9 +104,38 @@ impl RtmpUrl {
         })
     }
 
-    /// The URL without any embedded stream key, safe to show and log.
+    /// The URL without any embedded stream key, or the values of its query,
+    /// where some servers take a password: safe to show and log.
     pub fn redacted(&self) -> String {
-        self.tc_url.clone()
+        match self.tc_url.split_once('?') {
+            Some((base, _)) => format!("{base}?…"),
+            None => self.tc_url.clone(),
+        }
+    }
+
+    /// The query of the application (`rtmp://host/app?<query>`), which may hold
+    /// credentials. Without the `?`.
+    pub fn query(&self) -> Option<&str> {
+        self.app
+            .split_once('?')
+            .map(|(_, q)| q)
+            .filter(|q| !q.is_empty())
+    }
+
+    /// The values in [`RtmpUrl::query`], and the query itself: what must not be
+    /// shown or logged.
+    pub fn query_secrets(&self) -> Vec<String> {
+        let Some(q) = self.query() else {
+            return Vec::new();
+        };
+        let mut v = vec![q.to_string()];
+        v.extend(
+            q.split('&')
+                .map(|pair| pair.split_once('=').map_or(pair, |(_, value)| value))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        );
+        v
     }
 }
 
@@ -170,7 +207,36 @@ mod tests {
     }
 
     #[test]
+    fn query_values_are_never_shown() {
+        let u =
+            RtmpUrl::parse("rtmps://ingest.example/live?auth=SENTINEL_credential_123&x=1").unwrap();
+        assert_eq!(u.app, "live?auth=SENTINEL_credential_123&x=1");
+        assert_eq!(u.query(), Some("auth=SENTINEL_credential_123&x=1"));
+        assert_eq!(u.redacted(), "rtmps://ingest.example/live?…");
+        assert!(!format!("{u:?}").contains("SENTINEL"));
+        assert_eq!(
+            u.query_secrets(),
+            [
+                "auth=SENTINEL_credential_123&x=1",
+                "SENTINEL_credential_123",
+                "1"
+            ]
+        );
+        let u = RtmpUrl::parse("rtmp://host/app").unwrap();
+        assert_eq!(
+            (u.query(), u.redacted().as_str()),
+            (None, "rtmp://host/app")
+        );
+        assert!(u.query_secrets().is_empty());
+    }
+
+    #[test]
     fn errors() {
+        assert_eq!(
+            RtmpUrl::parse("rtmp://user:secret@host:1935/app"),
+            Err(UrlError::Credentials)
+        );
+        assert_eq!(RtmpUrl::parse("rtmp://host?x=1/app"), Err(UrlError::Host));
         assert_eq!(RtmpUrl::parse("http://x/app"), Err(UrlError::Scheme));
         assert_eq!(RtmpUrl::parse("rtmp://host"), Err(UrlError::App));
         assert_eq!(RtmpUrl::parse("rtmp://host:abc/app"), Err(UrlError::Port));

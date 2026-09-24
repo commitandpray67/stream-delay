@@ -1,6 +1,7 @@
 //! RTMP(S) egress: publishes the delayed stream to the destination and reconnects
 //! with backoff when the connection drops.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use tracing::{info, warn};
 use crate::EgressStatus;
 use crate::core::Event;
 use crate::io::{self, BoxStream};
+use crate::sendq::{self, Counted, SendQueue};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -56,10 +58,11 @@ pub(crate) enum EgressCtl {
     /// End the broadcast at once ("end stream"): reset the connection, so what the
     /// OS has not sent yet is discarded rather than delivered.
     Abort,
-    /// A dump with the destination behind: reset the connection, so that neither
-    /// the queue nor what the OS still holds reaches it, and connect again at
-    /// once.
-    Cut,
+    /// A dump: media queued before it is dropped unsent (see [`Counters::cut`]),
+    /// and the connection is reset if media from before it may still be waiting
+    /// in this computer (see `publish`). Answered with [`Event::CutDone`]. The
+    /// number of the dump (see [`Counters::cut`]).
+    Cut(u64),
 }
 
 /// Media for the destination, as the core queues it.
@@ -73,12 +76,20 @@ pub(crate) struct Queued {
     pub msg: OutMsg,
 }
 
-/// A second handle on the destination socket, for [`EgressCtl::Abort`].
-struct Aborter(Option<socket2::Socket>);
+/// A second handle on the destination socket, for [`EgressCtl::Abort`] and to
+/// ask the OS what it still holds (see [`sendq`]).
+struct Aborter(Option<socket2::Socket>, Arc<AtomicU64>);
 
 impl Aborter {
-    fn new(tcp: &TcpStream) -> Self {
-        Self(socket2::SockRef::from(tcp).try_clone().ok())
+    /// For `tcp`, whose bytes accepted by the OS `written` counts.
+    fn new(tcp: &TcpStream, written: Arc<AtomicU64>) -> Self {
+        Self(socket2::SockRef::from(tcp).try_clone().ok(), written)
+    }
+
+    /// What the OS holds of what was written; `None` if it cannot tell.
+    fn send_queue(&self) -> Option<SendQueue> {
+        let sock = self.0.as_ref()?;
+        sendq::query(sock, self.1.load(Ordering::Relaxed))
     }
 
     /// Makes closing the connection reset it: the OS then drops data still waiting
@@ -88,9 +99,25 @@ impl Aborter {
             let _ = s.set_linger(Some(Duration::ZERO));
         }
     }
+
+    /// The most the OS may hold of what was written, if it cannot say, in bytes.
+    fn held_at_most(&self) -> u64 {
+        let reported = self
+            .0
+            .as_ref()
+            .and_then(|s| s.send_buffer_size().ok())
+            .unwrap_or(0) as u64;
+        // What the OS reports is not always all it buffers (Windows sizes its
+        // buffer by itself; TLS keeps some too): assume generously more.
+        reported.max(OS_BUFFER_AT_LEAST) * 2
+    }
 }
 
+/// See [`Aborter::held_at_most`].
+const OS_BUFFER_AT_LEAST: u64 = 4 * 1024 * 1024;
+
 /// Counters shared with the core task.
+#[derive(Default)]
 pub(crate) struct Counters {
     /// Media queued for the destination and not written yet, including what is
     /// being written.
@@ -98,32 +125,9 @@ pub(crate) struct Counters {
     pub written: AtomicU64,
     /// Dumps so far: queued media made before the latest is dropped unsent.
     pub cut: AtomicU64,
-    /// The last message with a sequence number taken to be written on the
-    /// current connection ([`NONE`] before the first). Set before writing it.
-    pub taken_seq: AtomicU64,
-}
-
-/// No sequence number, in [`Counters::taken_seq`].
-const NONE: u64 = u64::MAX;
-
-impl Default for Counters {
-    fn default() -> Self {
-        Self {
-            backlog: AtomicU64::new(0),
-            written: AtomicU64::new(0),
-            cut: AtomicU64::new(0),
-            taken_seq: AtomicU64::new(NONE),
-        }
-    }
 }
 
 impl Counters {
-    /// The last message the current connection took to write: it and what came
-    /// before are the destination's, the rest is still queued.
-    pub fn taken_seq(&self) -> Option<u64> {
-        Some(self.taken_seq.load(Ordering::SeqCst)).filter(|&s| s != NONE)
-    }
-
     fn drop_queued(&self, q: &Queued) {
         self.backlog
             .fetch_sub(q.msg.payload.len() as u64, Ordering::Relaxed);
@@ -133,8 +137,13 @@ impl Counters {
 enum RunEnd {
     Stopped,
     Retarget(Target),
-    /// Connect again at once (see [`EgressCtl::Cut`]).
-    Restart,
+    /// Reset for dump `cut`, which is answered once the connection is closed,
+    /// with the last message the destination surely has. Then connect again at
+    /// once (see [`EgressCtl::Cut`]).
+    CutReset {
+        cut: u64,
+        delivered: Option<u64>,
+    },
     Failed(Failure),
 }
 
@@ -153,9 +162,15 @@ impl Failure {
         }
     }
 
-    /// This failure as it may be logged and shown: see [`scrub`].
-    fn scrubbed(mut self, key: &str) -> Self {
-        self.message = scrub(&self.message, key);
+    /// This failure as it may be logged and shown: see [`scrub`]. Nor does it
+    /// quote the values in the URL's query, which may be credentials.
+    fn scrubbed(mut self, t: &Target) -> Self {
+        self.message = scrub(&self.message, &t.key);
+        for secret in t.url.query_secrets() {
+            if secret.chars().count() >= 4 {
+                self.message = self.message.replace(&secret, "<redacted>");
+            }
+        }
         self
     }
 }
@@ -243,7 +258,8 @@ pub(crate) async fn run(
                         failures = 0;
                         target = Some(t);
                     }
-                    Some(EgressCtl::Stop | EgressCtl::Abort | EgressCtl::Cut) => {}
+                    Some(EgressCtl::Cut(n)) => cut_done(&events, n, false, None),
+                    Some(EgressCtl::Stop | EgressCtl::Abort) => {}
                     None => return,
                 },
                 m = media.recv() => {
@@ -267,7 +283,7 @@ pub(crate) async fn run(
                     c = ctl.recv() => match c {
                         // Nothing is sent yet, and what is queued was made for
                         // another connection.
-                        Some(EgressCtl::Cut) => {}
+                        Some(EgressCtl::Cut(n)) => cut_done(&events, n, false, None),
                         Some(EgressCtl::Start(t)) => break Err(Some(t)),
                         Some(EgressCtl::Stop | EgressCtl::Abort) | None => break Err(None),
                     },
@@ -289,7 +305,7 @@ pub(crate) async fn run(
         let (stream, session, aborter) = match connected {
             Ok(Ok(c)) => c,
             Ok(Err(f)) => {
-                let f = f.scrubbed(&t.key);
+                let f = f.scrubbed(&t);
                 warn!("destination connection failed: {}", f.message);
                 let wait = retry_wait(&mut failures, f.refused);
                 target = wait_backoff(
@@ -310,7 +326,7 @@ pub(crate) async fn run(
         let pending = loop {
             match ctl.try_recv() {
                 // Nothing sent yet.
-                Ok(EgressCtl::Cut) => {}
+                Ok(EgressCtl::Cut(n)) => cut_done(&events, n, false, None),
                 Ok(c) => break Some(c),
                 Err(_) => break None,
             }
@@ -329,8 +345,6 @@ pub(crate) async fn run(
             continue;
         }
         info!("publishing to destination");
-        // Before the core hears of the connection: nothing is taken on it yet.
-        counters.taken_seq.store(NONE, Ordering::SeqCst);
         let (gen_tx, gen_rx) = tokio::sync::oneshot::channel();
         let _ = events.send(Event::EgressConnected { reply: gen_tx });
         let Ok(generation) = gen_rx.await else { return };
@@ -347,11 +361,20 @@ pub(crate) async fn run(
             &counters,
         )
         .await;
+        // A failed connection is reset: what the OS still holds for it is stale,
+        // and must not reach the destination later (after a dump, say).
+        if matches!(end, RunEnd::Failed(_)) {
+            aborter.arm();
+        }
         // The socket closes once this second handle goes too; don't keep it open
         // through a reconnect backoff.
         drop(aborter);
+        // Reset now: nothing more from before the dump can leave.
+        if let RunEnd::CutReset { cut, delivered } = end {
+            cut_done(&events, cut, true, delivered);
+        }
         let end = match end {
-            RunEnd::Failed(f) => RunEnd::Failed(f.scrubbed(&t.key)),
+            RunEnd::Failed(f) => RunEnd::Failed(f.scrubbed(&t)),
             other => other,
         };
         let error = match &end {
@@ -368,9 +391,9 @@ pub(crate) async fn run(
                 stopped(&events, &mut media, &counters);
             }
             RunEnd::Retarget(t) => target = Some(t),
-            RunEnd::Restart => {
-                info!("reset the destination connection for a dump; connecting again")
-            }
+            RunEnd::CutReset { .. } => info!(
+                "reset the destination connection for a dump, since it was behind; connecting again"
+            ),
             RunEnd::Failed(f) => {
                 warn!("destination connection lost: {}", f.message);
                 if started.elapsed() >= STABLE_CONNECTION {
@@ -388,6 +411,54 @@ pub(crate) async fn run(
 
 fn status(events: &mpsc::UnboundedSender<Event>, s: EgressStatus, error: Option<String>) {
     let _ = events.send(Event::EgressStatus { status: s, error });
+}
+
+/// Answers [`EgressCtl::Cut`]: whether the connection was reset, and the last
+/// message the destination surely has (see [`Event::CutDone`]).
+fn cut_done(events: &mpsc::UnboundedSender<Event>, cut: u64, reset: bool, delivered: Option<u64>) {
+    let _ = events.send(Event::CutDone {
+        cut,
+        reset,
+        delivered,
+    });
+}
+
+/// What one connection wrote: the last message of each batch, with how many
+/// bytes had been written once it was. Kept for [`WRITTEN_KEPT`] bytes.
+#[derive(Default)]
+struct WriteLog {
+    total: u64,
+    batches: VecDeque<(u64, u64)>,
+}
+
+/// How far back [`WriteLog`] reaches, in bytes: past what the OS may hold.
+const WRITTEN_KEPT: u64 = 32 * 1024 * 1024;
+
+impl WriteLog {
+    fn written(&mut self, bytes: u64, last_seq: Option<u64>) {
+        self.total += bytes;
+        if let Some(seq) = last_seq {
+            self.batches.push_back((seq, self.total));
+        }
+        while self
+            .batches
+            .front()
+            .is_some_and(|&(_, end)| self.total - end > WRITTEN_KEPT)
+        {
+            self.batches.pop_front();
+        }
+    }
+
+    /// The last message surely sent, if at most `unsent` of what was written may
+    /// still be waiting in the OS.
+    fn surely_sent(&self, unsent: u64) -> Option<u64> {
+        let sent = self.total.checked_sub(unsent)?;
+        self.batches
+            .iter()
+            .rev()
+            .find(|&&(_, end)| end <= sent)
+            .map(|&(seq, _)| seq)
+    }
 }
 
 /// Reports that the egress has stopped, after dropping the media still queued
@@ -422,7 +493,7 @@ async fn wait_backoff(
             _ = &mut sleep => return Some(current),
             c = ctl.recv() => match c {
                 Some(EgressCtl::Start(t)) => return Some(t),
-                Some(EgressCtl::Cut) => {}
+                Some(EgressCtl::Cut(n)) => cut_done(events, n, false, None),
                 Some(EgressCtl::Stop | EgressCtl::Abort) | None => {
                     stopped(events, media, counters);
                     return None;
@@ -445,7 +516,9 @@ async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Fail
             ))
         })?;
     io::tune(&tcp);
-    let aborter = Aborter::new(&tcp);
+    let written = Arc::new(AtomicU64::new(0));
+    let aborter = Aborter::new(&tcp, written.clone());
+    let tcp = Counted::new(tcp, written);
     let mut stream: BoxStream = match t.url.scheme {
         Scheme::Rtmp => Box::pin(tcp),
         Scheme::Rtmps => {
@@ -526,10 +599,11 @@ fn ended_by(c: Option<EgressCtl>, aborter: &Aborter) -> RunEnd {
             aborter.arm();
             RunEnd::Stopped
         }
-        Some(EgressCtl::Cut) => {
-            aborter.arm();
-            RunEnd::Restart
-        }
+        // Answered in `publish`, which resets the connection itself if needed.
+        Some(EgressCtl::Cut(cut)) => RunEnd::CutReset {
+            cut,
+            delivered: None,
+        },
         Some(EgressCtl::Stop) | None => RunEnd::Stopped,
     }
 }
@@ -543,7 +617,9 @@ enum Written {
 }
 
 /// Writes `data` unless a control message arrives first, so stopping never waits
-/// on a stalled destination. Fails if the destination takes none of it for
+/// on a stalled destination, and flushes it: once done, all of it is in the OS
+/// (TLS keeps none back), which a dump relies on (see [`sendq`]). Fails if the
+/// destination takes none of it for
 /// `stall_timeout`: a connection that died without the network reporting it
 /// (after the computer switched networks, say) otherwise holds the stream until
 /// the OS gives up on it, which can take a quarter of an hour.
@@ -553,6 +629,15 @@ async fn write_or_ctl(
     ctl: &mut mpsc::UnboundedReceiver<EgressCtl>,
     stall_timeout: Duration,
 ) -> Written {
+    let stalled = || {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "the destination took no data for {} s",
+                stall_timeout.as_secs()
+            ),
+        )
+    };
     let write = async {
         let mut rest = data;
         while !rest.is_empty() {
@@ -560,18 +645,13 @@ async fn write_or_ctl(
                 Ok(Ok(0)) => return Err(std::io::ErrorKind::WriteZero.into()),
                 Ok(Ok(n)) => rest = &rest[n..],
                 Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!(
-                            "the destination took no data for {} s",
-                            stall_timeout.as_secs()
-                        ),
-                    ));
-                }
+                Err(_) => return Err(stalled()),
             }
         }
-        Ok(())
+        match tokio::time::timeout(stall_timeout, wr.flush()).await {
+            Ok(r) => r,
+            Err(_) => Err(stalled()),
+        }
     };
     tokio::select! {
         biased;
@@ -599,13 +679,38 @@ async fn publish(
     let (mut rd, mut wr): (ReadHalf<BoxStream>, WriteHalf<BoxStream>) = tokio::io::split(stream);
     let mut buf = vec![0u8; 16 * 1024];
     let mut last_written: Option<u64> = None;
+    let mut log = WriteLog::default();
     let mut batch = Vec::with_capacity(64);
+    // A dump while media from before it may still be waiting in this computer,
+    // in a write under way or unsent in the OS: the connection is reset,
+    // dropping it. Of what was written, the destination surely has only what
+    // it acknowledged.
+    let reset_for_cut = |cut: u64, log: &WriteLog| {
+        let held = match aborter.send_queue() {
+            Some(q) => q.unsent + q.unacked,
+            None => aborter.held_at_most(),
+        };
+        aborter.arm();
+        RunEnd::CutReset {
+            cut,
+            delivered: log.surely_sent(held),
+        }
+    };
     loop {
         tokio::select! {
             biased;
             c = ctl.recv() => {
-                if matches!(c, Some(EgressCtl::Cut)) {
-                    return (ended_by(c, aborter), last_written);
+                if let Some(EgressCtl::Cut(cut)) = c {
+                    // Some of what was written has not left (or the OS cannot
+                    // say).
+                    if !matches!(aborter.send_queue(), Some(SendQueue { unsent: 0, .. })) {
+                        return (reset_for_cut(cut, &log), last_written);
+                    }
+                    // Nothing from before the dump is waiting here: what was
+                    // written is on its way, and what is queued is dropped when
+                    // read.
+                    cut_done(events, cut, false, last_written);
+                    continue;
                 }
                 // Unpublish cleanly if the destination still takes data, but don't
                 // wait on one that has stalled: dropping the connection also ends
@@ -643,6 +748,7 @@ async fn publish(
                     match write_or_ctl(&mut wr, &out, ctl, stall_timeout).await {
                         Written::Done => {}
                         Written::Failed(e) => return (RunEnd::Failed(Failure::new(format!("write failed: {e}"))), last_written),
+                        Written::Interrupted(Some(EgressCtl::Cut(cut))) => return (reset_for_cut(cut, &log), last_written),
                         Written::Interrupted(c) => return (ended_by(c, aborter), last_written),
                     }
                 }
@@ -670,22 +776,22 @@ async fn publish(
                         batch_last = m.seq;
                     }
                 }
-                if let Some(seq) = batch_last {
-                    counters.taken_seq.store(seq, Ordering::SeqCst);
-                }
                 let out = session.take_output();
                 let result = write_or_ctl(&mut wr, &out, ctl, stall_timeout).await;
                 counters.backlog.fetch_sub(bytes, Ordering::Relaxed);
                 match result {
                     Written::Done => {}
                     Written::Failed(e) => return (RunEnd::Failed(Failure::new(format!("write failed: {e}"))), last_written),
-                    // Told to stop mid-write (End stream on a slow upload), or a
-                    // dump while this media was being written: the RTMP stream is
-                    // cut mid-message, so there is no clean unpublish; dropping the
-                    // connection ends the broadcast (or restarts it for a dump).
+                    // A dump while this media was being written: part of it may
+                    // be waiting here yet.
+                    Written::Interrupted(Some(EgressCtl::Cut(cut))) => return (reset_for_cut(cut, &log), last_written),
+                    // Told to stop mid-write (End stream on a slow upload): the RTMP
+                    // stream is cut mid-message, so there is no clean unpublish;
+                    // dropping the connection ends the broadcast.
                     Written::Interrupted(c) => return (ended_by(c, aborter), last_written),
                 }
                 counters.written.fetch_add(out.len() as u64, Ordering::Relaxed);
+                log.written(out.len() as u64, batch_last);
                 if batch_last.is_some() {
                     last_written = batch_last;
                 }
@@ -699,6 +805,233 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+
+    /// A connection being published on, in a task.
+    struct Publishing {
+        ctl: mpsc::UnboundedSender<EgressCtl>,
+        media: mpsc::UnboundedSender<Queued>,
+        events: mpsc::UnboundedReceiver<Event>,
+        counters: Arc<Counters>,
+        task: tokio::task::JoinHandle<(RunEnd, Option<u64>)>,
+    }
+
+    impl Publishing {
+        fn start(stream: BoxStream, aborter: Aborter) -> Self {
+            let (ctl, mut ctl_rx) = mpsc::unbounded_channel();
+            let (media, mut media_rx) = mpsc::unbounded_channel();
+            let (events_tx, events) = mpsc::unbounded_channel();
+            let counters = Arc::new(Counters::default());
+            let c = counters.clone();
+            let task = tokio::spawn(async move {
+                publish(
+                    stream,
+                    publishing_session(),
+                    &aborter,
+                    1,
+                    Duration::from_secs(30),
+                    &mut ctl_rx,
+                    &mut media_rx,
+                    &events_tx,
+                    &c,
+                )
+                .await
+            });
+            Self {
+                ctl,
+                media,
+                events,
+                counters,
+                task,
+            }
+        }
+
+        /// Queues frame `seq` of `size` bytes, made before dump `cut`.
+        fn frame(&self, seq: u64, size: usize, cut: u64) {
+            self.counters
+                .backlog
+                .fetch_add(size as u64, Ordering::Relaxed);
+            let msg = OutMsg {
+                kind: Kind::Video,
+                timestamp: seq as u32 * 33,
+                payload: Bytes::from(vec![0u8; size]),
+                seq: Some(seq),
+            };
+            self.media
+                .send(Queued {
+                    generation: 1,
+                    cut,
+                    msg,
+                })
+                .unwrap();
+        }
+
+        /// What the core does for dump 1.
+        fn dump(&self) {
+            self.counters.cut.store(1, Ordering::SeqCst);
+            self.ctl.send(EgressCtl::Cut(1)).unwrap();
+        }
+
+        async fn until_written(&self) {
+            while self.counters.backlog.load(Ordering::Relaxed) > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn ended(&mut self) -> RunEnd {
+            tokio::time::timeout(Duration::from_secs(5), &mut self.task)
+                .await
+                .expect("still publishing")
+                .unwrap()
+                .0
+        }
+    }
+
+    /// A session the destination has accepted the stream on.
+    fn publishing_session() -> ClientSession {
+        use streamdelay_rtmp::session::{ServerConfig, ServerEvent, ServerSession};
+        let mut client = ClientSession::new(ClientConfig::new("app", "rtmp://x/app", "k"));
+        let mut server = ServerSession::new(ServerConfig::default());
+        for _ in 0..10 {
+            let events = server.feed(&client.take_output()).unwrap();
+            if events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::PublishRequest { .. }))
+            {
+                server.accept_publish();
+            }
+            client.feed(&server.take_output()).unwrap();
+            if client.is_publishing() {
+                client.take_output();
+                return client;
+            }
+        }
+        panic!("the stream was never accepted");
+    }
+
+    /// A connected pair: the relay's end, ready to publish on, and the
+    /// destination's.
+    async fn connection(
+        sndbuf: Option<usize>,
+        rcvbuf: Option<usize>,
+    ) -> (BoxStream, Aborter, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if let Some(size) = rcvbuf {
+            socket2::SockRef::from(&listener)
+                .set_recv_buffer_size(size)
+                .unwrap();
+        }
+        let tcp = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        if let Some(size) = sndbuf {
+            socket2::SockRef::from(&tcp)
+                .set_send_buffer_size(size)
+                .unwrap();
+        }
+        let (far, _) = listener.accept().await.unwrap();
+        let written = Arc::new(AtomicU64::new(0));
+        let aborter = Aborter::new(&tcp, written.clone());
+        (Box::pin(Counted::new(tcp, written)), aborter, far)
+    }
+
+    #[tokio::test]
+    async fn a_dump_resets_the_connection_during_a_blocked_write() {
+        // A destination that takes a few bytes and then nothing: the write of
+        // one small frame blocks.
+        let (stream, far) = tokio::io::duplex(1024);
+        let mut p = Publishing::start(Box::pin(stream), Aborter(None, Arc::default()));
+        p.frame(1, 4_000, 0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(p.counters.backlog.load(Ordering::Relaxed) > 0);
+        p.dump();
+        let end = p.ended().await;
+        // Answered once the connection is closed, by the caller.
+        assert!(
+            matches!(
+                end,
+                RunEnd::CutReset {
+                    cut: 1,
+                    delivered: None
+                }
+            ),
+            "not reset"
+        );
+        drop(far);
+    }
+
+    #[tokio::test]
+    async fn a_dump_resets_the_connection_when_the_os_has_not_sent_everything() {
+        // The frame fits the send buffer, so its write completes, but not the
+        // destination's receive window, which it does not read from.
+        let (stream, aborter, _far) = connection(Some(1024 * 1024), Some(4 * 1024)).await;
+        let mut p = Publishing::start(stream, aborter);
+        p.frame(1, 200_000, 0);
+        p.until_written().await;
+        p.dump();
+        // Delivered: none of it for sure, since the OS holds most of it.
+        let end = p.ended().await;
+        assert!(
+            matches!(
+                end,
+                RunEnd::CutReset {
+                    cut: 1,
+                    delivered: None
+                }
+            ),
+            "not reset"
+        );
+        while let Ok(ev) = p.events.try_recv() {
+            assert!(!matches!(ev, Event::CutDone { .. }), "answered too early");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dump_keeps_a_connection_that_has_sent_everything() {
+        let (stream, aborter, mut far) = connection(None, None).await;
+        let received = Arc::new(AtomicU64::new(0));
+        let r = received.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            while let Ok(n @ 1..) = far.read(&mut buf).await {
+                r.fetch_add(n as u64, Ordering::SeqCst);
+            }
+        });
+        let mut p = Publishing::start(stream, aborter);
+        for seq in 1..=3 {
+            p.frame(seq, 10_000, 0);
+        }
+        p.until_written().await;
+        while received.load(Ordering::SeqCst) < p.counters.written.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        p.dump();
+        let answer = loop {
+            match tokio::time::timeout(Duration::from_secs(5), p.events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Event::CutDone {
+                    cut,
+                    reset,
+                    delivered,
+                } => break (cut, reset, delivered),
+                _ => continue,
+            }
+        };
+        assert_eq!(answer, (1, false, Some(3)));
+        // Queued before the dump but read after it: dropped unsent.
+        let written = p.counters.written.load(Ordering::Relaxed);
+        p.frame(4, 10_000, 0);
+        p.until_written().await;
+        assert_eq!(p.counters.written.load(Ordering::Relaxed), written);
+        // After it: sent.
+        p.frame(5, 10_000, 1);
+        p.until_written().await;
+        assert!(p.counters.written.load(Ordering::Relaxed) > written);
+        p.ctl.send(EgressCtl::Stop).unwrap();
+        assert!(matches!(p.ended().await, RunEnd::Stopped));
+    }
 
     #[test]
     fn errors_never_carry_the_stream_key() {

@@ -4,8 +4,8 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -21,6 +21,27 @@ struct FaultProxy {
     generation: Arc<AtomicU64>,
     /// While set, no bytes are forwarded in either direction.
     stalled: Arc<AtomicBool>,
+    /// For each connection, in order (as the sink numbers them), what came from
+    /// the relay.
+    conns: Arc<Mutex<Vec<Arc<Upstream>>>>,
+}
+
+/// What one proxy connection received from the relay, in bytes.
+#[derive(Default)]
+struct Upstream {
+    forwarded: AtomicU64,
+    /// Waiting in the proxy's receive buffer, as last seen while stalled.
+    waiting: AtomicU64,
+    /// Once this much is forwarded, forwarding pauses for a second (see
+    /// [`FaultProxy::pause_at`]).
+    pause_at: AtomicU64,
+}
+
+impl Upstream {
+    /// Everything that has left the relay's computer on this connection.
+    fn arrived(&self) -> u64 {
+        self.forwarded.load(Ordering::SeqCst) + self.waiting.load(Ordering::SeqCst)
+    }
 }
 
 impl FaultProxy {
@@ -41,26 +62,57 @@ impl FaultProxy {
         let addr = listener.local_addr().unwrap();
         let generation = Arc::new(AtomicU64::new(0));
         let stalled = Arc::new(AtomicBool::new(false));
-        let (g, st) = (generation.clone(), stalled.clone());
+        let conns = Arc::new(Mutex::new(Vec::new()));
+        let (g, st, cs) = (generation.clone(), stalled.clone(), conns.clone());
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let Ok(server) = TcpStream::connect(target).await else {
                     continue;
                 };
+                let upstream = Arc::new(Upstream {
+                    pause_at: AtomicU64::new(u64::MAX),
+                    ..Upstream::default()
+                });
+                cs.lock().unwrap().push(upstream.clone());
                 let my_gen = g.load(Ordering::SeqCst);
                 let (cr, cw) = client.into_split();
                 let (sr, sw) = server.into_split();
                 let g1 = g.clone();
                 let g2 = g.clone();
                 let (s1, s2) = (st.clone(), st.clone());
-                tokio::spawn(pump(cr, sw, g1, my_gen, s1));
-                tokio::spawn(pump(sr, cw, g2, my_gen, s2));
+                tokio::spawn(pump(cr, sw, g1, my_gen, s1, Some(upstream)));
+                tokio::spawn(pump(sr, cw, g2, my_gen, s2, None));
             }
         });
         Self {
             addr,
             generation,
             stalled,
+            conns,
+        }
+    }
+
+    /// The current connection: its number and what it received.
+    fn current(&self) -> (usize, Arc<Upstream>) {
+        let conns = self.conns.lock().unwrap();
+        (conns.len() - 1, conns.last().unwrap().clone())
+    }
+
+    /// While stalled: what has left the relay's computer on the current
+    /// connection, once that stops growing (the proxy's receive buffer is full,
+    /// or the relay has no more to send).
+    async fn settled(&self) -> (usize, u64) {
+        let (conn, up) = self.current();
+        let mut last = up.arrived();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let now = up.arrived();
+            if now == last {
+                return (conn, now);
+            }
+            assert!(Instant::now() < deadline, "the connection never settled");
+            last = now;
         }
     }
 
@@ -79,13 +131,24 @@ async fn pump(
     generation: Arc<AtomicU64>,
     my_gen: u64,
     stalled: Arc<AtomicBool>,
+    upstream: Option<Arc<Upstream>>,
 ) {
     let mut buf = vec![0u8; 16 * 1024];
+    let mut peek = Vec::new();
     loop {
         if generation.load(Ordering::SeqCst) != my_gen {
             break;
         }
         if stalled.load(Ordering::SeqCst) {
+            if let Some(up) = &upstream {
+                // Larger than any receive buffer: all that is waiting.
+                peek.resize(16 * 1024 * 1024, 0);
+                if let Ok(Ok(n)) =
+                    tokio::time::timeout(Duration::from_millis(5), from.peek(&mut peek)).await
+                {
+                    up.waiting.store(n as u64, Ordering::SeqCst);
+                }
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
             continue;
         }
@@ -96,8 +159,31 @@ async fn pump(
             },
             _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
         };
-        if to.write_all(&buf[..n]).await.is_err() {
+        let Some(up) = &upstream else {
+            if to.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
+            continue;
+        };
+        up.waiting.store(0, Ordering::SeqCst);
+        let done = up.forwarded.load(Ordering::SeqCst);
+        let pause_at = up.pause_at.load(Ordering::SeqCst);
+        // Split at the pause, so the sink reads what came before it on its own.
+        let split = if (done..done + n as u64).contains(&pause_at) {
+            (pause_at - done) as usize
+        } else {
+            n
+        };
+        if to.write_all(&buf[..split]).await.is_err() {
             break;
+        }
+        up.forwarded.fetch_add(split as u64, Ordering::SeqCst);
+        if split < n {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if to.write_all(&buf[split..n]).await.is_err() {
+                break;
+            }
+            up.forwarded.fetch_add((n - split) as u64, Ordering::SeqCst);
         }
     }
     // Abortive close so the relay sees a reset rather than a clean shutdown.
@@ -469,11 +555,27 @@ async fn a_dropped_destination_connection_is_retried_at_once() {
     relay.shutdown().await;
 }
 
+/// How the upload to the destination has stalled when a dump comes.
+#[derive(Debug, Clone, Copy)]
+enum Stall {
+    /// Megabytes are queued for it in the relay.
+    Flooded,
+    /// A write of a frame or two is blocked: the queue is far below what the
+    /// relay once took to mean "behind".
+    Trickling,
+    /// The encoder paused after the stall: nothing is queued in the relay, but
+    /// the OS still holds what it could not send.
+    Paused,
+}
+
 /// A dump must keep everything recorded before it that viewers have not seen
-/// from reaching them, including what is already queued for a destination that
-/// has fallen behind (it had been emitted, so the delay buffer no longer held
-/// it). Only what the destination's own buffer holds is out of reach.
-async fn dump_on_a_stalled_upload(mode: DelayMode) {
+/// from reaching them, including what is already on its way to a destination
+/// that has fallen behind (it had been emitted, so the delay buffer no longer
+/// held it): queued in the relay, in a write, or unsent in the OS. Only what
+/// had reached the destination is out of reach: here, what the proxy had
+/// received from the relay when the dump came, forwarded or waiting in its
+/// receive buffer. Nothing else from before the dump may arrive, not one byte.
+async fn dump_on_a_stalled_upload(mode: DelayMode, stall: Stall) {
     let (sink, log, _kill) = start_sink().await;
     let proxy = FaultProxy::start_with(sink, Some(64 * 1024)).await;
     let relay = start_relay(
@@ -486,11 +588,48 @@ async fn dump_on_a_stalled_upload(mode: DelayMode) {
     relay.set_delay(1000, DelayMode::Mask).await.unwrap();
     p.stream_for(Duration::from_secs(3)).await;
     proxy.stall(true);
-    // Far more than the upload takes: the queue for the destination fills.
-    let full = Instant::now() + Duration::from_secs(10);
-    while relay.state().egress.backlog_bytes < 4_000_000 {
-        assert!(Instant::now() < full, "the queue never filled");
-        p.stream_sized(Duration::from_millis(100), 128 * 1024).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    match stall {
+        Stall::Flooded => {
+            // Far more than the upload takes: the queue for the destination fills.
+            while relay.state().egress.backlog_bytes < 4_000_000 {
+                assert!(Instant::now() < deadline, "the queue never filled");
+                p.stream_sized(Duration::from_millis(100), 128 * 1024).await;
+            }
+        }
+        Stall::Trickling => {
+            // About 4 Mbit/s: a write blocks once the OS buffers are full (up to
+            // 4 MB on Linux), with a frame or two queued.
+            while relay.state().egress.backlog_bytes == 0 {
+                assert!(Instant::now() < deadline, "no write ever blocked");
+                p.stream_sized(Duration::from_millis(50), 16_000).await;
+            }
+        }
+        Stall::Paused => {
+            // Until the proxy takes no more, and a little beyond.
+            let (_, up) = proxy.current();
+            let mut last = 0;
+            loop {
+                assert!(Instant::now() < deadline, "the proxy kept taking data");
+                p.stream_sized(Duration::from_millis(300), 4_000).await;
+                let now = up.arrived();
+                if now == last {
+                    break;
+                }
+                last = now;
+            }
+            p.stream_sized(Duration::from_millis(150), 4_000).await;
+            // What was recorded is emitted a delay later.
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+        }
+    }
+    let (conn, settled) = proxy.settled().await;
+    let backlog = relay.state().egress.backlog_bytes;
+    eprintln!("{stall:?}: {backlog} bytes queued in the relay, {settled} received by the proxy");
+    match stall {
+        Stall::Flooded => {}
+        Stall::Trickling => assert!(backlog < 512 * 1024, "{backlog}"),
+        Stall::Paused => assert_eq!(backlog, 0),
     }
     let before: std::collections::HashSet<u32> = video_frames(&log.lock().unwrap())
         .into_iter()
@@ -499,25 +638,50 @@ async fn dump_on_a_stalled_upload(mode: DelayMode) {
     let last_before_dump = p.frame - 1;
     relay.dump(mode).await.unwrap();
     let dumped = Instant::now();
+    // What had reached the destination when the dump was answered, forwarded or
+    // waiting in the proxy's receive buffer (as its next peeks see it). Some may
+    // have come since it settled, as the proxy's receive window grew.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let up = proxy.conns.lock().unwrap()[conn].clone();
+    let arrived = up.arrived();
+    up.pause_at.store(arrived, Ordering::SeqCst);
     proxy.stall(false);
     p.stream_for(Duration::from_secs(5)).await;
+    // If the OS still held some, the connection was reset (and made again):
+    // then not one more byte of it arrived, not even part of a frame.
+    let reset = proxy.conns.lock().unwrap().len() > conn + 1;
+    let carried = up.forwarded.load(Ordering::SeqCst);
+    eprintln!("reset: {reset}; {arrived} bytes had arrived at the dump, {carried} in all");
+    if reset {
+        assert!(
+            carried <= arrived,
+            "{} bytes arrived after the dump on the connection it reset",
+            carried - arrived
+        );
+    }
 
     {
         let l = log.lock().unwrap();
-        let leaked: Vec<(u32, usize, usize)> = l
+        // What had reached the destination, and may air again in a replay.
+        let reached: std::collections::HashSet<u32> = l
+            .media
+            .iter()
+            .filter(|m| m.at <= dumped || (m.conn == conn && m.end <= arrived))
+            .filter_map(|m| frame_of(&m.payload))
+            .collect();
+        let leaked: Vec<(u32, usize, u64)> = l
             .media
             .iter()
             .filter(|m| m.kind == MediaKind::Video && m.at > dumped)
-            .filter_map(|m| Some((frame_of(&m.payload)?, m.payload.len(), m.conn)))
-            .filter(|&(f, ..)| f <= last_before_dump && !before.contains(&f))
+            .filter_map(|m| Some((frame_of(&m.payload)?, m.conn, m.end)))
+            .filter(|&(f, ..)| f <= last_before_dump && !reached.contains(&f))
             .collect();
-        let bytes: usize = leaked.iter().map(|&(_, len, _)| len).sum();
-        // Only what the proxy's receive buffer held, as a destination's would:
-        // about 128 KiB on Linux, more on macOS. The queue alone held 4 MB.
         assert!(
-            bytes <= 1024 * 1024,
-            "{bytes} bytes recorded before the dump aired after it (frame, size, connection): {leaked:?}"
+            leaked.is_empty(),
+            "recorded before the dump, aired after it (frame, connection, end): {leaked:?}"
         );
+        let late = reached.len() - before.len();
+        eprintln!("{late} frames from before the dump were already at the destination");
         assert!(
             video_frames(&l)
                 .iter()
@@ -531,11 +695,32 @@ async fn dump_on_a_stalled_upload(mode: DelayMode) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_mask_dump_on_a_stalled_upload_airs_nothing_from_before_it() {
-    dump_on_a_stalled_upload(DelayMode::Mask).await;
+async fn a_mask_dump_on_a_flooded_upload_airs_nothing_from_before_it() {
+    dump_on_a_stalled_upload(DelayMode::Mask, Stall::Flooded).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_rewind_dump_on_a_stalled_upload_airs_nothing_new_from_before_it() {
-    dump_on_a_stalled_upload(DelayMode::Rewind).await;
+async fn a_rewind_dump_on_a_flooded_upload_airs_nothing_new_from_before_it() {
+    dump_on_a_stalled_upload(DelayMode::Rewind, Stall::Flooded).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mask_dump_on_a_trickling_stalled_upload_airs_nothing_from_before_it() {
+    dump_on_a_stalled_upload(DelayMode::Mask, Stall::Trickling).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rewind_dump_on_a_trickling_stalled_upload_airs_nothing_new_from_before_it() {
+    dump_on_a_stalled_upload(DelayMode::Rewind, Stall::Trickling).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mask_dump_after_the_encoder_paused_on_a_stalled_upload_airs_nothing_from_before_it() {
+    dump_on_a_stalled_upload(DelayMode::Mask, Stall::Paused).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rewind_dump_after_the_encoder_paused_on_a_stalled_upload_airs_nothing_new_from_before_it()
+ {
+    dump_on_a_stalled_upload(DelayMode::Rewind, Stall::Paused).await;
 }

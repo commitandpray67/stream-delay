@@ -1,6 +1,7 @@
 name: Soak
 
-# Long-running stream with random delay changes (tests/soak/run.sh).
+# Long-running stream with random delay changes, dumps and encoder crashes
+# (tests/soak/run.sh).
 # GitHub-hosted runners stop after 6 hours, so the nightly run lasts 2 hours and
 # manual runs are capped at 5.5 hours. Run the full 12-hour soak on your own
 # machine: `DURATION=43200 tests/soak/run.sh`.

@@ -93,6 +93,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Clippy
         run: cargo clippy -p streamdelay-desktop --all-targets
+      # Not among the workspace's default members, so `cargo test` skips it. Its
+      # tests open no window.
+      - name: Tests
+        run: cargo test -p streamdelay-desktop
 
   deny:
     name: cargo-deny

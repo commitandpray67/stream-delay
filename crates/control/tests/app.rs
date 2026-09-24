@@ -179,6 +179,32 @@ async fn short_tokens_and_out_of_range_settings_are_refused_at_startup() {
         matches!(empty, Err(AppError::WeakToken)),
         "empty token accepted"
     );
+    // Characters that a query string would change or cut off.
+    for token in [
+        "0123456789abcdef+X",
+        "0123456789abcdef&x=1",
+        "0123456789abcdef#x",
+        "0123456789abcdef%41",
+        " 0123456789abcdef",
+        "0123456789abcdéfgh",
+    ] {
+        let r = start(Overrides {
+            token: Some(token.into()),
+            ..overrides("127.0.0.1:0")
+        })
+        .await;
+        assert!(
+            matches!(r, Err(AppError::TokenCharacters)),
+            "{token:?} accepted"
+        );
+    }
+    let fine = start(Overrides {
+        token: Some("Ab0.123_456~789-xyz".into()),
+        ..overrides("127.0.0.1:0")
+    })
+    .await
+    .unwrap();
+    fine.shutdown().await;
     // Would overflow the buffer size computation.
     let huge = start(Overrides {
         max_delay_seconds: Some(u64::MAX / 10),

@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Soak test: stream through streamdelayd for a long time while changing the delay
 # and dumping the buffer at random intervals, then check that nothing degraded.
+# The encoder also crashes every RESTART_MIN to RESTART_MAX seconds and comes
+# back within the grace period, as a new session with its own metadata and codec
+# headers: the broadcast goes on, and what each session leaves must not pile up.
 #
 #   DURATION=43200 tests/soak/run.sh      # the 12-hour run from docs/PLAN.md
-#   DURATION=1800 MIN_GAP=20 MAX_GAP=60 tests/soak/run.sh   # a quick local run
+#   DURATION=1800 MIN_GAP=20 MAX_GAP=60 RESTART_MIN=60 RESTART_MAX=180 tests/soak/run.sh
+#                                         # a quick local run
 #
 # Checks at the end:
-#   - streamdelayd is still running and never reconnected to the destination;
+#   - streamdelayd is still running and never reconnected to the destination,
+#     and took up every encoder session;
 #   - the receiving side decoded everything without errors;
 #   - memory stayed flat after the buffer filled: total RSS spread below
 #     MAX_GROWTH_MB, and what the process holds beyond the buffered data no
@@ -30,6 +35,8 @@ MAX_GAP=${MAX_GAP:-300}
 MAX_DELAY=${MAX_DELAY:-60}
 MAX_GROWTH_MB=${MAX_GROWTH_MB:-40}
 MAX_TREND_MB=${MAX_TREND_MB:-8}
+RESTART_MIN=${RESTART_MIN:-120}
+RESTART_MAX=${RESTART_MAX:-600}
 OUT=${OUT:-$(mktemp -d)}
 # Override the ports to run several soaks side by side.
 INGEST=127.0.0.1:${INGEST_PORT:-19450}
@@ -65,10 +72,38 @@ SD=$!
 pids+=($SD)
 for _ in $(seq 50); do curl -fs "http://$API/healthz" >/dev/null && break; sleep 0.1; done
 
-ffmpeg -hide_banner -nostats -loglevel error -re \
-  -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440:sample_rate=48000" \
-  -t "$DURATION" -c:v libx264 -preset veryfast -g 60 -keyint_min 60 -sc_threshold 0 -b:v 2500k \
-  -c:a aac -b:a 128k -f flv "rtmp://$INGEST/live/obs" 2> "$OUT/encoder.log" &
+# Becomes ffmpeg, so its PID is the one to kill.
+encode() {
+  exec ffmpeg -hide_banner -nostats -loglevel error -re \
+    -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+    -t "$1" -c:v libx264 -preset veryfast -g 60 -keyint_min 60 -sc_threshold 0 -b:v 2500k \
+    -c:a aac -b:a 128k -f flv "rtmp://$INGEST/live/obs" 2>> "$OUT/encoder.log"
+}
+# Streams until the end of the soak, which the last session reaches and stops
+# at cleanly. The others are killed like a crashed encoder (no unpublish), and
+# the next one starts within the grace period.
+encoder_sessions() {
+  local end=$(( $(date +%s) + DURATION )) left run f=
+  # Waiting in `wait` (not in a foreground command) lets this stop at once.
+  trap '[[ -n "$f" ]] && kill "$f" 2>/dev/null; exit' TERM
+  while left=$(( end - $(date +%s) )); (( left > 0 )); do
+    run=$(( RESTART_MIN + RANDOM % (RESTART_MAX - RESTART_MIN + 1) ))
+    encode "$left" &
+    f=$!
+    if (( run >= left )); then
+      wait "$f"
+      return
+    fi
+    sleep "$run" &
+    wait $!
+    kill -9 "$f" 2>/dev/null || true
+    wait "$f" 2>/dev/null || true
+    echo x >> "$OUT/restarts"
+    sleep $(( 1 + RANDOM % 2 ))
+  done
+}
+: > "$OUT/restarts"
+encoder_sessions &
 ENC=$!
 pids+=($ENC)
 
@@ -113,7 +148,7 @@ done
 sleep 3
 sample
 
-echo "soak finished after $(( $(date +%s) - START ))s with $changes delay changes"
+echo "soak finished after $(( $(date +%s) - START ))s with $changes delay changes and $(wc -l < "$OUT/restarts") encoder crashes"
 python3 - "$OUT" "$MAX_GROWTH_MB" "$MAX_TREND_MB" <<'PY'
 import csv, statistics, sys
 out, max_growth, max_trend = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
@@ -144,7 +179,10 @@ reconnects=$(api GET /api/v1/state | python3 -c 'import json,sys; print(json.loa
 # the relay ends the broadcast after the encoder stops (already once the delay
 # has aired, if it is short). Dropped connections show up as reconnects instead.
 errors=$(grep -v 'Input/output error' "$OUT/sink.log" | grep -cv '^\s*$' || true)
-echo "  destination reconnects: $reconnects, decoder errors: $errors"
+# Every session after a crash must be taken up, continuing the broadcast.
+rejected=$(grep -c "rejected publish" "$OUT/streamdelayd.log" || true)
+echo "  destination reconnects: $reconnects, decoder errors: $errors, encoder sessions refused: $rejected"
+if [[ "$rejected" != 0 ]]; then grep "rejected publish" "$OUT/streamdelayd.log" | head -5; echo "FAIL: an encoder session was refused"; exit 1; fi
 if [[ "$reconnects" != 0 ]]; then echo "FAIL: the destination connection dropped"; exit 1; fi
 if [[ "$errors" != 0 ]]; then head -20 "$OUT/sink.log"; echo "FAIL: decode errors"; exit 1; fi
 echo "PASS (samples in $OUT/samples.csv)"

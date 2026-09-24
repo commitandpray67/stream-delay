@@ -4,8 +4,11 @@ name: Release
 # commit must pass CI first. Everything lands in a draft GitHub release, which is
 # checked (every asset there, every update signed with the project's key), and
 # whose installers are installed and started on clean machines, and the container
-# image built, before its checksums are added: a draft without SHA256SUMS.txt
-# failed a check. Publish it
+# image built, before its checksums are added, with release-checks.txt naming the
+# commit and run that passed. Every job that changes the draft first removes
+# both (.github/scripts/prepare_release.py), and refuses a published release, so
+# a draft without them has not passed every check since it last changed, rerun
+# or not. Publish it
 # as a normal release (not a pre-release), since the updater only looks at the
 # latest full release. Publishing it pushes the container image
 # (publish-image.yml): nothing is public before that.
@@ -26,6 +29,7 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - ".github/scripts/verify_release.py"
+      - ".github/scripts/prepare_release.py"
       - ".github/scripts/smoke_desktop.py"
       - "Dockerfile.release"
       - "apps/desktop/src-tauri/tauri.conf.json"
@@ -34,6 +38,11 @@ on:
 # Jobs ask for more only where they publish.
 permissions:
   contents: read
+
+# One run per tag (or branch) at a time: two could mix their files in one draft.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -151,6 +160,17 @@ jobs:
             delim="EOF_$(openssl rand -hex 16)"
             { echo "$name<<$delim"; echo "$value"; echo "$delim"; } >> "$GITHUB_ENV"
           done
+      - name: Keep the release a draft, without its checks-passed files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # python3 can be the Microsoft Store placeholder on Windows.
+          case "$RUNNER_OS" in
+            Windows) python .github/scripts/prepare_release.py "$GITHUB_REF_NAME" ;;
+            *) python3 .github/scripts/prepare_release.py "$GITHUB_REF_NAME" ;;
+          esac
       - name: Build and attach to the draft release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
@@ -321,6 +341,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          python3 .github/scripts/prepare_release.py "$GITHUB_REF_NAME"
           ls -l headless
           # All five archives, or fail here rather than publish without some.
           test "$(ls headless/streamdelayd-*.tar.gz headless/streamdelayd-*.zip | wc -l)" -eq 5
@@ -333,7 +354,7 @@ jobs:
         run: |
           mkdir all
           gh release download "${{ github.ref_name }}" --dir all --pattern '*'
-          rm -f all/SHA256SUMS.txt
+          rm -f all/SHA256SUMS.txt all/release-checks.txt
           # Every installer and archive, update signatures made with the project's
           # key, and latest.json offering this version to every platform.
           python3 .github/scripts/verify_release.py release all "${{ github.ref_name }}" "${{ github.repository }}"
@@ -406,6 +427,7 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
@@ -415,9 +437,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # Still a draft; and a marker left by an earlier run goes.
+          python3 .github/scripts/prepare_release.py "$GITHUB_REF_NAME"
           cd all
           sha256sum * > SHA256SUMS.txt
-          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber
+          # Which build passed: what to compare with before publishing.
+          {
+            echo "commit $GITHUB_SHA"
+            echo "run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID (attempt $GITHUB_RUN_ATTEMPT)"
+            echo "SHA256SUMS.txt $(sha256sum SHA256SUMS.txt | cut -d' ' -f1)"
+          } > ../release-checks.txt
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt ../release-checks.txt --clobber
 
   # Builds the image as a check. It is pushed when the release is published
   # (publish-image.yml), from the archives in the release.

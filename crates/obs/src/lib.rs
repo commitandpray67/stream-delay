@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use obws::client::{ConnectConfig, DangerousConnectConfig};
-use obws::requests::inputs::Create;
+use obws::requests::inputs::{Create, InputId, SetSettings};
 use obws::requests::scenes::SceneId;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -228,8 +228,12 @@ impl Obs {
     }
 
     /// Adds a browser source to the current program scene, sized to the canvas.
-    /// Returns `false` if an input with this name already exists.
-    pub async fn add_browser_source(&self, name: &str, url: &str) -> Result<bool, ObsError> {
+    /// If an input with this name exists, points it at `url` instead.
+    pub async fn add_browser_source(
+        &self,
+        name: &str,
+        url: &str,
+    ) -> Result<SourceChange, ObsError> {
         let inputs = self
             .client
             .inputs()
@@ -237,7 +241,26 @@ impl Obs {
             .await
             .map_err(|e| self.err(e))?;
         if inputs.iter().any(|i| i.id.name == name) {
-            return Ok(false);
+            // Made earlier, perhaps for another address or token: point it here.
+            let current = self
+                .client
+                .inputs()
+                .settings::<Value>(InputId::Name(name))
+                .await
+                .map_err(|e| self.err(e))?;
+            if current.settings.get("url").and_then(Value::as_str) == Some(url) {
+                return Ok(SourceChange::Unchanged);
+            }
+            self.client
+                .inputs()
+                .set_settings(SetSettings {
+                    input: InputId::Name(name),
+                    settings: &json!({ "url": url }),
+                    overlay: Some(true),
+                })
+                .await
+                .map_err(|e| self.err(e))?;
+            return Ok(SourceChange::Updated);
         }
         let video = self
             .client
@@ -269,8 +292,17 @@ impl Obs {
             })
             .await
             .map_err(|e| self.err(e))?;
-        Ok(true)
+        Ok(SourceChange::Added)
     }
+}
+
+/// What [`Obs::add_browser_source`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceChange {
+    Added,
+    /// It existed with another URL.
+    Updated,
+    Unchanged,
 }
 
 #[cfg(test)]

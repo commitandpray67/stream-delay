@@ -131,6 +131,17 @@ pub fn router(
     routes::router(state(relay, config, secrets, port, None))
 }
 
+/// [`router`], saving settings changes to `config_path`.
+pub fn router_saving_to(
+    relay: RelayHandle,
+    config: Config,
+    secrets: Arc<dyn SecretStore>,
+    port: u16,
+    config_path: PathBuf,
+) -> Router {
+    routes::router(state(relay, config, secrets, port, Some(config_path)))
+}
+
 /// State for [`router`] and tests: no command-line key.
 pub(crate) fn state(
     relay: RelayHandle,

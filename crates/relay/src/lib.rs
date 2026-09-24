@@ -13,6 +13,7 @@ mod heap;
 mod ingest;
 mod io;
 mod lifecycle;
+mod sendq;
 
 use std::fmt;
 use std::net::SocketAddr;
