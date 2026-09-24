@@ -710,3 +710,86 @@ async fn end_after_air_dump_and_update_checks() {
             .starts_with("https://github.com/")
     );
 }
+
+/// A secret store whose deletes can fail, or claim to succeed and keep the value
+/// (as a keychain error that was ignored used to).
+#[derive(Default)]
+struct UnreliableStore {
+    inner: streamdelay_config::MemorySecrets,
+    delete: std::sync::Mutex<&'static str>,
+}
+
+impl streamdelay_config::SecretStore for UnreliableStore {
+    fn get(&self, name: &str) -> Option<String> {
+        self.inner.get(name)
+    }
+    fn set(&self, name: &str, value: &str) -> Result<(), String> {
+        self.inner.set(name, value)
+    }
+    fn delete(&self, name: &str) -> Result<(), String> {
+        match *self.delete.lock().unwrap() {
+            "fail" => Err("the keychain is locked".into()),
+            "ignore" => Ok(()),
+            _ => self.inner.delete(name),
+        }
+    }
+    fn describe(&self) -> String {
+        "test".into()
+    }
+}
+
+#[tokio::test]
+async fn a_stored_key_never_reaches_another_server_even_when_removing_it_fails() {
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "127.0.0.1:0".parse().unwrap(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut config = Config::default();
+    config.api.token = TOKEN.into();
+    let store = Arc::new(UnreliableStore::default());
+    let app = streamdelay_control::router(relay, config, store.clone(), PORT);
+    let dest = |url: &str| {
+        format!(r#"{{"destination":{{"service":"custom","url":"{url}","key_mode":"stored"}}}}"#)
+    };
+    let r = authed("PUT", "/api/v1/destination/key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"key":"live_123_secret"}"#))
+        .unwrap();
+    assert_eq!(send(&app, r).await.1["destination_key_set"], true);
+
+    // Removing it fails: nothing changes, and the streamer is told.
+    *store.delete.lock().unwrap() = "fail";
+    let (s, body) = put_config(&app, &dest("rtmp://ingest.example.net/live")).await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing was changed")
+    );
+    let (_, cfg) = send(
+        &app,
+        authed("GET", "/api/v1/config").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(
+        cfg["config"]["destination"]["url"],
+        "rtmp://live.twitch.tv/app"
+    );
+    assert_eq!(cfg["destination_key_set"], true);
+
+    // Removing it "works" but the key stays behind: it is still not used for
+    // another server.
+    *store.delete.lock().unwrap() = "ignore";
+    let (s, body) = put_config(&app, &dest("rtmp://ingest.example.net/live")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["destination_key_set"], false);
+    // Twitch again (the key was meant to be forgotten): no more than before.
+    let (_, body) = put_config(&app, &dest("rtmp://live.twitch.tv/app")).await;
+    assert_eq!(
+        body["destination_key_set"], true,
+        "bound to Twitch, so only Twitch"
+    );
+}

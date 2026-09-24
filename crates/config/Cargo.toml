@@ -27,6 +27,13 @@ keyring = { version = "3", optional = true, features = ["apple-native"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", optional = true, features = ["windows-native"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", optional = true, features = ["sync-secret-service", "crypto-rust", "vendored"] }
@@ -34,5 +41,12 @@ keyring = { version = "3", optional = true, features = ["sync-secret-service", "
 [dev-dependencies]
 tempfile = "3"
 
-[lints]
-workspace = true
+# The workspace forbids unsafe code. This crate only denies it, so that the one
+# module that needs it can allow it: setting a file's access list on Windows
+# (`write_private`), which the standard library has no safe API for.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"

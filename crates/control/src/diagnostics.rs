@@ -216,14 +216,11 @@ fn is_twitch_key_tail(tail: &str) -> bool {
 
 fn known_secrets(st: &AppState) -> Vec<String> {
     let s = &st.shared.secrets;
-    let mut v: Vec<String> = [
-        secret::DESTINATION_KEY,
-        secret::OBS_PASSWORD,
-        secret::OBS_BACKUP_KEY,
-    ]
-    .iter()
-    .filter_map(|name| s.get(name))
-    .collect();
+    let mut v: Vec<String> = [secret::OBS_PASSWORD, secret::OBS_BACKUP_KEY]
+        .iter()
+        .filter_map(|name| s.get(name))
+        .collect();
+    v.extend(crate::dest_key::any(s.as_ref()));
     v.extend(crate::obs_routes::backup_secrets(s.as_ref()));
     v.extend(st.shared.key_override.clone());
     let c = st.config();
@@ -253,8 +250,37 @@ pub(crate) fn bundle(st: &AppState) -> Value {
         "state": st.relay().state(),
         "logs": recent_logs(),
     });
-    let text = redact(&raw.to_string(), &known_secrets(st));
-    serde_json::from_str(&text).unwrap_or(raw)
+    let mut bundle = raw;
+    redact_value(&mut bundle, &known_secrets(st));
+    bundle
+}
+
+/// Redacts every string in `v`, and every object key. Working on the values, not
+/// on the JSON text, finds secrets whatever characters they contain (JSON would
+/// escape quotes and backslashes in them) and can never produce something that
+/// does not parse. A string that is nothing but a secret is redacted however
+/// short the secret is.
+fn redact_value(v: &mut Value, secrets: &[String]) {
+    match v {
+        Value::String(s) => {
+            *s = if secrets
+                .iter()
+                .any(|secret| !secret.is_empty() && secret == s)
+            {
+                "<redacted>".into()
+            } else {
+                redact(s, secrets)
+            };
+        }
+        Value::Array(items) => items.iter_mut().for_each(|x| redact_value(x, secrets)),
+        Value::Object(map) => {
+            for (k, mut x) in std::mem::take(map) {
+                redact_value(&mut x, secrets);
+                map.insert(redact(&k, secrets), x);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn diagnostics(State(st): State<AppState>) -> impl IntoResponse {
@@ -286,6 +312,28 @@ mod tests {
         assert!(r.contains("token=<redacted>&x=1"));
         // Too-short values are not blindly replaced everywhere.
         assert!(r.ends_with("abc"));
+    }
+
+    #[test]
+    fn secrets_are_found_whatever_characters_they_contain() {
+        let secrets = vec![
+            r#"pa"ss\wo"rd"#.to_string(),
+            "}, {".to_string(),
+            "abc".to_string(),
+        ];
+        let mut v = json!({
+            "logs": [r#"login failed with pa"ss\wo"rd for obs"#],
+            "state": {"egress": {"last_error": "refused: }, {"}},
+            "settings": {"obs": {"password": "abc"}},
+        });
+        redact_value(&mut v, &secrets);
+        let text = v.to_string();
+        assert!(!text.contains(r#"ss\\wo"#), "{text}");
+        assert!(!text.contains("}, {"), "{text}");
+        // Too short to look for inside text, but a whole value is still found.
+        assert_eq!(v["settings"]["obs"]["password"], "<redacted>");
+        assert_eq!(v["logs"][0], "login failed with <redacted> for obs");
+        assert_eq!(v["state"]["egress"]["last_error"], "refused: <redacted>");
     }
 
     #[test]

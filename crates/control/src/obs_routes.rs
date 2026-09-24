@@ -349,7 +349,6 @@ fn change(
     f: impl FnOnce(&mut streamdelay_config::Config),
 ) -> Result<streamdelay_config::Config, ApiError> {
     let (config, ()) = st.change_config(f)?;
-    st.shared.config_tx.send_replace(config.clone());
     Ok(config)
 }
 
@@ -392,9 +391,8 @@ async fn configure(
         if body.import_key
             && let Some(key) = info.stream.twitch_key()
         {
-            st.shared
-                .secrets
-                .set(secret::DESTINATION_KEY, key)
+            // A Twitch key, for Twitch (the destination is set to it below).
+            crate::dest_key::save(st.shared.secrets.as_ref(), SERVICES[0].url, key)
                 .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
             imported_key = true;
             messages.push("Your Twitch stream key was moved into stream-delay.".to_string());

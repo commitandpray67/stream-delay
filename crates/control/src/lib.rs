@@ -9,6 +9,7 @@
 
 mod app;
 mod auth;
+mod dest_key;
 pub mod diagnostics;
 mod obs_routes;
 mod routes;
@@ -17,11 +18,11 @@ mod ui;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use axum::Router;
 use axum::http::StatusCode;
-use streamdelay_config::{Config, SecretStore, secret};
+use streamdelay_config::{Config, SecretStore};
 use tokio::sync::watch;
 
 pub use app::{App, AppError, AppOptions, MIN_TOKEN_LEN, Overrides, Urls, reachable};
@@ -46,7 +47,7 @@ pub(crate) struct Shared {
     pub saved: Mutex<Config>,
     /// Where to save configuration changes (`None`: keep them in memory only).
     pub config_path: Option<PathBuf>,
-    /// Held while a change is made and saved; see [`AppState::change_config`].
+    /// Held for the whole of a settings change; see [`AppState::lock_settings`].
     pub save_lock: Mutex<()>,
     pub secrets: Arc<dyn SecretStore>,
     /// Accepted API tokens, derived from `config.api.token` at startup.
@@ -71,6 +72,11 @@ pub(crate) struct Shared {
     pub update_check: RwLock<Option<UpdateCheck>>,
 }
 
+/// Proof that the settings lock is held; see [`AppState::lock_settings`].
+pub(crate) struct SettingsLock<'a> {
+    _guard: MutexGuard<'a, ()>,
+}
+
 /// See [`App::on_update_check`].
 pub(crate) type UpdateCheck = Arc<dyn Fn() + Send + Sync>;
 
@@ -83,65 +89,90 @@ impl AppState {
         &self.shared.relay
     }
 
-    /// Applies `change` to the settings and saves them, if there is a settings file.
-    /// Changes are made and saved one at a time, so a slower save can never
-    /// overwrite a newer change in the file.
-    ///
-    /// Only the settings `change` actually changed are saved. The dashboard sends
-    /// whole sections, which include this run's command-line overrides; those stay
-    /// in effect but never reach the file, unless a change sets another value.
+    /// Serializes settings changes. Hold it across everything one change does
+    /// (secrets, the settings file, the relay), so changes made at the same time
+    /// happen one after the other instead of mixing.
+    pub(crate) fn lock_settings(&self) -> SettingsLock<'_> {
+        SettingsLock {
+            _guard: self
+                .shared
+                .save_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        }
+    }
+
+    /// [`AppState::change_config_locked`], taking the settings lock for it.
     pub(crate) fn change_config<R>(
         &self,
         change: impl FnOnce(&mut Config) -> R,
     ) -> Result<(Config, R), ApiError> {
-        let _saving = self
-            .shared
-            .save_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let (before, config, r) = {
-            let mut c = self.shared.config.write().expect("config lock");
-            let before = c.clone();
-            let r = change(&mut c);
-            (before, c.clone(), r)
-        };
-        let saved = {
-            let mut s = self
+        let lock = self.lock_settings();
+        self.change_config_locked(&lock, change)
+    }
+
+    /// Applies `change` to a copy of the settings, saves it (if there is a
+    /// settings file) and only then puts it in effect and tells listeners. If
+    /// saving fails, nothing changes.
+    ///
+    /// Only the settings `change` actually changed are saved. The dashboard sends
+    /// whole sections, which include this run's command-line overrides; those stay
+    /// in effect but never reach the file, unless a change sets another value.
+    pub(crate) fn change_config_locked<R>(
+        &self,
+        _lock: &SettingsLock<'_>,
+        change: impl FnOnce(&mut Config) -> R,
+    ) -> Result<(Config, R), ApiError> {
+        let before = self.config();
+        let mut after = before.clone();
+        let r = change(&mut after);
+        let saved = with_changes(
+            &self
                 .shared
                 .saved
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            *s = with_changes(&s, &before, &config);
-            s.clone()
-        };
+                .unwrap_or_else(PoisonError::into_inner),
+            &before,
+            &after,
+        );
         if let Some(path) = &self.shared.config_path {
             saved.save(path).map_err(|e| {
                 tracing::warn!("saving settings failed: {e}");
-                ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not save the settings, so nothing was changed: {e}"),
+                )
             })?;
         }
-        Ok((config, r))
+        *self
+            .shared
+            .saved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = saved;
+        *self.shared.config.write().expect("config lock") = after.clone();
+        self.shared.config_tx.send_replace(after.clone());
+        Ok((after, r))
     }
 
-    /// The stored stream key, if it may be sent to `url`. It belongs to the
-    /// destination in the settings file: a destination given on the command line
-    /// for another server must not receive it.
-    pub(crate) fn stored_key(&self, url: &str) -> Option<String> {
-        let saved_url = self
-            .shared
+    /// The destination in the settings file (not a command-line override).
+    pub(crate) fn saved_destination_url(&self) -> String {
+        self.shared
             .saved
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .destination
             .url
-            .clone();
-        if app::different_server(&saved_url, url) {
-            return None;
-        }
-        self.shared
-            .secrets
-            .get(secret::DESTINATION_KEY)
-            .filter(|k| !k.is_empty())
+            .clone()
+    }
+
+    /// The stored stream key, if it may be sent to `url`: only to the server it
+    /// was saved for (see [`dest_key`]).
+    pub(crate) fn stored_key(&self, url: &str) -> Option<String> {
+        dest_key::for_url(
+            self.shared.secrets.as_ref(),
+            url,
+            &self.saved_destination_url(),
+        )
     }
 
     /// Where the relay should publish with settings `c`.
@@ -257,6 +288,39 @@ mod tests {
     use streamdelay_relay::RelayConfig;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_change_that_cannot_be_saved_changes_nothing() {
+        let relay = streamdelay_relay::start(RelayConfig {
+            ingest_bind: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Its folder is a file, so saving fails whoever runs the test.
+        std::fs::write(dir.path().join("not-a-folder"), "").unwrap();
+        let path = dir.path().join("not-a-folder/config.toml");
+        let mut config = Config::default();
+        config.api.token = "0123456789abcdef".into();
+        let st = state(
+            relay,
+            config,
+            Arc::new(MemorySecrets::default()),
+            7788,
+            Some(path),
+        );
+        let notified = st.shared.config_tx.subscribe();
+        let before = st.config();
+        let r = st.change_config(|c| c.destination.url = "rtmp://ingest.example.net/live".into());
+        assert!(r.is_err());
+        assert_eq!(st.config(), before);
+        assert_eq!(st.saved_destination_url(), before.destination.url);
+        assert!(
+            !notified.has_changed().unwrap(),
+            "listeners told of a change that did not happen"
+        );
+    }
 
     #[test]
     fn only_what_a_change_changed_is_saved() {

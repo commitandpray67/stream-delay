@@ -240,10 +240,11 @@ async fn configure_imports_key_adds_overlay_and_restores() {
         assert_eq!(o.inputs, vec!["Stream Delay Overlay".to_string()]);
     }
     // The key moved into stream-delay's secret store, and is never echoed back.
-    assert_eq!(
-        secrets.get(secret::DESTINATION_KEY).as_deref(),
-        Some("live_987_secret")
-    );
+    // For Twitch only.
+    let saved: serde_json::Value =
+        serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
+    assert_eq!(saved["key"], "live_987_secret");
+    assert_eq!(saved["server"], "rtmp://live.twitch.tv/app");
     assert!(!r.to_string().contains("live_987_secret"));
     let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
     assert_eq!(cfg["destination_key_set"], true);

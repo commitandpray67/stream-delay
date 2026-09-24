@@ -102,6 +102,61 @@ impl Failure {
             refused: false,
         }
     }
+
+    /// This failure as it may be logged and shown: see [`scrub`].
+    fn scrubbed(mut self, key: &str) -> Self {
+        self.message = scrub(&self.message, key);
+        self
+    }
+}
+
+/// `text` (which may quote what the destination replied) without the stream key
+/// the connection used, which a destination may repeat when refusing it, and
+/// without control characters. A key shorter than 4 characters is replaced only
+/// where it stands on its own, so it does not mangle the words around it.
+pub(crate) fn scrub(text: &str, key: &str) -> String {
+    let mut out: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if key.is_empty() {
+        return out;
+    }
+    if key.chars().count() < 4 {
+        return replace_word(&out, key, "<stream key>");
+    }
+    // Percent-encoded, with upper- and lower-case hex digits.
+    let encoded = |lower: bool| -> String {
+        key.bytes()
+            .map(|b| match b {
+                b if b.is_ascii_alphanumeric() || b"-._~".contains(&b) => (b as char).to_string(),
+                b if lower => format!("%{b:02x}"),
+                b => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    for form in [key.to_string(), encoded(false), encoded(true)] {
+        out = out.replace(&form, "<stream key>");
+    }
+    out
+}
+
+/// Replaces the occurrences of `word` in `text` that no letter or digit touches.
+fn replace_word(text: &str, word: &str, with: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(word) {
+        // What precedes it: in the rest of the text, or already written out.
+        let before = rest[..i].chars().last().or_else(|| out.chars().last());
+        let after = rest[i + word.len()..].chars().next();
+        let alone =
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric);
+        out.push_str(&rest[..i]);
+        out.push_str(if alone { with } else { word });
+        rest = &rest[i + word.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// How long to wait before the next attempt, counting `failures` in a row.
@@ -171,6 +226,7 @@ pub(crate) async fn run(
         let (stream, session, aborter) = match connected {
             Ok(Ok(c)) => c,
             Ok(Err(f)) => {
+                let f = f.scrubbed(&t.key);
                 warn!("destination connection failed: {}", f.message);
                 let wait = retry_wait(&mut failures, f.refused);
                 target = wait_backoff(
@@ -221,6 +277,10 @@ pub(crate) async fn run(
         // The socket closes once this second handle goes too; don't keep it open
         // through a reconnect backoff.
         drop(aborter);
+        let end = match end {
+            RunEnd::Failed(f) => RunEnd::Failed(f.scrubbed(&t.key)),
+            other => other,
+        };
         let error = match &end {
             RunEnd::Failed(f) => Some(f.message.clone()),
             _ => None,
@@ -551,6 +611,34 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+
+    #[test]
+    fn errors_never_carry_the_stream_key() {
+        let key = "live_123_Ab+c/d";
+        let r = scrub(
+            "NetStream.Publish.BadName bad key live_123_Ab+c/d\n\x1b[31m",
+            key,
+        );
+        assert_eq!(r, "NetStream.Publish.BadName bad key <stream key>  [31m");
+        assert_eq!(
+            scrub("stream live_123_Ab%2Bc%2Fd refused", key),
+            "stream <stream key> refused"
+        );
+        assert_eq!(
+            scrub("stream live_123_Ab%2bc%2fd refused", key),
+            "stream <stream key> refused"
+        );
+        // Short keys are replaced where they stand alone, not inside words.
+        assert_eq!(
+            scrub("bad key k (stalled)", "k"),
+            "bad key <stream key> (stalled)"
+        );
+        assert_eq!(scrub("k", "k"), "<stream key>");
+        assert_eq!(
+            scrub("abc,abcd abc", "abc"),
+            "<stream key>,abcd <stream key>"
+        );
+    }
 
     #[tokio::test]
     async fn stopping_leaves_no_backlog_behind() {

@@ -20,9 +20,24 @@ pub trait SecretStore: Send + Sync {
     fn describe(&self) -> String;
 }
 
-/// Keychain-backed store that transparently falls back to a private file.
+/// An OS credential store, as [`Secrets`] uses it.
+pub trait Keychain: Send + Sync {
+    /// `Ok(None)` when there is no such entry.
+    fn get(&self, name: &str) -> Result<Option<String>, String>;
+    fn set(&self, name: &str, value: &str) -> Result<(), String>;
+    /// Succeeds when there is no such entry.
+    fn delete(&self, name: &str) -> Result<(), String>;
+}
+
+/// Keychain-backed store that falls back to a private file.
+///
+/// A value is in one of the two places. When the keychain refuses a write, the
+/// value goes to the file, and the file then takes precedence: reads look there
+/// first, so an older copy the keychain still holds never comes back. A value
+/// written to the keychain is removed from the file. Deleting fails unless both
+/// copies are gone.
 pub struct Secrets {
-    use_keychain: bool,
+    keychain: Option<Box<dyn Keychain>>,
     file: PathBuf,
     lock: Mutex<()>,
 }
@@ -31,22 +46,36 @@ impl Secrets {
     /// `dir` holds the fallback `secrets.toml`. Set `use_keychain` to false for
     /// headless installs.
     pub fn new(dir: &Path, use_keychain: bool) -> Self {
-        let use_keychain = use_keychain && keychain::available();
-        if !use_keychain {
+        let keychain = (use_keychain && keychain::available())
+            .then(|| Box::new(keychain::Os) as Box<dyn Keychain>);
+        if keychain.is_none() {
             debug!("OS keychain unavailable; secrets are stored in a private file");
         }
+        Self::with_keychain(dir, keychain)
+    }
+
+    /// With a given keychain (or none), for tests.
+    pub fn with_keychain(dir: &Path, keychain: Option<Box<dyn Keychain>>) -> Self {
         Self {
-            use_keychain,
+            keychain,
             file: dir.join("secrets.toml"),
             lock: Mutex::new(()),
         }
     }
 
-    fn read_file(&self) -> BTreeMap<String, String> {
-        fs::read_to_string(&self.file)
-            .ok()
-            .and_then(|t| toml::from_str(&t).ok())
-            .unwrap_or_default()
+    /// The file's secrets. One that cannot be parsed counts as empty (nothing in
+    /// it can be read back either) and is replaced on the next write; one that
+    /// cannot be read is an error, as it may hold a value that must not be
+    /// shadowed or kept.
+    fn read_file(&self) -> Result<BTreeMap<String, String>, String> {
+        match fs::read_to_string(&self.file) {
+            Ok(t) => Ok(toml::from_str(&t).unwrap_or_else(|e| {
+                warn!("ignoring unreadable {}: {e}", self.file.display());
+                BTreeMap::new()
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(e) => Err(format!("{}: {e}", self.file.display())),
+        }
     }
 
     fn write_file(&self, map: &BTreeMap<String, String>) -> Result<(), String> {
@@ -56,53 +85,71 @@ impl Secrets {
         let text = toml::to_string(map).map_err(|e| e.to_string())?;
         write_private(&self.file, text.as_bytes()).map_err(|e| e.to_string())
     }
-}
 
-impl SecretStore for Secrets {
-    fn get(&self, name: &str) -> Option<String> {
-        let _g = self.lock.lock().ok()?;
-        if self.use_keychain
-            && let Some(v) = keychain::get(SERVICE, name)
-        {
-            return Some(v);
-        }
-        self.read_file().get(name).cloned()
-    }
-
-    fn set(&self, name: &str, value: &str) -> Result<(), String> {
-        let _g = self.lock.lock().map_err(|e| e.to_string())?;
-        if self.use_keychain {
-            match keychain::set(SERVICE, name, value) {
-                Ok(()) => {
-                    // Remove any older copy from the fallback file.
-                    let mut map = self.read_file();
-                    if map.remove(name).is_some() {
-                        self.write_file(&map)?;
-                    }
-                    return Ok(());
-                }
-                Err(e) => warn!("keychain write failed ({e}); using the private file"),
-            }
-        }
-        let mut map = self.read_file();
-        map.insert(name.into(), value.into());
-        self.write_file(&map)
-    }
-
-    fn delete(&self, name: &str) -> Result<(), String> {
-        let _g = self.lock.lock().map_err(|e| e.to_string())?;
-        if self.use_keychain {
-            keychain::delete(SERVICE, name);
-        }
-        let mut map = self.read_file();
+    /// Removes `name` from the file, if it is there.
+    fn remove_from_file(&self, name: &str) -> Result<(), String> {
+        let mut map = self.read_file()?;
         if map.remove(name).is_some() {
             self.write_file(&map)?;
         }
         Ok(())
     }
+}
+
+impl SecretStore for Secrets {
+    fn get(&self, name: &str) -> Option<String> {
+        let _g = self.lock.lock().ok()?;
+        match self.read_file() {
+            Ok(map) => {
+                if let Some(v) = map.get(name) {
+                    return Some(v.clone());
+                }
+            }
+            // Unreadable: the keychain may still hold the current value.
+            Err(e) => warn!("could not read the secrets file: {e}"),
+        }
+        match self.keychain.as_ref()?.get(name) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("could not read {name} from the keychain: {e}");
+                None
+            }
+        }
+    }
+
+    fn set(&self, name: &str, value: &str) -> Result<(), String> {
+        let _g = self.lock.lock().map_err(|e| e.to_string())?;
+        if let Some(k) = &self.keychain {
+            match k.set(name, value) {
+                // A copy left in the file would take precedence over this one.
+                Ok(()) => return self.remove_from_file(name),
+                Err(e) => warn!("keychain write failed ({e}); using the private file"),
+            }
+        }
+        let mut map = self.read_file()?;
+        map.insert(name.into(), value.into());
+        self.write_file(&map)?;
+        if let Some(k) = &self.keychain
+            && let Err(e) = k.delete(name)
+        {
+            // Harmless: the file copy takes precedence.
+            warn!("could not remove the older copy of {name} from the keychain: {e}");
+        }
+        Ok(())
+    }
+
+    fn delete(&self, name: &str) -> Result<(), String> {
+        let _g = self.lock.lock().map_err(|e| e.to_string())?;
+        self.remove_from_file(name)?;
+        if let Some(k) = &self.keychain {
+            k.delete(name)
+                .map_err(|e| format!("could not remove it from the keychain: {e}"))?;
+        }
+        Ok(())
+    }
 
     fn describe(&self) -> String {
-        if self.use_keychain {
+        if self.keychain.is_some() {
             "your system keychain".into()
         } else {
             format!("{} (readable only by you)", self.file.display())
@@ -145,27 +192,41 @@ impl SecretStore for MemorySecrets {
     any(target_os = "macos", windows, target_os = "linux")
 ))]
 mod keychain {
+    use keyring::{Entry, Error};
+
     pub fn available() -> bool {
         // Probe with a harmless read; "no entry" means the store works.
-        match keyring::Entry::new(super::SERVICE, "probe") {
-            Ok(e) => matches!(e.get_password(), Ok(_) | Err(keyring::Error::NoEntry)),
+        match Entry::new(super::SERVICE, "probe") {
+            Ok(e) => matches!(e.get_password(), Ok(_) | Err(Error::NoEntry)),
             Err(_) => false,
         }
     }
 
-    pub fn get(service: &str, name: &str) -> Option<String> {
-        keyring::Entry::new(service, name).ok()?.get_password().ok()
-    }
+    /// The OS credential store.
+    pub struct Os;
 
-    pub fn set(service: &str, name: &str, value: &str) -> Result<(), String> {
-        keyring::Entry::new(service, name)
-            .and_then(|e| e.set_password(value))
-            .map_err(|e| e.to_string())
-    }
+    impl super::Keychain for Os {
+        fn get(&self, name: &str) -> Result<Option<String>, String> {
+            let entry = Entry::new(super::SERVICE, name).map_err(|e| e.to_string())?;
+            match entry.get_password() {
+                Ok(v) => Ok(Some(v)),
+                Err(Error::NoEntry) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        }
 
-    pub fn delete(service: &str, name: &str) {
-        if let Ok(e) = keyring::Entry::new(service, name) {
-            let _ = e.delete_credential();
+        fn set(&self, name: &str, value: &str) -> Result<(), String> {
+            Entry::new(super::SERVICE, name)
+                .and_then(|e| e.set_password(value))
+                .map_err(|e| e.to_string())
+        }
+
+        fn delete(&self, name: &str) -> Result<(), String> {
+            let entry = Entry::new(super::SERVICE, name).map_err(|e| e.to_string())?;
+            match entry.delete_credential() {
+                Ok(()) | Err(Error::NoEntry) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
         }
     }
 }
@@ -178,13 +239,21 @@ mod keychain {
     pub fn available() -> bool {
         false
     }
-    pub fn get(_: &str, _: &str) -> Option<String> {
-        None
+
+    /// Never used: `available` is false.
+    pub struct Os;
+
+    impl super::Keychain for Os {
+        fn get(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), String> {
+            Err("no keychain support in this build".into())
+        }
+        fn delete(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
-    pub fn set(_: &str, _: &str, _: &str) -> Result<(), String> {
-        Err("no keychain support in this build".into())
-    }
-    pub fn delete(_: &str, _: &str) {}
 }
 
 #[cfg(test)]
@@ -201,6 +270,88 @@ mod tests {
         s.delete("k").unwrap();
         assert_eq!(s.get("k"), None);
         assert!(s.describe().contains("secrets.toml"));
+    }
+
+    /// A keychain whose writes and deletes can be made to fail.
+    #[derive(Default, Clone)]
+    struct FlakyKeychain {
+        map: std::sync::Arc<Mutex<BTreeMap<String, String>>>,
+        fail_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        fail_delete: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Keychain for FlakyKeychain {
+        fn get(&self, name: &str) -> Result<Option<String>, String> {
+            Ok(self.map.lock().unwrap().get(name).cloned())
+        }
+        fn set(&self, name: &str, value: &str) -> Result<(), String> {
+            if self.fail_set.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("locked".into());
+            }
+            self.map.lock().unwrap().insert(name.into(), value.into());
+            Ok(())
+        }
+        fn delete(&self, name: &str) -> Result<(), String> {
+            if self.fail_delete.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("access denied".into());
+            }
+            self.map.lock().unwrap().remove(name);
+            Ok(())
+        }
+    }
+
+    fn flaky(dir: &Path) -> (Secrets, FlakyKeychain) {
+        let k = FlakyKeychain::default();
+        (Secrets::with_keychain(dir, Some(Box::new(k.clone()))), k)
+    }
+
+    #[test]
+    fn a_failed_keychain_delete_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, k) = flaky(dir.path());
+        s.set("k", "old").unwrap();
+        k.fail_delete
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(s.delete("k").is_err());
+        assert_eq!(
+            s.get("k").as_deref(),
+            Some("old"),
+            "still there, and said so"
+        );
+        k.fail_delete
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        s.delete("k").unwrap();
+        assert_eq!(s.get("k"), None);
+    }
+
+    #[test]
+    fn a_value_written_to_the_file_wins_over_an_older_keychain_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, k) = flaky(dir.path());
+        s.set("k", "old").unwrap();
+        // The keychain refuses the new value, and even removing the old one.
+        k.fail_set.store(true, std::sync::atomic::Ordering::Relaxed);
+        k.fail_delete
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        s.set("k", "new").unwrap();
+        assert_eq!(s.get("k").as_deref(), Some("new"));
+        // Deleting must remove both copies, or say it could not.
+        assert!(s.delete("k").is_err());
+        assert_eq!(s.get("k").as_deref(), Some("old"));
+        // The keychain works again: a new value there replaces the file copy.
+        k.fail_set
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        k.fail_delete
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        s.set("k", "newest").unwrap();
+        assert_eq!(s.get("k").as_deref(), Some("newest"));
+        assert!(
+            !fs::read_to_string(dir.path().join("secrets.toml"))
+                .unwrap()
+                .contains("new")
+        );
+        s.delete("k").unwrap();
+        assert_eq!(s.get("k"), None);
     }
 
     #[test]

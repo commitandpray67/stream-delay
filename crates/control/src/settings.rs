@@ -12,10 +12,10 @@ use streamdelay_config::{
 use streamdelay_relay::RtmpUrl;
 use tracing::info;
 
-use crate::AppState;
 use crate::app::{Urls, different_server, split_url_key, urls};
 use crate::auth::Scope;
 use crate::routes::ApiError;
+use crate::{AppState, dest_key};
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -202,6 +202,9 @@ async fn update_config(
     State(st): State<AppState>,
     Json(mut update): Json<SettingsUpdate>,
 ) -> Result<Json<PublicConfig>, ApiError> {
+    // One change at a time, from the stream key to the relay: a concurrent one
+    // could otherwise pair a key with the wrong destination.
+    let lock = st.lock_settings();
     validate(&update, &st.config()).map_err(ApiError::bad_request)?;
     // A key typed into the URL (rtmp://host/app/<key>) is stored like one entered
     // in the key field, so the URL shown to the UI and saved in config.toml never
@@ -214,32 +217,28 @@ async fn update_config(
     }
     // The stored key belongs to the destination in the settings file (the one in
     // effect may be a command-line override).
-    let old_url = st
-        .shared
-        .saved
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .destination
-        .url
-        .clone();
-    let secret_err = |e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e);
-    if let Some(key) = &url_key {
-        st.shared
-            .secrets
-            .set(secret::DESTINATION_KEY, key)
-            .map_err(secret_err)?;
+    let old_url = st.saved_destination_url();
+    let secret_err = |e: String| {
+        ApiError(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not update the saved stream key, so nothing was changed: {e}"),
+        )
+    };
+    if let (Some(key), Some(d)) = (&url_key, &update.destination) {
+        dest_key::save(st.shared.secrets.as_ref(), &d.url, key).map_err(secret_err)?;
     } else if let Some(d) = &update.destination
         && different_server(&old_url, &d.url)
     {
-        // The stored key belongs to the old server: never send it to another one.
+        // The key is saved for the old server and is never sent to another one;
+        // it is forgotten too, and if that fails, nothing changes.
         st.shared
             .secrets
             .delete(secret::DESTINATION_KEY)
             .map_err(secret_err)?;
         info!("destination server changed; the stored stream key was removed");
     }
-    let (new_config, (destination_changed, keep_buffer_changed, restart)) =
-        st.change_config(|c| {
+    let (new_config, (destination_changed, keep_buffer_changed, restart)) = st
+        .change_config_locked(&lock, |c| {
             let mut restart = false;
             let mut destination_changed = false;
             let mut keep_buffer_changed = false;
@@ -278,7 +277,7 @@ async fn update_config(
     if keep_buffer_changed {
         st.relay().set_keep_history(new_config.delay.keep_buffer)?;
     }
-    st.shared.config_tx.send_replace(new_config);
+    drop(lock);
     Ok(Json(public_config(&st)))
 }
 
@@ -304,22 +303,25 @@ async fn set_key(
             "that does not look like a stream key",
         ));
     }
-    st.shared
-        .secrets
-        .set(secret::DESTINATION_KEY, key)
+    let lock = st.lock_settings();
+    // For the destination in the settings file, like the key field it is typed in.
+    dest_key::save(st.shared.secrets.as_ref(), &st.saved_destination_url(), key)
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     apply_destination(&st, &st.config())?;
     st.shared.config_tx.send_modify(|_| {});
+    drop(lock);
     Ok(Json(public_config(&st)))
 }
 
 async fn delete_key(State(st): State<AppState>) -> Result<Json<PublicConfig>, ApiError> {
+    let lock = st.lock_settings();
     st.shared
         .secrets
         .delete(secret::DESTINATION_KEY)
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     apply_destination(&st, &st.config())?;
     st.shared.config_tx.send_modify(|_| {});
+    drop(lock);
     Ok(Json(public_config(&st)))
 }
 

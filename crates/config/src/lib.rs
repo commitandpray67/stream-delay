@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use secrets::{MemorySecrets, SecretStore, Secrets};
+pub use secrets::{Keychain, MemorySecrets, SecretStore, Secrets};
 pub use streamdelay_engine::DelayMode;
 
 /// Names of stored secrets.
@@ -368,7 +368,10 @@ pub fn new_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Writes a file readable only by the current user (on Unix).
+/// Writes a file readable only by the current user: mode 0600 on Unix, and on
+/// Windows an access list naming only the current user, with nothing inherited
+/// from the folder. The file is restricted before anything is written, and
+/// nothing is written if that fails.
 pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -377,23 +380,161 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
         let mut f = fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .mode(0o600)
             .open(path)?;
         // `mode` only applies to new files: tighten an existing one before writing,
-        // which also fails (so nothing is written) if another user owns it.
+        // which also fails (so nothing is changed) if another user owns it.
         f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        f.set_len(0)?;
         f.write_all(data)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::GENERIC_WRITE;
+        use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .access_mode(GENERIC_WRITE | WRITE_DAC | READ_CONTROL)
+            .open(path)?;
+        windows_acl::restrict_to_current_user(&f)?;
+        f.set_len(0)?;
+        f.write_all(data)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         fs::write(path, data)
+    }
+}
+
+/// Windows access lists, through the Win32 API: the only unsafe code in the
+/// project (see this crate's `Cargo.toml`).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_acl {
+    use std::fs::File;
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr::{null, null_mut};
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW,
+        SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
+        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// The current user's `TOKEN_USER`, in a buffer aligned for it.
+    fn current_user() -> io::Result<Vec<u64>> {
+        let mut token: HANDLE = null_mut();
+        // SAFETY: the pseudo-handle of the current process needs no closing;
+        // `token` is closed below.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut len = 0u32;
+        // SAFETY: asks for the size only.
+        unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut len) };
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        // SAFETY: `buf` holds at least `len` bytes.
+        let ok = unsafe {
+            GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len)
+        };
+        let err = io::Error::last_os_error();
+        // SAFETY: opened above.
+        unsafe { CloseHandle(token) };
+        if ok == 0 {
+            return Err(err);
+        }
+        Ok(buf)
+    }
+
+    /// Replaces the file's access list with one entry, full control for the
+    /// current user, and stops it inheriting any from its folder.
+    pub fn restrict_to_current_user(file: &File) -> io::Result<()> {
+        let user = current_user()?;
+        // SAFETY: `current_user` filled the buffer with a TOKEN_USER.
+        let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        let access = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_ALL_ACCESS,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: sid.cast(),
+            },
+        };
+        let mut acl: *mut ACL = null_mut();
+        // SAFETY: one entry, no old list; the new list is freed below.
+        let r = unsafe { SetEntriesInAclW(1, &access, null(), &mut acl) };
+        if r != 0 {
+            return Err(io::Error::from_raw_os_error(r as i32));
+        }
+        // SAFETY: `file` is open with WRITE_DAC; `acl` is valid until freed.
+        let r = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl,
+                null(),
+            )
+        };
+        // SAFETY: allocated by SetEntriesInAclW.
+        unsafe { LocalFree(acl.cast()) };
+        if r != 0 {
+            return Err(io::Error::from_raw_os_error(r as i32));
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Even in a folder shared with everyone, the file names only its owner.
+    #[cfg(windows)]
+    #[test]
+    fn private_files_do_not_inherit_access_on_windows() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Command::new("icacls")
+            .arg(dir.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+            .output()
+            .unwrap();
+        assert!(shared.status.success(), "{shared:?}");
+        let path = dir.path().join("secrets.toml");
+        write_private(&path, b"key = 'x'").unwrap();
+        // Again, over an existing file.
+        write_private(&path, b"key = 'y'").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "key = 'y'");
+        let acl = Command::new("icacls").arg(&path).output().unwrap();
+        let acl = String::from_utf8_lossy(&acl.stdout).to_string();
+        let user = std::env::var("USERNAME").unwrap().to_lowercase();
+        let entries: Vec<&str> = acl.lines().take_while(|l| !l.trim().is_empty()).collect();
+        assert_eq!(entries.len(), 1, "{acl}");
+        assert!(
+            entries[0].to_lowercase().contains(&format!("{user}:(f)")),
+            "{acl}"
+        );
+        assert!(!acl.contains("(I)"), "inherited entries: {acl}");
+    }
 
     #[test]
     fn creates_with_token_and_round_trips() {

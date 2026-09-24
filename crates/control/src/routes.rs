@@ -105,11 +105,13 @@ async fn get_state(
     Json(visible_state(st.relay().state(), scope))
 }
 
-/// The state as a link with `scope` may see it: the encoder's network address is
-/// for the dashboard only.
+/// The state as a link with `scope` may see it: the encoder's network address and
+/// what the destination replied (keys are removed from it, but it is the
+/// destination's text) are for the dashboard only.
 fn visible_state(mut state: RelayState, scope: Scope) -> RelayState {
     if scope < Scope::Admin {
         state.ingest.peer = None;
+        state.egress.last_error = None;
     }
     state
 }
@@ -371,17 +373,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_dashboard_sees_the_encoder_address() {
+    fn only_the_dashboard_sees_the_encoder_address_and_destination_replies() {
         let mut state = RelayState::default();
         state.ingest.peer = Some("192.168.1.20:50123".into());
-        assert!(
-            visible_state(state.clone(), Scope::Admin)
-                .ingest
-                .peer
-                .is_some()
-        );
+        state.egress.last_error = Some("destination refused the stream".into());
+        let admin = visible_state(state.clone(), Scope::Admin);
+        assert!(admin.ingest.peer.is_some());
+        assert!(admin.egress.last_error.is_some());
         for scope in [Scope::Control, Scope::Read] {
-            assert_eq!(visible_state(state.clone(), scope).ingest.peer, None);
+            let s = visible_state(state.clone(), scope);
+            assert_eq!(s.ingest.peer, None);
+            assert_eq!(s.egress.last_error, None);
         }
     }
 }

@@ -724,3 +724,33 @@ async fn end_stream_after_air_with_no_delay_ends_at_once_and_cleanly() {
         "ended at {end}, clicked at {last}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destination_repeating_the_stream_key_never_gets_it_shown() {
+    let opts = SinkOptions {
+        reject: true,
+        echo_key: true,
+        ..Default::default()
+    };
+    let (sink, _log, _kill) = start_sink_with("127.0.0.1:0", opts).await;
+    let secret = "live_424242_DoNotShowThis";
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed(secret.into()),
+        Duration::from_millis(500),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    wait_until("the refusal is reported", Duration::from_secs(3), || {
+        relay
+            .state()
+            .egress
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("invalid stream key <stream key>"))
+    })
+    .await;
+    assert!(!format!("{:?}", relay.state()).contains("DoNotShowThis"));
+    p.stop().await;
+}

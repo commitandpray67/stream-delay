@@ -48,6 +48,8 @@ pub struct SinkOptions {
     pub publish_delay: Duration,
     /// Refuse, like a destination given the wrong stream key.
     pub reject: bool,
+    /// When refusing, quote the stream key in the reply, as some servers do.
+    pub echo_key: bool,
 }
 
 /// A minimal RTMP server standing in for Twitch.
@@ -109,6 +111,7 @@ pub async fn start_sink_with(
                 };
                 let mut s = ServerSession::new(ServerConfig::default());
                 let mut data = rest.to_vec();
+                let mut refused_key = String::new();
                 loop {
                     let Ok(events) = s.feed(&data) else { return };
                     let mut publish_requested = false;
@@ -116,6 +119,7 @@ pub async fn start_sink_with(
                         let mut l = log.lock().unwrap();
                         match ev {
                             ServerEvent::PublishRequest { stream_key, .. } => {
+                                refused_key = stream_key.clone();
                                 l.keys.push(stream_key);
                                 publish_requested = true;
                             }
@@ -146,7 +150,12 @@ pub async fn start_sink_with(
                             }
                         }
                         if opts.reject {
-                            s.reject_publish("NetStream.Publish.BadName", "invalid stream key");
+                            let why = if opts.echo_key {
+                                format!("invalid stream key {refused_key}")
+                            } else {
+                                "invalid stream key".into()
+                            };
+                            s.reject_publish("NetStream.Publish.BadName", &why);
                         } else {
                             s.accept_publish();
                             log.lock().unwrap().published += 1;

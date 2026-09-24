@@ -99,7 +99,11 @@ async fn key_in_saved_destination_url_moves_to_the_secret_store() {
     })
     .await
     .unwrap();
-    assert_eq!(secrets.get(secret::DESTINATION_KEY).as_deref(), Some(KEY));
+    // Saved with the server it belongs to.
+    let saved: serde_json::Value =
+        serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
+    assert_eq!(saved["key"], KEY);
+    assert_eq!(saved["server"], "rtmp://a.rtmp.youtube.com/live2");
     assert_eq!(
         app.config().destination.url,
         "rtmp://a.rtmp.youtube.com/live2"

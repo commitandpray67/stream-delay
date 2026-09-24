@@ -118,7 +118,7 @@ impl App {
                 // A stored key already took precedence over the one in the URL.
                 Ok(())
             } else {
-                opts.secrets.set(secret::DESTINATION_KEY, &key)
+                crate::dest_key::save(opts.secrets.as_ref(), &url, &key)
             };
             match moved {
                 Ok(()) => {
@@ -135,6 +135,14 @@ impl App {
             && let Some(p) = &opts.config_path
         {
             config.save(p)?;
+        }
+        // Older versions saved the key on its own; it belongs to the destination
+        // it was used with, and from now on only goes there.
+        match crate::dest_key::bind_legacy(opts.secrets.as_ref(), &config.destination.url) {
+            Ok(true) => info!("the saved stream key is now tied to its destination server"),
+            Ok(false) => {}
+            // It stays tied to the destination in the settings file, as before.
+            Err(e) => warn!("could not tie the saved stream key to its destination: {e}"),
         }
         // As saved, without this run's overrides.
         let mut saved = config.clone();
@@ -237,10 +245,11 @@ impl App {
         // The stored key belongs to the destination in the settings file; a
         // destination given on the command line for another server does not get it.
         let key = key_override.clone().or_else(|| {
-            (!different_server(&saved.destination.url, &config.destination.url))
-                .then(|| opts.secrets.get(secret::DESTINATION_KEY))
-                .flatten()
-                .filter(|k| !k.is_empty())
+            crate::dest_key::for_url(
+                opts.secrets.as_ref(),
+                &config.destination.url,
+                &saved.destination.url,
+            )
         });
         let relay = streamdelay_relay::start(RelayConfig {
             ingest_bind: config.ingest.bind,
