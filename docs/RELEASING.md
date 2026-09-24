@@ -5,7 +5,7 @@ Releases are built by [`.github/workflows/release.yml`](../.github/workflows/rel
 - Desktop installers from `tauri-action`: Windows NSIS and MSI, a universal macOS DMG/app, and Linux AppImage, deb and rpm.
 - Headless `streamdelayd` archives for Linux (x86_64, aarch64), Windows and macOS (Apple Silicon, Intel).
 - `latest.json` and update bundles signed with the project's updater key (below). A tag build fails without the key rather than release an app that could never update.
-- `SHA256SUMS.txt` covering every asset. It is added last, after [`verify_release.py`](../.github/scripts/verify_release.py) has checked the draft: every installer and headless archive is there, every update bundle's signature verifies against `TAURI_UPDATER_PUBKEY`, and `latest.json` offers this version to every platform with those signatures. A draft without `SHA256SUMS.txt` failed that check: see the workflow run before publishing anything.
+- `SHA256SUMS.txt` covering every asset. It is added last, after [`verify_release.py`](../.github/scripts/verify_release.py) has checked the draft: every installer and headless archive is there, every update bundle's signature verifies against `TAURI_UPDATER_PUBKEY`, and `latest.json` offers this version to every platform with those signatures, each downloaded from exactly `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. CI runs the verifier's own tests on every push. A draft without `SHA256SUMS.txt` failed that check: see the workflow run before publishing anything.
 
 Review the draft, then publish it **as a normal release, not a pre-release**: the app looks for updates at `releases/latest`, which skips pre-releases. Say "beta" in the notes instead.
 

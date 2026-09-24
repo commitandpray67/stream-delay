@@ -108,7 +108,7 @@ The server ignores what clients send, apart from closing the socket; messages ov
 | `PUT /api/v1/destination/key` | `{"key": "live_..."}` | Store the stream key in the OS keychain, for the server of the destination in the settings file. |
 | `DELETE /api/v1/destination/key` | none | Forget the stored key. |
 
-The saved stream key is stored together with the server it was saved for, and is only ever sent to that server (RTMP and RTMPS, or regional servers of the same service, count as one). Changing the destination to another server also forgets it; if the keychain refuses to remove it, the change is refused (`500`) and nothing changes.
+The saved stream key is stored together with the server it was saved for, and is only ever sent to that server. Twitch's and YouTube's ingest servers each count as one (RTMP or RTMPS, any region); any other server only with the same scheme, host, port and application, since another port or application can be another service, and RTMPS to RTMP would send the key unencrypted. Changing the destination to another server also forgets the key; if the keychain refuses to remove it, the change is refused (`500`) and nothing changes. Likewise, if the settings file cannot be written, a key the same request saved or removed is put back. A new key takes effect at once, also when only the key in the URL changed.
 
 ## OBS setup (obs-websocket)
 
@@ -118,6 +118,8 @@ The saved stream key is stored together with the server it was saved for, and is
 | `POST /api/v1/obs/connect` | `{"host": "127.0.0.1", "port": 4455, "password": "..."}` | Test and save the obs-websocket connection. An empty password keeps the saved one, but only for the same host and port: the saved password is never sent to another address, and is forgotten once another OBS is connected without one. |
 | `POST /api/v1/obs/configure` | `{"import_key": true, "add_overlay": true}` | Back up OBS's stream settings (to the keychain, as they hold the stream key and any server password), point OBS at stream-delay, and optionally import the Twitch key and add the overlay. |
 | `POST /api/v1/obs/restore` | none | Put OBS's original stream settings back. Only works with the OBS they were read from (`409 Conflict` otherwise). |
+
+The OBS password and the backup are each saved together with the OBS they belong to (`host:port`), and only used with it. Wizard requests are handled one at a time.
 
 OBS counts as on this computer when its address is `localhost`, a loopback address,
 or one of this computer's own network addresses (OBS's WebSocket settings show the

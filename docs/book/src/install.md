@@ -94,7 +94,10 @@ restart stream-delay.
 | Stream key, OBS password, OBS settings backup | OS keychain (Secret Service) | Keychain | Credential Manager |
 
 If no keychain is available (or with `--no-keychain`), secrets go to a file next
-to the settings that only your user can read.
+to the settings (`secrets.toml`) that only your user can read. Each secret is kept
+in one place only. Should that file ever be damaged, stream-delay moves it to
+`secrets.toml.damaged` (so nothing in it is lost for good) and starts a new one;
+enter your stream key again.
 
 ## Updating and uninstalling
 

@@ -59,9 +59,17 @@ All notable changes to stream-delay are listed here. The format follows
   takes effect anyway: the dashboard could show a new destination while the
   stream still went to the old one. Nothing changes, and the dashboard says why.
   Changes made at the same moment, and their stream keys, are applied one after
-  the other.
-- `secrets.toml`: a key saved there because the keychain refused it is no
-  longer shadowed by an older copy the keychain still holds.
+  the other; a stream key the change had already saved or removed is put back.
+- **A new stream key in an unchanged destination URL is used at once.** Before,
+  the relay kept publishing with the old key until the next restart.
+- `secrets.toml` is replaced whole on every write, so a crash or a full disk can
+  no longer leave it empty. Each secret is kept in one place only: a key the
+  keychain refused goes to the file, and if the keychain's older copy cannot be
+  removed, saving fails rather than keep two. A damaged file is moved to
+  `secrets.toml.damaged` instead of being overwritten.
+- OBS setup wizard steps run one at a time, and the saved OBS password and
+  settings backup are stored with the OBS they belong to: two steps at once
+  (two tabs) could pair one OBS's password with another's address.
 
 ### Security
 
@@ -70,7 +78,10 @@ All notable changes to stream-delay are listed here. The format follows
   it when the destination changed to another server, the old key could be sent
   to the new one; now such a change is refused, and a key left behind would
   still not be sent. Keys saved by older versions are tied to their destination
-  at the first start.
+  at the first start. For servers other than Twitch and YouTube, "the server"
+  now means the same scheme, host, port and application: a key saved for
+  `rtmps://host/private` no longer goes to `rtmp://host:1936/other`, nor
+  unencrypted to `rtmp://host/private`.
 - **Destination replies no longer show stream keys.** A server refusing a stream
   may quote the key it was given; it is removed from the message before it is
   logged or shown, and dock and overlay links no longer see these replies at
@@ -81,14 +92,19 @@ All notable changes to stream-delay are listed here. The format follows
 - **Encoder data waiting to be processed is capped** (32 MB). A publisher sending
   faster than stream-delay takes it in is slowed down instead of filling memory,
   and the buffer's RAM cap counts what each message costs, not just its
-  payload, so floods of tiny messages cannot exceed it many times over.
+  payload, so floods of tiny messages cannot exceed it many times over. The
+  1 MB blocks received messages are stored in are capped too (at the RAM cap
+  plus 32 MB, across connections): a small message kept in the buffer could
+  hold a whole block, so a publisher interleaving tiny kept messages with large
+  discarded ones could use about 1 MB per tiny message.
 - **On Windows, the settings file and `secrets.toml` are readable only by
   you**: their access list names only your account and inherits nothing from
   the folder. They used to take the folder's permissions, which a custom
   settings location could leave open to others.
 - **Releases:** a tag builds nothing unless CI passes on that commit and the
   versions and changelog match it; releases require the updater keys; every
-  asset and update signature is checked before the checksums are added; and the
+  asset and update signature is checked before the checksums are added, and
+  every update is offered from this release's own GitHub URLs; and the
   container image is pushed only once the release is published. v0.2.0 lost
   three of its command-line archives and its `SHA256SUMS.txt` to a packaging
   bug, now fixed.
