@@ -512,9 +512,10 @@ async fn dump_on_a_stalled_upload(mode: DelayMode) {
             .filter(|&(f, ..)| f <= last_before_dump && !before.contains(&f))
             .collect();
         let bytes: usize = leaked.iter().map(|&(_, len, _)| len).sum();
-        // What the proxy's receive buffer held (twice the size asked for, on Linux).
+        // Only what the proxy's receive buffer held, as a destination's would:
+        // about 128 KiB on Linux, more on macOS. The queue alone held 4 MB.
         assert!(
-            bytes <= 160 * 1024,
+            bytes <= 1024 * 1024,
             "{bytes} bytes recorded before the dump aired after it (frame, size, connection): {leaked:?}"
         );
         assert!(

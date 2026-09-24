@@ -512,6 +512,25 @@ impl Engine {
         }
     }
 
+    /// Output after `taken` (the last message the destination connection took;
+    /// `None`: none yet) was emitted but is still queued, and will never be sent:
+    /// it counts as not aired, so it is sent again, or thrown away by a dump.
+    /// Codec headers are sent again, in case some were among it.
+    pub fn unsend(&mut self, taken: Option<u64>) {
+        if !self.out.connected {
+            return;
+        }
+        let resume = match taken {
+            Some(s) => Some(s + 1),
+            None => self.out.first_emitted,
+        };
+        if let Some(r) = resume {
+            self.out.next_seq = self.out.next_seq.min(r);
+        }
+        self.out.sent_headers.clear();
+        self.out.sent_metadata = None;
+    }
+
     /// Ends the current broadcast on the output side. The next encoder session starts
     /// a fresh broadcast (with the current target delay) instead of continuing this one.
     pub fn output_reset(&mut self) {

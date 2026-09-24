@@ -56,9 +56,9 @@ pub(crate) enum EgressCtl {
     /// End the broadcast at once ("end stream"): reset the connection, so what the
     /// OS has not sent yet is discarded rather than delivered.
     Abort,
-    /// A dump while media was on its way: reset the connection, so that neither
-    /// the queue nor what the OS still holds reaches the destination, and connect
-    /// again at once.
+    /// A dump with the destination behind: reset the connection, so that neither
+    /// the queue nor what the OS still holds reaches it, and connect again at
+    /// once.
     Cut,
 }
 
@@ -68,6 +68,8 @@ pub(crate) struct Queued {
     ///
     /// [`Engine::output_connected`]: streamdelay_engine::Engine::output_connected
     pub generation: u64,
+    /// The dumps before it (see [`Counters::cut`]).
+    pub cut: u64,
     pub msg: OutMsg,
 }
 
@@ -89,15 +91,39 @@ impl Aborter {
 }
 
 /// Counters shared with the core task.
-#[derive(Default)]
 pub(crate) struct Counters {
     /// Media queued for the destination and not written yet, including what is
     /// being written.
     pub backlog: AtomicU64,
     pub written: AtomicU64,
+    /// Dumps so far: queued media made before the latest is dropped unsent.
+    pub cut: AtomicU64,
+    /// The last message with a sequence number taken to be written on the
+    /// current connection ([`NONE`] before the first). Set before writing it.
+    pub taken_seq: AtomicU64,
+}
+
+/// No sequence number, in [`Counters::taken_seq`].
+const NONE: u64 = u64::MAX;
+
+impl Default for Counters {
+    fn default() -> Self {
+        Self {
+            backlog: AtomicU64::new(0),
+            written: AtomicU64::new(0),
+            cut: AtomicU64::new(0),
+            taken_seq: AtomicU64::new(NONE),
+        }
+    }
 }
 
 impl Counters {
+    /// The last message the current connection took to write: it and what came
+    /// before are the destination's, the rest is still queued.
+    pub fn taken_seq(&self) -> Option<u64> {
+        Some(self.taken_seq.load(Ordering::SeqCst)).filter(|&s| s != NONE)
+    }
+
     fn drop_queued(&self, q: &Queued) {
         self.backlog
             .fetch_sub(q.msg.payload.len() as u64, Ordering::Relaxed);
@@ -303,6 +329,8 @@ pub(crate) async fn run(
             continue;
         }
         info!("publishing to destination");
+        // Before the core hears of the connection: nothing is taken on it yet.
+        counters.taken_seq.store(NONE, Ordering::SeqCst);
         let (gen_tx, gen_rx) = tokio::sync::oneshot::channel();
         let _ = events.send(Event::EgressConnected { reply: gen_tx });
         let Ok(generation) = gen_rx.await else { return };
@@ -625,9 +653,11 @@ async fn publish(
                 }
                 let mut batch_last = None;
                 let mut bytes = 0u64;
+                let cut = counters.cut.load(Ordering::SeqCst);
                 for q in batch.drain(..) {
                     bytes += q.msg.payload.len() as u64;
-                    if q.generation != generation {
+                    // Made for an earlier connection, or taken back by a dump.
+                    if q.generation != generation || q.cut != cut {
                         continue;
                     }
                     let m = q.msg;
@@ -639,6 +669,9 @@ async fn publish(
                     if m.seq.is_some() {
                         batch_last = m.seq;
                     }
+                }
+                if let Some(seq) = batch_last {
+                    counters.taken_seq.store(seq, Ordering::SeqCst);
                 }
                 let out = session.take_output();
                 let result = write_or_ctl(&mut wr, &out, ctl, stall_timeout).await;
@@ -713,6 +746,7 @@ mod tests {
             media_tx
                 .send(Queued {
                     generation: 0,
+                    cut: 0,
                     msg: m,
                 })
                 .unwrap();

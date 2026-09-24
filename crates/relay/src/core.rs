@@ -25,6 +25,12 @@ use crate::{
 /// empty.
 const MAX_EGRESS_BACKLOG: u64 = 8 * 1024 * 1024;
 
+/// Media queued for the destination from which a dump takes it to be behind:
+/// the queue only grows past a few frames once the OS's send buffer is full.
+/// Below it, the queue is the destination's usual lag (it takes a moment to
+/// pick up each frame, longer on Windows).
+const BEHIND_BACKLOG: u64 = 512 * 1024;
+
 /// A publisher that has sent nothing for this long is taken to be a dead
 /// connection the network has not reported yet (the encoder's computer lost
 /// its network): the encoder reconnecting may take its place.
@@ -199,6 +205,8 @@ struct Core {
     media_tx: mpsc::UnboundedSender<Queued>,
     counters: Arc<Counters>,
     generation: u64,
+    /// Dumps so far (see [`Core::cut_output`]).
+    cut: u64,
     state: RelayState,
     state_tx: watch::Sender<RelayState>,
     last_written_total: u64,
@@ -256,6 +264,7 @@ pub(crate) async fn run(
         media_tx,
         counters,
         generation: 0,
+        cut: 0,
         state_tx,
         last_written_total: 0,
         last_rate_at: now,
@@ -603,20 +612,26 @@ impl Core {
         }
     }
 
-    /// For a dump: media handed to the destination connection but not written
-    /// yet (queued, or being written) has reached no one, and never must. The
-    /// connection is then reset, dropping it along with what the OS still holds
-    /// from before the dump, and made again at once. What viewers saw is then
-    /// unknown, so a rewind, which replays what aired, becomes a mask. Returns the
-    /// mode to dump with.
+    /// For a dump: media handed to the destination connection but not taken to
+    /// be written yet has reached no one, and never must. It is dropped unsent,
+    /// and counts as not aired, so a rewind does not replay it either.
+    ///
+    /// If the destination is behind, the OS also holds media from before the
+    /// dump: the connection is then reset, dropping that too, and made again at
+    /// once. What viewers saw is then unknown, so a rewind, which replays what
+    /// aired, becomes a mask. Returns the mode to dump with.
     fn cut_output(&mut self, mode: DelayMode) -> DelayMode {
-        // Only this task adds to it, and the egress takes off what it has
-        // written only once written: zero means nothing is on its way.
-        let unsent = self.counters.backlog.load(Ordering::SeqCst) > 0;
-        if unsent {
+        self.cut += 1;
+        self.counters.cut.store(self.cut, Ordering::SeqCst);
+        let behind = self.counters.backlog.load(Ordering::SeqCst) >= BEHIND_BACKLOG;
+        if behind {
             let _ = self.egress_ctl.send(EgressCtl::Cut);
+        } else {
+            // A batch the egress took after this reads is written: it was
+            // leaving as the dump came.
+            self.engine.unsend(self.counters.taken_seq());
         }
-        if mode == DelayMode::Rewind && (unsent || !self.engine.output_is_connected()) {
+        if mode == DelayMode::Rewind && (behind || !self.engine.output_is_connected()) {
             info!("the destination was behind; masking instead of rewinding");
             return DelayMode::Mask;
         }
@@ -642,6 +657,7 @@ impl Core {
                 .fetch_add(m.payload.len() as u64, Ordering::Relaxed);
             let _ = self.media_tx.send(Queued {
                 generation: self.generation,
+                cut: self.cut,
                 msg: m,
             });
         }
