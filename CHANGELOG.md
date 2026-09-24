@@ -55,6 +55,43 @@ All notable changes to stream-delay are listed here. The format follows
   set up an OBS that already streamed to stream-delay, then refused.
 - "Buffered 2:11 of 2:00": the buffer label no longer shows more than the
   maximum.
+- A settings change that cannot be saved (disk full, no permission) no longer
+  takes effect anyway: the dashboard could show a new destination while the
+  stream still went to the old one. Nothing changes, and the dashboard says why.
+  Changes made at the same moment, and their stream keys, are applied one after
+  the other.
+- `secrets.toml`: a key saved there because the keychain refused it is no
+  longer shadowed by an older copy the keychain still holds.
+
+### Security
+
+- **A saved stream key is only ever sent to the server it was saved for.** It is
+  now stored together with that server. Before, if the keychain failed to remove
+  it when the destination changed to another server, the old key could be sent
+  to the new one; now such a change is refused, and a key left behind would
+  still not be sent. Keys saved by older versions are tied to their destination
+  at the first start.
+- **Destination replies no longer show stream keys.** A server refusing a stream
+  may quote the key it was given; it is removed from the message before it is
+  logged or shown, and dock and overlay links no longer see these replies at
+  all.
+- **Diagnostics files are redacted value by value.** Secrets containing quotes or
+  backslashes could be missed, and a redaction that broke the file's JSON fell
+  back to the unredacted one.
+- **Encoder data waiting to be processed is capped** (32 MB). A publisher sending
+  faster than stream-delay takes it in is slowed down instead of filling memory,
+  and the buffer's RAM cap counts what each message costs, not just its
+  payload, so floods of tiny messages cannot exceed it many times over.
+- **On Windows, the settings file and `secrets.toml` are readable only by
+  you**: their access list names only your account and inherits nothing from
+  the folder. They used to take the folder's permissions, which a custom
+  settings location could leave open to others.
+- **Releases:** a tag builds nothing unless CI passes on that commit and the
+  versions and changelog match it; releases require the updater keys; every
+  asset and update signature is checked before the checksums are added; and the
+  container image is pushed only once the release is published. v0.2.0 lost
+  three of its command-line archives and its `SHA256SUMS.txt` to a packaging
+  bug, now fixed.
 
 ## [0.2.0] - 2026-09-23
 

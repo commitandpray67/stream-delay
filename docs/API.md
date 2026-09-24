@@ -12,7 +12,7 @@ Every `/api` request needs a token. The install's admin token is generated on fi
 | Dock | `control` | `GET /api/v1/state`, the events WebSocket, and the delay control endpoints below. |
 | Overlay | `read` | `GET /api/v1/state` and the events WebSocket. |
 
-The state seen with dock and overlay tokens leaves out the encoder's address (`ingest.peer` is `null`).
+The state seen with dock and overlay tokens leaves out the encoder's address (`ingest.peer` is `null`) and what the destination replied to a failed connection (`egress.last_error` is `null`).
 
 A valid token without enough scope gets `403 Forbidden`; a missing or wrong token gets `401 Unauthorized`. For a Stream Deck or another controller, use the dock link's token. The derived tokens stay the same as long as the admin token does.
 
@@ -104,9 +104,11 @@ The server ignores what clients send, apart from closing the socket; messages ov
 | Method and path | Body | Effect |
 |---|---|---|
 | `GET /api/v1/config` | none | Settings (never including tokens or secrets), link URLs, the stream key OBS should use (`urls.obs_key`), and whether a destination stream key is saved. |
-| `PUT /api/v1/config` | Any of `destination`, `delay`, `overlay`, `hotkeys`, `grace_seconds`, `allow_lan` | Partial update. Destination changes apply immediately; `restart_required` says when a restart is needed. A stream key in the destination URL (`rtmp://host/app/<key>`) is moved to the keychain and removed from the URL. Changing the destination to another server forgets the saved stream key, so it is never sent anywhere it was not meant for (RTMP and RTMPS, or regional servers of the same service, keep it). |
-| `PUT /api/v1/destination/key` | `{"key": "live_..."}` | Store the stream key in the OS keychain. |
+| `PUT /api/v1/config` | Any of `destination`, `delay`, `overlay`, `hotkeys`, `grace_seconds`, `allow_lan` | Partial update. Destination changes apply immediately; `restart_required` says when a restart is needed. A stream key in the destination URL (`rtmp://host/app/<key>`) is moved to the keychain and removed from the URL. If the settings file cannot be written, nothing changes and the answer is `500`. |
+| `PUT /api/v1/destination/key` | `{"key": "live_..."}` | Store the stream key in the OS keychain, for the server of the destination in the settings file. |
 | `DELETE /api/v1/destination/key` | none | Forget the stored key. |
+
+The saved stream key is stored together with the server it was saved for, and is only ever sent to that server (RTMP and RTMPS, or regional servers of the same service, count as one). Changing the destination to another server also forgets it; if the keychain refuses to remove it, the change is refused (`500`) and nothing changes.
 
 ## OBS setup (obs-websocket)
 
