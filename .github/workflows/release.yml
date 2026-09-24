@@ -3,8 +3,9 @@ name: Release
 # Push a tag like v0.1.0 to build installers and headless binaries. The tag's
 # commit must pass CI first. Everything lands in a draft GitHub release, which is
 # checked (every asset there, every update signed with the project's key), and
-# whose installers are installed and started on clean machines, before its
-# checksums are added: a draft without SHA256SUMS.txt failed a check. Publish it
+# whose installers are installed and started on clean machines, and the container
+# image built, before its checksums are added: a draft without SHA256SUMS.txt
+# failed a check. Publish it
 # as a normal release (not a pre-release), since the updater only looks at the
 # latest full release. Publishing it pushes the container image
 # (publish-image.yml): nothing is public before that.
@@ -399,7 +400,8 @@ jobs:
   checksums:
     name: Add checksums
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [smoke]
+    # Publishing pushes the image, so it must build too.
+    needs: [smoke, container]
     permissions:
       contents: write
     runs-on: ubuntu-latest
