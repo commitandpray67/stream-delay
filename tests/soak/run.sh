@@ -9,8 +9,11 @@
 #   - streamdelayd is still running and never reconnected to the destination;
 #   - the receiving side decoded everything without errors;
 #   - memory stayed flat after the buffer filled: total RSS spread below
-#     MAX_GROWTH_MB, and the last third of the run no higher than the middle third
-#     by more than MAX_TREND_MB (catches slow leaks that a short spread hides);
+#     MAX_GROWTH_MB, and what the process holds beyond the buffered data no
+#     higher in the last third of the run than in the middle third by more than
+#     MAX_TREND_MB (catches slow leaks that a short spread hides; RSS itself
+#     follows how full the buffer is, since freed buffer memory goes back to
+#     the system);
 #   - output timestamps kept increasing (checked by the decoder in DTS order).
 #
 # Samples are written to $OUT/samples.csv (time, rss_kb, phase, effective_ms,
@@ -115,15 +118,21 @@ python3 - "$OUT" "$MAX_GROWTH_MB" "$MAX_TREND_MB" <<'PY'
 import csv, statistics, sys
 out, max_growth, max_trend = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
 rows = [r for r in csv.DictReader(open(f"{out}/samples.csv")) if r["phase"] != "error"]
-rss = [int(r["rss_kb"]) for r in rows if int(r["rss_kb"]) > 0]
+rows = [r for r in rows if int(r["rss_kb"]) > 0]
 # Ignore the first 20% while the buffer fills up to the maximum delay.
-warm = rss[len(rss) // 5:]
-growth = (max(warm) - min(warm)) / 1024
+warm = rows[len(rows) // 5:]
+rss = [int(r["rss_kb"]) for r in warm]
+# What the process holds beyond the buffered data, in KiB.
+beyond = [int(r["rss_kb"]) - int(r["buffered_bytes"]) // 1024 for r in warm]
+growth = (max(rss) - min(rss)) / 1024
 splices = int(rows[-1]["splices"]) if rows else 0
-print(f"  RSS after warm-up: min {min(warm)/1024:.1f} MB, max {max(warm)/1024:.1f} MB, spread {growth:.1f} MB")
+print(f"  RSS after warm-up: min {min(rss)/1024:.1f} MB, max {max(rss)/1024:.1f} MB, spread {growth:.1f} MB")
 third = len(warm) // 3
-trend = (statistics.median(warm[2 * third:]) - statistics.median(warm[third:2 * third])) / 1024
-print(f"  RSS median, last third vs middle third: {trend:+.1f} MB")
+def rise(v):
+    return (statistics.median(v[2 * third:]) - statistics.median(v[third:2 * third])) / 1024
+trend = rise(beyond)
+print(f"  beyond the buffered data, median, last third vs middle third: {trend:+.1f} MB"
+      f" (RSS itself: {rise(rss):+.1f} MB)")
 print(f"  splices performed: {splices}")
 if growth > max_growth:
     sys.exit(f"FAIL: memory grew by {growth:.1f} MB (limit {max_growth} MB)")
