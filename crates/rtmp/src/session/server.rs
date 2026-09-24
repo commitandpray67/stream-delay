@@ -236,6 +236,10 @@ impl ServerSession {
         let txid = values.get(1).and_then(Amf0Value::as_number).unwrap_or(0.0);
         match name.as_str() {
             "connect" => {
+                // Once per connection: each is answered and reported.
+                if self.state != State::AwaitConnect {
+                    return Err(SessionError::Protocol("connect sent twice".into()));
+                }
                 let obj = values.get(2).cloned().unwrap_or(Amf0Value::Null);
                 self.app = obj
                     .get("app")

@@ -4585,6 +4585,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4627,6 +4628,7 @@ name = "streamdelay-relay"
 version = "0.3.0"
 dependencies = [
  "bytes",
+ "libc",
  "proptest",
  "rustls",
  "serde",

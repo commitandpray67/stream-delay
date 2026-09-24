@@ -27,6 +27,8 @@ const MAX_CODES: usize = 8;
 
 /// Recent log lines kept in memory for the bundle.
 const LOG_LINES: usize = 2000;
+/// Longest line kept, in bytes: lines can quote what others sent.
+const MAX_LINE: usize = 2048;
 
 fn ring() -> &'static Mutex<VecDeque<String>> {
     static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
@@ -34,11 +36,20 @@ fn ring() -> &'static Mutex<VecDeque<String>> {
 }
 
 fn push_line(line: &str) {
+    let mut line = line.to_string();
+    if line.len() > MAX_LINE {
+        let mut end = MAX_LINE;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push('…');
+    }
     if let Ok(mut r) = ring().lock() {
         if r.len() == LOG_LINES {
             r.pop_front();
         }
-        r.push_back(line.to_string());
+        r.push_back(line);
     }
 }
 
@@ -353,6 +364,21 @@ mod tests {
         let logs = recent_logs();
         assert!(logs.iter().any(|l| l == "first line"));
         assert!(logs.iter().any(|l| l == "second line"));
+    }
+
+    #[test]
+    fn log_lines_are_kept_short() {
+        use std::io::Write;
+        let mut w = log_writer().make_writer_for_test();
+        let long = format!("start {}\n", "é".repeat(100_000));
+        w.write_all(long.as_bytes()).unwrap();
+        drop(w);
+        let kept = recent_logs()
+            .into_iter()
+            .find(|l| l.starts_with("start "))
+            .unwrap();
+        assert!(kept.len() <= MAX_LINE + '…'.len_utf8(), "{}", kept.len());
+        assert!(kept.ends_with('…'));
     }
 
     impl LogRing {

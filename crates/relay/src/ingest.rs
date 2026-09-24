@@ -17,7 +17,7 @@ use tokio::sync::{Notify, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::core::{Event, IngestTx};
+use crate::core::{Event, IngestTx, untrusted};
 use crate::io;
 
 /// If the encoder sends nothing for this long, the connection is considered dead.
@@ -350,14 +350,19 @@ async fn handle(
                         .find(|(k, _)| k == "flashVer")
                         .and_then(|(_, v)| v.as_str())
                         .unwrap_or("unknown");
-                    info!(%peer, %app, %encoder, "encoder sent connect");
+                    info!(
+                        %peer,
+                        app = %untrusted(&app),
+                        encoder = %untrusted(encoder),
+                        "encoder sent connect"
+                    );
                     connect_props = props
                         .into_iter()
                         .filter(|(k, _)| !OWN_CONNECT_PROPS.contains(&k.as_str()))
                         .collect();
                 }
                 ServerEvent::PublishRequest { app, stream_key } => {
-                    info!(%peer, %app, "encoder asked to publish");
+                    info!(%peer, app = %untrusted(&app), "encoder asked to publish");
                     let (tx, rx) = oneshot::channel();
                     // Not to be closed to make room while the answer is on its way.
                     slot.publishing.store(true, Ordering::Relaxed);

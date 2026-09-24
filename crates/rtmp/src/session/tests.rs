@@ -195,3 +195,23 @@ fn publishing_allows_large_media_but_bounds_other_messages() {
     c.send_data(0, &vec![0x05u8; MAX_NON_MEDIA_MESSAGE + 1]);
     assert!(s.feed(&c.take_output()).is_err());
 }
+
+#[test]
+fn a_second_connect_is_refused() {
+    // Each one is answered and reported: anyone who can reach the ingest could
+    // otherwise send them without end, before giving any stream key.
+    let (_c, mut s) = connected_pair();
+    let mut out = bytes::BytesMut::new();
+    crate::message::write_command(
+        &crate::chunk::ChunkEncoder::new(),
+        &mut out,
+        crate::message::CSID_COMMAND,
+        0,
+        &[
+            Amf0Value::string("connect"),
+            Amf0Value::Number(1.0),
+            Amf0Value::object([("app", Amf0Value::string("live"))]),
+        ],
+    );
+    assert!(matches!(s.feed(&out), Err(SessionError::Protocol(_))));
+}

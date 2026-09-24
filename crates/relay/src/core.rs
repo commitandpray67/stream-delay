@@ -55,6 +55,21 @@ impl Rejection {
 }
 
 /// Shortens error text for the state.
+/// Text a client sent before proving it knows the stream key, for logs and the
+/// state: anyone who can connect chooses it, so it is kept short and on one line.
+pub(crate) fn untrusted(s: &str) -> String {
+    const MAX: usize = 64;
+    let mut out: String = s
+        .chars()
+        .take(MAX)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if s.chars().nth(MAX).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 fn clip(mut s: String) -> String {
     if s.len() > MAX_ERROR_LEN {
         let mut end = MAX_ERROR_LEN;
@@ -507,7 +522,8 @@ impl Core {
             && want != app
         {
             return Err(Rejection::new(format!(
-                "unknown application '{app}' (expected '{want}')"
+                "unknown application '{}' (expected '{want}')",
+                untrusted(app)
             )));
         }
         // Constant time, so response timing does not reveal how much of a guess
@@ -721,6 +737,16 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_from_strangers_is_kept_short_and_on_one_line() {
+        assert_eq!(untrusted("live"), "live");
+        assert_eq!(untrusted("a\nb\x1b[31m"), "a b [31m");
+        let long = "é".repeat(60_000);
+        let shown = untrusted(&long);
+        assert_eq!(shown.chars().count(), 65);
+        assert!(shown.ends_with('…'));
+    }
 
     #[tokio::test]
     async fn media_waits_for_room_in_the_queue_budget() {

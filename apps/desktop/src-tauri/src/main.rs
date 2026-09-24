@@ -97,6 +97,48 @@ fn main() {
         });
 }
 
+/// Largest log file. Past it the log starts again, keeping the full one as
+/// `stream-delay.1.log`, so a long run, or someone flooding the log from the
+/// network, cannot fill the disk.
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The log file, started again when it reaches `max` bytes.
+struct LogFile {
+    path: PathBuf,
+    file: std::fs::File,
+    size: u64,
+    max: u64,
+}
+
+impl LogFile {
+    fn create(path: PathBuf, max: u64) -> std::io::Result<Self> {
+        let file = std::fs::File::create(&path)?;
+        Ok(Self {
+            path,
+            file,
+            size: 0,
+            max,
+        })
+    }
+}
+
+impl std::io::Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.size > 0 && self.size + buf.len() as u64 > self.max {
+            let _ = std::fs::rename(&self.path, self.path.with_file_name("stream-delay.1.log"));
+            self.file = std::fs::File::create(&self.path)?;
+            self.size = 0;
+        }
+        let n = self.file.write(buf)?;
+        self.size += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,obws=error".into());
@@ -108,7 +150,7 @@ fn init_logging() {
         let path = d.join("stream-delay.log");
         // Keep the previous run's log: after a crash, that is the one that matters.
         let _ = std::fs::rename(&path, d.join("stream-delay.previous.log"));
-        std::fs::File::create(path).ok()
+        LogFile::create(path, MAX_LOG_BYTES).ok()
     });
     let output = match file {
         Some(f) => tracing_subscriber::fmt::layer()
@@ -283,5 +325,28 @@ pub fn show_dashboard(app: &AppHandle, tab: Option<&str>) {
     match result {
         Ok(_) => info!("dashboard opened"),
         Err(e) => error!("could not open the dashboard window: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn the_log_file_starts_again_when_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stream-delay.log");
+        let mut log = LogFile::create(path.clone(), 100).unwrap();
+        for i in 0..30 {
+            writeln!(log, "line {i:02}").unwrap();
+        }
+        log.flush().unwrap();
+        let current = std::fs::read_to_string(&path).unwrap();
+        let older = std::fs::read_to_string(dir.path().join("stream-delay.1.log")).unwrap();
+        assert!(current.len() <= 100 && older.len() <= 100);
+        assert!(current.ends_with("line 29\n"), "{current}");
+        assert!(older.contains("line 2"), "{older}");
     }
 }
