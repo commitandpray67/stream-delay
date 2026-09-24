@@ -149,6 +149,17 @@ pub enum EngineError {
     NothingToDump,
 }
 
+/// Memory a buffered message takes besides its payload: its [`Entry`], its slot
+/// in the ring and the payload's handle. Counting it keeps the RAM cap meaningful
+/// for streams of many tiny messages, which would otherwise use many times the
+/// cap before any were dropped.
+const ENTRY_OVERHEAD: usize = std::mem::size_of::<Entry>() + 64;
+
+/// What a buffered message with a payload of `len` bytes counts against the RAM cap.
+fn cost(len: usize) -> usize {
+    len + ENTRY_OVERHEAD
+}
+
 struct Entry {
     seq: u64,
     arrival: Time,
@@ -440,7 +451,7 @@ impl Engine {
             self.syncs.push_back(seq);
         }
         self.stats.bytes(now, payload.len());
-        self.bytes += payload.len();
+        self.bytes += cost(payload.len());
         let session = session.id;
         self.ring.push_back(Entry {
             seq,
@@ -631,7 +642,7 @@ impl Engine {
     fn drop_before(&mut self, seq: u64) {
         while self.ring.front().is_some_and(|f| f.seq < seq) {
             let f = self.ring.pop_front().expect("front exists");
-            self.bytes -= f.payload.len();
+            self.bytes -= cost(f.payload.len());
             self.base_seq = f.seq + 1;
             if self.syncs.front() == Some(&f.seq) {
                 self.syncs.pop_front();
@@ -805,7 +816,7 @@ impl Engine {
         // numbers: nothing refers to them, since none of it was ever sent.
         let keep = (cut - self.base_seq) as usize;
         for e in self.ring.drain(keep..) {
-            self.bytes -= e.payload.len();
+            self.bytes -= cost(e.payload.len());
         }
         self.syncs.retain(|&s| s < cut);
         self.next_seq = cut;
@@ -1322,7 +1333,7 @@ impl Engine {
                     break;
                 }
                 let f = self.ring.pop_front().expect("front exists");
-                self.bytes -= f.payload.len();
+                self.bytes -= cost(f.payload.len());
                 self.base_seq = f.seq + 1;
                 if self.syncs.front() == Some(&f.seq) {
                     self.syncs.pop_front();

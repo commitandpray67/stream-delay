@@ -318,7 +318,7 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     tokio::spawn(ingest::listen(
         listener,
         config.publish_timeout,
-        events_tx.clone(),
+        core::IngestTx::new(events_tx.clone(), core::INGEST_QUEUE_BUDGET),
         shutdown_rx,
     ));
     tokio::spawn(core::run(

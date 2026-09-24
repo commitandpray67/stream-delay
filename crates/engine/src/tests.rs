@@ -1325,3 +1325,26 @@ fn decoder_configuration_kept_for_splices_is_bounded() {
     assert!(headers.iter().all(|h| h.payload.len() <= MAX_HEADER_BYTES));
     assert!(e.has_buffered());
 }
+
+#[test]
+fn tiny_messages_count_against_the_ram_cap() {
+    // 200 000 one-byte messages: 200 KB of payload, far below the cap, but
+    // several times the cap once what each message costs is counted.
+    let cap = 1 << 20;
+    let mut e = Engine::new(EngineConfig {
+        ram_cap_bytes: cap,
+        ..config()
+    });
+    e.ingest_start(0);
+    let payload = Bytes::from_static(&[0]);
+    for i in 0..200_000u64 {
+        e.ingest(1_000 * SEC + i * 100, Kind::Data, i / 10, payload.clone());
+    }
+    assert!(e.bytes <= cap, "{} bytes counted", e.bytes);
+    assert!(
+        e.ring.len() <= cap / ENTRY_OVERHEAD + 1,
+        "{} messages kept",
+        e.ring.len()
+    );
+    assert!(e.ring.len() > 1000, "the cap should not empty the buffer");
+}

@@ -9,7 +9,7 @@ use bytes::Bytes;
 use streamdelay_engine::{Engine, EngineError, Kind, OutMsg};
 use streamdelay_rtmp::RtmpUrl;
 use streamdelay_rtmp::amf0::Amf0Value;
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
@@ -71,6 +71,51 @@ fn clip(mut s: String) -> String {
     s
 }
 
+/// Bytes of encoder media that may wait for the core at once, counting
+/// [`QUEUED_OVERHEAD`] per message. A publisher sending faster than the core
+/// takes it in is slowed down (its connection is not read meanwhile) instead of
+/// filling memory.
+pub(crate) const INGEST_QUEUE_BUDGET: usize = 32 * 1024 * 1024;
+
+/// What a queued message costs besides its payload.
+const QUEUED_OVERHEAD: usize = 128;
+
+/// How ingest connections reach the core. Lifecycle events are sent at once;
+/// media waits for room in a byte budget. Both go through the same queue, so the
+/// core sees them in the order they happened.
+#[derive(Clone)]
+pub(crate) struct IngestTx {
+    events: mpsc::UnboundedSender<Event>,
+    budget: Arc<Semaphore>,
+    budget_bytes: usize,
+}
+
+impl IngestTx {
+    pub(crate) fn new(events: mpsc::UnboundedSender<Event>, budget_bytes: usize) -> Self {
+        Self {
+            events,
+            budget: Arc::new(Semaphore::new(budget_bytes)),
+            budget_bytes,
+        }
+    }
+
+    /// Sends a lifecycle event (not media). Fails once the core has gone.
+    pub(crate) fn send(&self, event: Event) -> Result<(), ()> {
+        self.events.send(event).map_err(|_| ())
+    }
+
+    /// Room for a message of `len` bytes, waiting until the core has taken in
+    /// enough of what is queued. `None` once the core has gone.
+    pub(crate) async fn reserve(&self, len: usize) -> Option<OwnedSemaphorePermit> {
+        let n = (len + QUEUED_OVERHEAD).min(self.budget_bytes);
+        let n = u32::try_from(n).unwrap_or(u32::MAX);
+        tokio::select! {
+            p = self.budget.clone().acquire_many_owned(n) => p.ok(),
+            () = self.events.closed() => None,
+        }
+    }
+}
+
 pub(crate) enum Event {
     IngestPublish {
         conn: u64,
@@ -87,10 +132,13 @@ pub(crate) enum Event {
         kind: Kind,
         ts: u64,
         payload: Bytes,
+        /// Its share of the queue budget, returned once it has been handled.
+        _permit: OwnedSemaphorePermit,
     },
     IngestMetadata {
         conn: u64,
         payload: Bytes,
+        _permit: OwnedSemaphorePermit,
     },
     IngestClosed {
         conn: u64,
@@ -438,13 +486,18 @@ impl Core {
                 kind,
                 ts,
                 payload,
+                _permit: _,
             } => {
                 if let Some(p) = self.publisher_mut(conn) {
                     p.last_seen = Instant::now();
                     self.engine.ingest(now, kind, ts, payload);
                 }
             }
-            Event::IngestMetadata { conn, payload } => {
+            Event::IngestMetadata {
+                conn,
+                payload,
+                _permit: _,
+            } => {
                 if let Some(p) = self.publisher_mut(conn) {
                     p.last_seen = Instant::now();
                     self.engine.ingest_metadata(now, payload);
@@ -795,5 +848,36 @@ impl Core {
                 false
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn media_waits_for_room_in_the_queue_budget() {
+        let (tx, rx) = mpsc::unbounded_channel::<Event>();
+        let ingest = IngestTx::new(tx, 1000);
+        // Two messages of 372 bytes (500 with their overhead) fill it.
+        let a = ingest.reserve(372).await.unwrap();
+        let b = ingest.reserve(372).await.unwrap();
+        let third = ingest.reserve(0);
+        tokio::pin!(third);
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut third).await;
+        assert!(waited.is_err(), "a full queue must not take more");
+        // The core handled one: there is room again.
+        drop(a);
+        let c = tokio::time::timeout(Duration::from_secs(1), third)
+            .await
+            .unwrap();
+        assert!(c.is_some());
+        drop((b, c));
+        // Larger than the whole budget: it goes through, alone.
+        let whole = ingest.reserve(10_000).await.unwrap();
+        // The core has gone while the queue is full: waiting ends.
+        drop(rx);
+        assert!(ingest.reserve(10).await.is_none());
+        drop(whole);
     }
 }

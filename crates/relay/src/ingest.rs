@@ -13,11 +13,11 @@ use streamdelay_rtmp::session::{MediaKind, ServerConfig, ServerEvent, ServerSess
 use streamdelay_rtmp::ts::TsUnwrapper;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::core::Event;
+use crate::core::{Event, IngestTx};
 use crate::io;
 
 /// If the encoder sends nothing for this long, the connection is considered dead.
@@ -60,7 +60,7 @@ const OWN_CONNECT_PROPS: &[&str] = &[
 pub(crate) async fn listen(
     listener: TcpListener,
     publish_timeout: Duration,
-    events: mpsc::UnboundedSender<Event>,
+    events: IngestTx,
     mut shutdown: watch::Receiver<bool>,
 ) {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -299,7 +299,7 @@ async fn handle(
     peer: SocketAddr,
     conn: u64,
     publish_timeout: Duration,
-    events: mpsc::UnboundedSender<Event>,
+    events: IngestTx,
     slot: &ConnSlot,
     bad_keys: &BadKeys,
 ) -> std::io::Result<()> {
@@ -410,24 +410,39 @@ async fn handle(
                         MediaKind::Video => (Kind::Video, 1),
                     };
                     let ts = unwrap[i].unwrap(timestamp);
+                    let Some(permit) = events.reserve(payload.len()).await else {
+                        return Ok(());
+                    };
                     let _ = events.send(Event::IngestMedia {
                         conn,
                         kind: k,
                         ts,
                         payload,
+                        _permit: permit,
                     });
                 }
                 ServerEvent::Data { timestamp, payload } => {
                     let ts = unwrap[2].unwrap(timestamp);
+                    let Some(permit) = events.reserve(payload.len()).await else {
+                        return Ok(());
+                    };
                     let _ = events.send(Event::IngestMedia {
                         conn,
                         kind: Kind::Data,
                         ts,
                         payload,
+                        _permit: permit,
                     });
                 }
                 ServerEvent::Metadata { payload, .. } => {
-                    let _ = events.send(Event::IngestMetadata { conn, payload });
+                    let Some(permit) = events.reserve(payload.len()).await else {
+                        return Ok(());
+                    };
+                    let _ = events.send(Event::IngestMetadata {
+                        conn,
+                        payload,
+                        _permit: permit,
+                    });
                 }
                 ServerEvent::Unpublish => {
                     if publishing {
