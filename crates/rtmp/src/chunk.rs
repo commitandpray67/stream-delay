@@ -33,7 +33,8 @@ const MAX_RESERVE: usize = 256 * 1024;
 /// freed and allocated again: with glibc, freeing a 1 MiB block raises the size
 /// from which it maps memory straight from the OS, and later blocks then came
 /// from its general heap, where the process held 20-35 MB more than the
-/// buffered data in steady-state tests.
+/// buffered data in steady-state tests. (The relay also fixes that size, since
+/// spare blocks beyond `MAX_SPARE_BLOCKS` are freed.)
 const ARENA_BLOCK: usize = 1024 * 1024;
 const ARENA_MAX_MESSAGE: usize = ARENA_BLOCK / 2;
 /// Unused blocks kept for reuse; any beyond this go back to the allocator.

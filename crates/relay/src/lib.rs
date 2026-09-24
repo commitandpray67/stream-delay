@@ -9,6 +9,7 @@
 
 mod core;
 mod egress;
+mod heap;
 mod ingest;
 mod io;
 mod lifecycle;
@@ -326,6 +327,7 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Blocks for what the buffer keeps and what waits for the core: whatever
     // pattern of messages a publisher sends, they cannot hold more.
+    heap::keep_blocks_mapped();
     let arena = streamdelay_rtmp::ArenaPool::new(
         config
             .engine
