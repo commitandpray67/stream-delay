@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Soak test: stream through streamdelayd for a long time while changing the delay at
-# random intervals, then check that nothing degraded.
+# Soak test: stream through streamdelayd for a long time while changing the delay
+# and dumping the buffer at random intervals, then check that nothing degraded.
 #
 #   DURATION=43200 tests/soak/run.sh      # the 12-hour run from docs/PLAN.md
 #   DURATION=1800 MIN_GAP=20 MAX_GAP=60 tests/soak/run.sh   # a quick local run
@@ -86,7 +86,7 @@ while kill -0 "$ENC" 2>/dev/null; do
   now=$(date +%s)
   sample
   if (( now >= next_change )); then
-    r=$(( RANDOM % 6 ))
+    r=$(( RANDOM % 8 ))
     secs=$(( 1 + RANDOM % (MAX_DELAY - 1) ))
     case $r in
       0|1) body="{\"seconds\":$secs}"; path=/api/v1/delay; method=PUT ;;
@@ -94,6 +94,9 @@ while kill -0 "$ENC" 2>/dev/null; do
       3)   body='{"when":"now"}'; path=/api/v1/live; method=POST ;;
       4)   body='{"when":"after-air"}'; path=/api/v1/live; method=POST ;;
       5)   body="{\"seconds\":$(( secs / 2 ))}"; path=/api/v1/delay; method=PUT ;;
+      # Refused (400) while there is no delay: logged below, not a failure.
+      6)   body='{"mode":"rewind"}'; path=/api/v1/stream/dump; method=POST ;;
+      7)   body='{"mode":"mask"}'; path=/api/v1/stream/dump; method=POST ;;
     esac
     api "$method" "$path" "$body" > /dev/null || echo "  change failed: $method $path $body"
     changes=$(( changes + 1 ))
