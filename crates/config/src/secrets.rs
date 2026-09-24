@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use crate::replace_private;
+use crate::{parse_error, replace_private};
 
 const SERVICE: &str = "dev.stream-delay";
 
@@ -121,7 +121,7 @@ impl Secrets {
         match fs::read_to_string(&self.file) {
             Ok(t) => Ok(match toml::from_str(&t) {
                 Ok(map) => FileState::Readable(map),
-                Err(e) => FileState::Damaged(e.to_string()),
+                Err(e) => FileState::Damaged(parse_error(&t, &e)),
             }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 Ok(FileState::Readable(BTreeMap::new()))
@@ -210,13 +210,25 @@ impl SecretStore for Secrets {
 
     fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
         let _g = self.lock();
+        // The file first: if it cannot be read, nothing has changed.
+        let mut map = self.load_for_write()?;
         if let Some(k) = &self.keychain {
+            // What to put back if the file cannot be updated.
+            let previous = k.get(name);
             match k.set(name, value) {
                 Ok(()) => {
                     // A copy left in the file would take precedence over this one.
-                    if let Err(e) = self.remove_from_file(name) {
-                        // Undo, so the file's value stays the one in effect.
-                        if let Err(undo) = k.delete(name) {
+                    if map.remove(name).is_some()
+                        && let Err(e) = self.write_file(&map)
+                    {
+                        // Undo, so the file's value stays the one in effect and the
+                        // keychain holds what it held.
+                        let undo = match previous {
+                            Ok(Some(old)) => k.set(name, &old),
+                            Ok(None) => k.delete(name),
+                            Err(e) => Err(e),
+                        };
+                        if let Err(undo) = undo {
                             warn!("could not undo saving {name} to the keychain: {undo}");
                         }
                         return Err(e);
@@ -226,7 +238,6 @@ impl SecretStore for Secrets {
                 Err(e) => warn!("keychain write failed ({e}); using the private file"),
             }
         }
-        let mut map = self.load_for_write()?;
         let before = map.clone();
         map.insert(name.into(), value.into());
         self.write_file(&map)?;
@@ -474,6 +485,42 @@ mod tests {
         s.delete("k").unwrap();
         assert_eq!(s.get("k"), None);
         assert_eq!(s.try_get("k").unwrap(), None);
+    }
+
+    #[test]
+    fn a_save_that_fails_keeps_the_previous_value() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, k) = flaky(dir.path());
+        // In the keychain, with a file that cannot be read.
+        s.set("k", "old").unwrap();
+        fs::create_dir(dir.path().join("secrets.toml")).unwrap();
+        assert!(s.set("k", "new").is_err());
+        assert_eq!(k.get("k").unwrap().as_deref(), Some("old"));
+        fs::remove_dir(dir.path().join("secrets.toml")).unwrap();
+        // In the file (the keychain refused it), which then cannot be rewritten
+        // after the keychain takes the new value: both stay as they were.
+        k.fail_set.store(true, Relaxed);
+        s.set("k", "older").unwrap();
+        k.fail_set.store(false, Relaxed);
+        fs::create_dir(dir.path().join("secrets.toml.tmp")).unwrap();
+        assert!(s.set("k", "new").is_err());
+        assert_eq!(s.get("k").as_deref(), Some("older"));
+        assert_eq!(k.get("k").unwrap(), None);
+    }
+
+    #[test]
+    fn a_damaged_file_is_reported_without_its_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Secrets::new(dir.path(), false);
+        fs::write(
+            dir.path().join("secrets.toml"),
+            "destination-key = \"SENTINEL-live_1\" trailing\n",
+        )
+        .unwrap();
+        let e = s.try_get("destination-key").unwrap_err().to_string();
+        assert!(!e.contains("SENTINEL"), "{e}");
+        assert!(e.contains("line 1"), "{e}");
     }
 
     #[test]

@@ -18,6 +18,34 @@ use thiserror::Error;
 pub use secrets::{Keychain, MemorySecrets, SecretError, SecretStore, Secrets};
 pub use streamdelay_engine::DelayMode;
 
+/// Why `text` does not parse, for logs and error messages: where, and the
+/// parser's reason, without quoting the file (the parser's own message shows the
+/// offending line) or any text value, since the settings and secrets files hold
+/// tokens and stream keys.
+pub(crate) fn parse_error(text: &str, e: &toml::de::Error) -> String {
+    let mut why = String::new();
+    let mut quoted = false;
+    for c in e.message().chars() {
+        if c == '"' {
+            if !quoted {
+                why.push_str("\"…\"");
+            }
+            quoted = !quoted;
+        } else if !quoted && !c.is_control() {
+            why.push(c);
+        }
+    }
+    match e.span() {
+        Some(span) => {
+            let line = text
+                .get(..span.start)
+                .map_or(1, |before| before.matches('\n').count() + 1);
+            format!("line {line}: {why}")
+        }
+        None => why,
+    }
+}
+
 /// Names of stored secrets.
 pub mod secret {
     pub const DESTINATION_KEY: &str = "destination-key";
@@ -35,11 +63,9 @@ pub enum ConfigError {
     Read { path: PathBuf, source: io::Error },
     #[error("could not write {path}: {source}")]
     Write { path: PathBuf, source: io::Error },
-    #[error("{path} is not valid: {source}")]
-    Parse {
-        path: PathBuf,
-        source: toml::de::Error,
-    },
+    /// See [`parse_error`] for `why`.
+    #[error("{path} is not valid: {why}")]
+    Parse { path: PathBuf, why: String },
     #[error("no configuration directory could be determined for this user")]
     NoConfigDir,
 }
@@ -323,9 +349,9 @@ impl Config {
     /// Loads the config, creating it (with a fresh API token) if missing.
     pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
         let mut config = match fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {
+            Ok(text) => toml::from_str(&text).map_err(|e| ConfigError::Parse {
                 path: path.into(),
-                source,
+                why: parse_error(&text, &e),
             })?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Config::default(),
             Err(source) => {
@@ -424,8 +450,8 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Windows access lists, through the Win32 API: the only unsafe code in the
-/// project (see this crate's `Cargo.toml`).
+/// Windows access lists, through the Win32 API: one of the two places with unsafe
+/// code in the project (the other sets the allocator's threshold, in the relay).
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows_acl {
@@ -591,5 +617,25 @@ mod tests {
             Config::load_or_create(&path),
             Err(ConfigError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn parse_errors_never_quote_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (text, line) in [
+            // A syntax error: the parser's message shows the line.
+            ("[api]\ntoken = \"SENTINEL-token-0123\" trailing\n", 2),
+            // A value of the wrong type: the message quotes it.
+            (
+                "[api]\ntoken = \"x\"\n\n[ingest]\ngrace_seconds = \"SENTINEL-key\"\n",
+                5,
+            ),
+        ] {
+            fs::write(&path, text).unwrap();
+            let e = Config::load_or_create(&path).unwrap_err().to_string();
+            assert!(!e.contains("SENTINEL"), "{e}");
+            assert!(e.contains(&format!("line {line}: ")), "{e}");
+        }
     }
 }
