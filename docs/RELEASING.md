@@ -25,6 +25,7 @@ Publishing it runs [`publish-image.yml`](../.github/workflows/publish-image.yml)
 6. When the workflow has finished, check that the draft has `SHA256SUMS.txt` and `release-checks.txt` (see above). A run can show success without them when a job was skipped, and the container image is never pushed without `SHA256SUMS.txt`: if either is missing, don't publish; see which job on the run's page failed or was skipped. Check that the run `release-checks.txt` names is the latest run for this tag and passed, and that its commit is the tag's. To check the files themselves, download the draft's assets into an empty folder and run `sha256sum -c SHA256SUMS.txt` (macOS: `shasum -a 256 -c`).
 7. Install the draft's installers and test on a real Twitch account with `?bandwidthtest=true` on each OS you can reach, following [`docs/testing.md`](testing.md). Nothing is public yet: if something is wrong, delete the draft and the tag, fix it, and tag again.
 8. Paste the changelog entry into the draft release notes, then publish (not as a pre-release). The container image follows.
+9. Check the update: on a Windows machine and a Mac with the previous release installed, click **Check for updates**. It must install the new version and restart as it. (Installed copies only see a published release, so this comes after publishing.) If it fails, installed copies cannot update themselves: tell users to install the new version by hand, and fix the updater before the next release. Do this at least for the first update from 0.3.0.
 
 ## One-time setup
 
