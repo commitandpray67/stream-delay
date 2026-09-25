@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeDelay, DelayAnnouncer, settledDelay } from "./overlay";
+import { badgeDelay, DelayAnnouncer, previewUrl, settledDelay } from "./overlay";
 import type { Phase, RelayState } from "./types";
 
 function state(
@@ -83,5 +83,19 @@ describe("overlay announcements", () => {
     expect(badgeDelay(state("delayed", 30, 30, { ended: true }))).toBeNull();
     expect(badgeDelay(state("delayed", 30, 30, { connected: false }))).toBeNull();
     expect(settledDelay(state("adding", 30, 0))).toBeNull();
+  });
+});
+
+describe("the dashboard's overlay preview", () => {
+  it("uses the overlay link's read token, on the dashboard's own server", () => {
+    const src = previewUrl("http://127.0.0.1:7788/overlay?token=read-token%2Fx", "badge");
+    expect(src).toBe("/overlay?preview=badge&token=read-token%2Fx");
+    expect(new URLSearchParams(src!.split("?")[1]).get("token")).toBe("read-token/x");
+  });
+
+  it("shows nothing without a link that has a token", () => {
+    expect(previewUrl(undefined, "mask")).toBeNull();
+    expect(previewUrl("not a url", "mask")).toBeNull();
+    expect(previewUrl("http://127.0.0.1:7788/overlay", "mask")).toBeNull();
   });
 });

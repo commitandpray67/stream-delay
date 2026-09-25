@@ -225,5 +225,16 @@ class Release(unittest.TestCase):
         self.assertEqual(v.check_signatures(self.root, self.key), len(v.SIGNED))
 
 
+class PinnedKey(unittest.TestCase):
+    """apps/desktop/updater.pub, which every release is built and checked with."""
+
+    def test_is_the_key_installed_copies_trust(self):
+        path = Path(__file__).parents[2] / "apps" / "desktop" / "updater.pub"
+        key_id, _ = v.load_public_key(path.read_text())
+        # The key of every release so far (minisign shows the id reversed).
+        # Changing it strands every installed copy: see docs/RELEASING.md.
+        self.assertEqual(key_id[::-1].hex().upper(), "A9CBDB55664BEBFD")
+
+
 if __name__ == "__main__":
     unittest.main()

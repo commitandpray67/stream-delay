@@ -1,10 +1,13 @@
 name: Publish container image
 
 # Pushes ghcr.io/<owner>/stream-delay:<version> (and :edge) once a release is
-# published, packaging the Linux archives attached to it, after checking them
-# against its SHA256SUMS.txt. Nothing is pushed for a draft, so an image never
-# goes out for a release that was not reviewed and published. Run it by hand to
-# push the image of an already published release again.
+# published, packaging the Linux archives attached to it. First
+# check_image_inputs.py checks that the release is published as a full release,
+# that its release-checks.txt names the tag's commit and its SHA256SUMS.txt, and
+# that each archive matches its one entry there. Nothing is pushed for a draft or
+# a pre-release, however the workflow is started, so an image never goes out for
+# a release that was not reviewed and published. Run it by hand to push the image
+# of an already published release again.
 on:
   release:
     types: [published]
@@ -30,16 +33,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.TAG }}
+      # The checks as this workflow has them, also when it is run by hand for a
+      # tag from before them.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: .ci
+          sparse-checkout: .github/scripts
       - name: Download and check the release's Linux binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          mkdir release && cd release
-          gh release download "$TAG" --pattern 'streamdelayd-*-unknown-linux-gnu.tar.gz' --pattern SHA256SUMS.txt
-          ls -l
-          test "$(ls streamdelayd-*-unknown-linux-gnu.tar.gz | wc -l)" -eq 2
-          sha256sum --check --ignore-missing --strict SHA256SUMS.txt
+          mkdir release
+          gh release download "$TAG" --dir release --pattern 'streamdelayd-*-unknown-linux-gnu.tar.gz' \
+            --pattern SHA256SUMS.txt --pattern release-checks.txt
+          ls -l release
+          # Published (not a draft or pre-release), passed every check for the
+          # tag's commit, and each archive matches its one checksum.
+          python3 .ci/.github/scripts/check_image_inputs.py "$TAG" release "$(git rev-parse HEAD)"
       - name: Arrange binaries by architecture
         run: |
           for pair in amd64:x86_64 arm64:aarch64; do

@@ -16,7 +16,9 @@ it is built to be safe by default:
   dock or overlay link cannot reveal or redirect your stream key. Still, don't
   show them on stream.
 - **Your stream key only goes where you set it:** if you change the
-  destination to a different server, the saved key is forgotten. Likewise the
+  destination to a different server, the saved key is forgotten, as it is when
+  you change from an encrypted (RTMPS) address to an unencrypted (RTMP) one,
+  even on the same service. Likewise the
   saved OBS WebSocket password is only ever sent to the OBS it was entered for,
   and OBS's original settings are only restored to the OBS they came from.
 - **Web pages you visit can't control your stream:** requests must name this

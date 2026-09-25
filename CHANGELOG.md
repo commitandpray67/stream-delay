@@ -6,8 +6,32 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A stream key saved for an RTMPS address is no longer used after the
+  destination changes to RTMP, even on the same service (Twitch, YouTube):
+  enter it again. RTMP would send it unencrypted.
+- With stream-delay listening on every IPv6 interface (`[::]`), the dashboard,
+  dock, overlay and OBS links use `[::1]` instead of `127.0.0.1`, which an
+  IPv6-only socket (the default on Windows) doesn't accept.
+- Release dry runs, which build the installers and install and start them on
+  every OS, run for every push to `main` that changes more than documentation.
+- The updater's public key is committed (`apps/desktop/updater.pub`), and every
+  release is built and checked with it, so a signing key that no longer matches
+  it fails the release instead of shipping updates installed copies refuse. The
+  `TAURI_UPDATER_PUBKEY` repository variable is no longer used.
+
 ### Fixed
 
+- Decoder configuration kept for splices takes at most an eighth of the RAM cap:
+  an encoder sending many large configuration messages could hold up to 64 MiB
+  whatever the cap. The state's `buffered_bytes` now includes it.
+- The dashboard's overlay preview used the dashboard's token; it uses the
+  overlay link's, which can only read.
+- The container image is pushed only for a published full release whose
+  `release-checks.txt` names the tag's commit, also when the workflow is run by
+  hand, and only if each Linux archive matches its one entry in
+  `SHA256SUMS.txt` (an archive without an entry was let through).
 - Release builds skipped the job that adds `SHA256SUMS.txt` and
   `release-checks.txt` although every check passed (GitHub skips a job when any
   job before it was skipped, here the dry-run build a release doesn't make), so

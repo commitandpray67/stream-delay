@@ -29,9 +29,13 @@ const SEC: u64 = 1_000_000;
 /// Decoder configuration messages kept per encoder session, to resend after a
 /// splice. Real streams have one or two per track; the limits only keep a
 /// misbehaving encoder from holding much. What is kept counts against the
-/// memory cap (see [`Session::cost`]).
+/// memory cap (see [`Session::cost`]), and takes at most
+/// [`HEADER_SHARE_OF_RAM_CAP`] of it: eviction cannot drop a live session's.
 const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 1024 * 1024;
+/// The retained configuration of a session takes at most the RAM cap divided by
+/// this (2 MiB at the smallest cap, 16 MiB).
+const HEADER_SHARE_OF_RAM_CAP: usize = 8;
 /// Largest stream metadata kept per session: an encoder's is about a kilobyte.
 const MAX_METADATA_BYTES: usize = 64 * 1024;
 
@@ -465,14 +469,18 @@ impl Engine {
         }
         let seq = self.next_seq;
         self.next_seq += 1;
+        let budget = self.config.ram_cap_bytes / HEADER_SHARE_OF_RAM_CAP;
         if let Some(class) = config
             && payload.len() <= MAX_HEADER_BYTES
+            && cost(payload.len()) <= budget
         {
             session
                 .headers
                 .retain(|h| !(h.kind == kind && h.class == class));
-            if session.headers.len() >= MAX_HEADERS {
-                session.headers.remove(0);
+            // The oldest go, to keep within the count and the budget.
+            let mut kept: usize = session.headers.iter().map(|h| cost(h.payload.len())).sum();
+            while session.headers.len() >= MAX_HEADERS || kept + cost(payload.len()) > budget {
+                kept -= cost(session.headers.remove(0).payload.len());
             }
             session.headers.push(HeaderRec {
                 seq,

@@ -24,6 +24,22 @@ export function settledDelay(state: RelayState | null): number | null {
   return Math.round(ms / 1000);
 }
 
+/**
+ * The dashboard's overlay preview: this server's overlay page with the overlay
+ * link's own token, which can only read, never the dashboard's. Relative, so it
+ * loads from wherever the dashboard was opened. Null without a usable link.
+ */
+export function previewUrl(overlayLink: string | undefined, preview: "mask" | "badge"): string | null {
+  let token: string | null = null;
+  try {
+    token = overlayLink ? new URL(overlayLink).searchParams.get("token") : null;
+  } catch {
+    return null;
+  }
+  if (!token) return null;
+  return `/overlay?${new URLSearchParams({ preview, token })}`;
+}
+
 /** Seconds of delay for the badge, or null when there is none to show. */
 export function badgeDelay(state: RelayState | null): number | null {
   if (!broadcasting(state)) return null;

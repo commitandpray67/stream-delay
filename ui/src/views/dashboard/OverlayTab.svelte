@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { getToken, updateConfig } from "../../lib/api";
-  import { live } from "../../lib/live.svelte";
+  import { updateConfig } from "../../lib/api";
+  import { adminConfig, live } from "../../lib/live.svelte";
+  import { previewUrl } from "../../lib/overlay";
   import type { OverlayConfig } from "../../lib/types";
 
   let form = $state<OverlayConfig | null>(null);
   let preview = $state<"mask" | "badge">("mask");
+  const previewSrc = $derived(previewUrl(adminConfig()?.urls.overlay, preview));
   let message = $state("");
   let error = $state("");
 
@@ -61,7 +63,7 @@
         <button class:active={preview === "badge"} onclick={() => (preview = "badge")}>Preview badge</button>
       </div>
       <div class="frame">
-        <iframe title="Overlay preview" src="/overlay?preview={preview}&token={encodeURIComponent(getToken())}"></iframe>
+        {#if previewSrc}<iframe title="Overlay preview" src={previewSrc}></iframe>{/if}
       </div>
       <p class="muted small">Saved settings are shown. The preview uses a 16:9 frame over a checkerboard.</p>
     </section>

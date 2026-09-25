@@ -113,6 +113,11 @@ impl RtmpUrl {
         }
     }
 
+    /// True for RTMPS: the connection, stream key included, is encrypted.
+    pub fn encrypted(&self) -> bool {
+        self.scheme == Scheme::Rtmps
+    }
+
     /// The query of the application (`rtmp://host/app?<query>`), which may hold
     /// credentials. Without the `?`.
     pub fn query(&self) -> Option<&str> {

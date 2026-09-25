@@ -55,6 +55,8 @@ pub struct Snapshot {
     pub max_delay_ms: u64,
     /// How far back the buffer reaches.
     pub history_ms: u64,
+    /// What the buffer holds, as counted against the RAM cap: buffered messages
+    /// and the encoder sessions' decoder configuration and metadata.
     pub buffered_bytes: u64,
     /// The overlay should show the mask slate.
     pub mask_visible: bool,
@@ -191,7 +193,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         effective_ms: effective / MS,
         max_delay_ms: e.config.max_delay_ms,
         history_ms,
-        buffered_bytes: e.bytes as u64,
+        buffered_bytes: (e.bytes + e.session_bytes) as u64,
         mask_visible: o.mask_visible,
         history_short: o.history_short,
         ingest,

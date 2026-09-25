@@ -1,7 +1,7 @@
 //! Application wiring shared by `streamdelayd` and the desktop app: load settings,
 //! start the relay and the control server, and apply settings changes.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
@@ -400,13 +400,19 @@ pub(crate) fn dump_mode(delay: &DelayConfig, asked: Option<DelayMode>) -> DelayM
     }
 }
 
-/// Where local clients reach a listener: loopback when it listens on every interface.
-/// Formatting a `SocketAddr` puts IPv6 addresses in brackets, as URLs need.
+/// Where local clients reach a listener: loopback of the same family when it
+/// listens on every interface (an IPv6 socket need not accept IPv4: on Windows it
+/// doesn't). Formatting a `SocketAddr` puts IPv6 addresses in brackets, as URLs
+/// need.
 pub fn reachable(addr: SocketAddr) -> SocketAddr {
-    if addr.ip().is_unspecified() {
-        SocketAddr::from(([127, 0, 0, 1], addr.port()))
-    } else {
-        addr
+    match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            SocketAddr::from((Ipv4Addr::LOCALHOST, addr.port()))
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            SocketAddr::from((Ipv6Addr::LOCALHOST, addr.port()))
+        }
+        _ => addr,
     }
 }
 
@@ -453,10 +459,11 @@ const SERVICE_DOMAINS: &[&[&str]] = &[&["twitch.tv", "live-video.net"], &["youtu
 /// goes nowhere), but setting one after an empty or invalid URL is: otherwise
 /// clearing it first would carry the key over to any server.
 ///
-/// A service's own ingest servers (see `SERVICE_DOMAINS`) count as one. Anywhere
-/// else only the same endpoint does: scheme, host, port and application. Another
-/// port or application can be another service on the same machine, and RTMPS to
-/// RTMP would send the key unencrypted.
+/// A service's own ingest servers (see `SERVICE_DOMAINS`) count as one, except
+/// that RTMPS to RTMP is always another server: it would send the key
+/// unencrypted, so it must be entered again. Anywhere else only the same endpoint
+/// counts: scheme, host, port and application. Another port or application can be
+/// another service on the same machine.
 pub(crate) fn different_server(old: &str, new: &str) -> bool {
     let Ok(b) = RtmpUrl::parse(new) else {
         return false;
@@ -472,6 +479,9 @@ pub(crate) fn different_server(old: &str, new: &str) -> bool {
                 .any(|d| host == *d || host.strip_suffix(d).is_some_and(|p| p.ends_with('.')))
         })
     };
+    if a.encrypted() && !b.encrypted() {
+        return true;
+    }
     if let Some(s) = service(&host_a) {
         return service(&host_b) != Some(s);
     }
@@ -543,6 +553,19 @@ mod tests {
         ] {
             assert!(!different_server(a, b), "{a} -> {b}");
         }
+        // But from RTMPS to RTMP the key would travel unencrypted.
+        for (a, b) in [
+            (
+                "rtmps://ingest.global-contribute.live-video.net/app",
+                "rtmp://live.twitch.tv/app",
+            ),
+            (
+                "rtmps://a.rtmps.youtube.com:443/live2",
+                "rtmp://a.rtmp.youtube.com/live2",
+            ),
+        ] {
+            assert!(different_server(a, b), "{a} -> {b}");
+        }
         assert!(different_server(
             "rtmp://live.twitch.tv/app",
             "rtmp://a.rtmp.youtube.com/live2"
@@ -559,7 +582,20 @@ mod tests {
         assert_eq!(at("127.0.0.1:7788"), "http://127.0.0.1:7788/");
         assert_eq!(at("0.0.0.0:7788"), "http://127.0.0.1:7788/");
         assert_eq!(at("[::1]:7788"), "http://[::1]:7788/");
-        assert_eq!(at("[::]:7788"), "http://127.0.0.1:7788/");
+        assert_eq!(at("[::]:7788"), "http://[::1]:7788/");
         assert_eq!(at("[fd00::5]:7788"), "http://[fd00::5]:7788/");
+    }
+
+    #[test]
+    fn links_to_a_listener_on_every_interface_reach_it() {
+        for any in ["0.0.0.0:0", "[::]:0"] {
+            // A machine without IPv6 cannot listen on [::].
+            let Ok(listener) = std::net::TcpListener::bind(any) else {
+                continue;
+            };
+            let addr = reachable(listener.local_addr().unwrap());
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+                .unwrap_or_else(|e| panic!("listening on {any}, {addr}: {e}"));
+        }
     }
 }

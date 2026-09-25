@@ -3,8 +3,8 @@
 
     verify_release.py signatures DIR
         Every updater signature (*.sig) under DIR is valid for its file and was
-        made with the key in the PUBKEY environment variable (the content of
-        TAURI_UPDATER_PUBKEY). Used by dry runs, on what each platform built.
+        made with the key in the PUBKEY environment variable (the content of a
+        .pub file). Used by dry runs, on what each platform built.
 
     verify_release.py release DIR TAG REPOSITORY
         DIR holds every asset of release TAG (for example v0.3.0) of REPOSITORY
@@ -164,7 +164,7 @@ def verify_file(path: Path, signature_b64: str, key):
 def key_from_env():
     b64 = os.environ.get("PUBKEY", "").strip()
     if not b64:
-        raise Invalid("PUBKEY is empty: set the TAURI_UPDATER_PUBKEY repository variable")
+        raise Invalid("PUBKEY is empty: set it to the public key (apps/desktop/updater.pub)")
     return load_public_key(b64)
 
 

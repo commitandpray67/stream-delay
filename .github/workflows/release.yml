@@ -13,10 +13,11 @@ name: Release
 # latest full release. Publishing it pushes the container image
 # (publish-image.yml): nothing is public before that.
 #
-# Pushes to main or claude/** that touch the release setup run the same builds as
-# a dry run: installers and binaries are uploaded as artifacts of the workflow run
-# (downloadable from its page), installed and started the same way, and nothing
-# is published.
+# Pushes to main or claude/** that change more than documentation run the same
+# builds as a dry run: installers and binaries are uploaded as artifacts of the
+# workflow run (downloadable from its page), installed and started the same way,
+# and nothing is published. So the commit a tag is put on has already had its
+# installers built and started. (Path filters don't apply to tags.)
 #
 # The signing secrets (updater key, Apple credentials) belong in the `release`
 # environment, which only v* tags may use (docs/RELEASING.md). A branch push can
@@ -26,13 +27,9 @@ on:
   push:
     tags: ["v*"]
     branches: [main, "claude/**"]
-    paths:
-      - ".github/workflows/release.yml"
-      - ".github/scripts/verify_release.py"
-      - ".github/scripts/prepare_release.py"
-      - ".github/scripts/smoke_desktop.py"
-      - "Dockerfile.release"
-      - "apps/desktop/src-tauri/tauri.conf.json"
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
 
 # Jobs ask for more only where they publish.
@@ -123,15 +120,17 @@ jobs:
         id: updater
         shell: bash
         env:
-          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
           HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
           # Without the key pair, the app would be built without its updater, and
           # installed copies could never update again (docs/RELEASING.md).
-          if [ -z "$PUBKEY" ] || [ "$HAS_SIGNING_KEY" != true ]; then
-            echo "::error::A release needs the updater keys: the repository variable TAURI_UPDATER_PUBKEY and the secret TAURI_SIGNING_PRIVATE_KEY of the release environment."
+          if [ "$HAS_SIGNING_KEY" != true ]; then
+            echo "::error::A release needs the updater's signing key: the secret TAURI_SIGNING_PRIVATE_KEY of the release environment."
             exit 1
           fi
+          # The public key installed copies trust, committed so that it never
+          # changes unnoticed: they refuse updates signed with any other.
+          PUBKEY=$(tr -d '[:space:]' < apps/desktop/updater.pub)
           printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s"}}}' "$PUBKEY" \
             > apps/desktop/src-tauri/tauri.release.conf.json
           echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
@@ -350,14 +349,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
         run: |
           mkdir all
           gh release download "${{ github.ref_name }}" --dir all --pattern '*'
           rm -f all/SHA256SUMS.txt all/release-checks.txt
           # Every installer and archive, update signatures made with the project's
-          # key, and latest.json offering this version to every platform.
-          python3 .github/scripts/verify_release.py release all "${{ github.ref_name }}" "${{ github.repository }}"
+          # key (the one installed copies trust), and latest.json offering this
+          # version to every platform.
+          PUBKEY="$(cat apps/desktop/updater.pub)" \
+            python3 .github/scripts/verify_release.py release all "${{ github.ref_name }}" "${{ github.repository }}"
       # What was checked, for the install test and the checksums.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

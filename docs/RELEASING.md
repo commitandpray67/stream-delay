@@ -5,15 +5,15 @@ Releases are built by [`.github/workflows/release.yml`](../.github/workflows/rel
 - Desktop installers from `tauri-action`: Windows NSIS and MSI, a universal macOS DMG/app, and Linux AppImage, deb and rpm.
 - Headless `streamdelayd` archives for Linux (x86_64, aarch64), Windows and macOS (Apple Silicon, Intel).
 - `latest.json` and update bundles signed with the project's updater key (below). A tag build fails without the key rather than release an app that could never update.
-- `SHA256SUMS.txt` covering every asset. It is added last, after [`verify_release.py`](../.github/scripts/verify_release.py) has checked the draft: every installer and headless archive is there, every update bundle's signature verifies against `TAURI_UPDATER_PUBKEY`, and `latest.json` offers this version to every platform with those signatures, each downloaded from exactly `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. CI runs the verifier's own tests on every push. Then [`smoke_desktop.py`](../.github/scripts/smoke_desktop.py) installs the draft's installers on clean Ubuntu 22.04, Ubuntu 24.04, Windows and macOS machines, as users would (the deb with apt, which also checks its dependencies; the AppImage; the setup `.exe` and the MSI; the app from the DMG and from the update bundle), starts each, and checks that it reports this version, serves the dashboard with the web UI, accepts RTMP connections and opens its window. The container image publishing pushes must build as well. With it comes `release-checks.txt`, naming the commit and workflow run that passed everything and the hash of `SHA256SUMS.txt`.
+- `SHA256SUMS.txt` covering every asset. It is added last, after [`verify_release.py`](../.github/scripts/verify_release.py) has checked the draft: every installer and headless archive is there, every update bundle's signature verifies against the committed [`updater.pub`](../apps/desktop/updater.pub), and `latest.json` offers this version to every platform with those signatures, each downloaded from exactly `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. CI runs the verifier's own tests on every push. Then [`smoke_desktop.py`](../.github/scripts/smoke_desktop.py) installs the draft's installers on clean Ubuntu 22.04, Ubuntu 24.04, Windows and macOS machines, as users would (the deb with apt, which also checks its dependencies; the AppImage; the setup `.exe` and the MSI; the app from the DMG and from the update bundle), starts each, and checks that it reports this version, serves the dashboard with the web UI, accepts RTMP connections and opens its window. The container image publishing pushes must build as well. With it comes `release-checks.txt`, naming the commit and workflow run that passed everything and the hash of `SHA256SUMS.txt`.
 
 Every job that changes the draft first removes those two files, and refuses to touch a release that is already published ([`prepare_release.py`](../.github/scripts/prepare_release.py)); runs for one tag never overlap. So a draft without them has not passed every check since it last changed, whether a run failed or a rerun of some of its jobs did: see the workflow run before publishing anything.
 
 Review the draft, then publish it **as a normal release, not a pre-release**: the app looks for updates at `releases/latest`, which skips pre-releases. Say "beta" in the notes instead.
 
-Publishing it runs [`publish-image.yml`](../.github/workflows/publish-image.yml), which pushes the multi-arch container image `ghcr.io/<owner>/stream-delay:<version>` (and `:edge`), packaged from the release's Linux archives after checking them against its `SHA256SUMS.txt`. Nothing is public before you publish. To push an image again, run that workflow by hand with the tag.
+Publishing it runs [`publish-image.yml`](../.github/workflows/publish-image.yml), which pushes the multi-arch container image `ghcr.io/<owner>/stream-delay:<version>` (and `:edge`), packaged from the release's Linux archives. It first checks ([`check_image_inputs.py`](../.github/scripts/check_image_inputs.py)) that the release is published and not a pre-release, that `release-checks.txt` names the tag's commit and the release's `SHA256SUMS.txt`, and that each archive matches its one entry there. Nothing is public before you publish, even if the workflow is run by hand. To push an image again, run that workflow by hand with the tag.
 
-**Dry run:** a push to `main` or a `claude/**` branch that changes the release workflow, its verification script, `Dockerfile.release` or `tauri.conf.json` runs the same builds and install tests without publishing anything. The installers and binaries are attached to the workflow run as artifacts (Actions → the run → Artifacts), which is also a quick way to get a test build. Dry runs sign update bundles with a key generated for that run, never the real one, and verify every signature against it, so their installers cannot update to or from real releases.
+**Dry run:** every push to `main` or a `claude/**` branch that changes more than documentation runs the same builds and install tests without publishing anything, so the commit you tag has already had its installers built, installed and started. The installers and binaries are attached to the workflow run as artifacts (Actions → the run → Artifacts), which is also a quick way to get a test build. Dry runs sign update bundles with a key generated for that run, never the real one, and verify every signature against it, so their installers cannot update to or from real releases.
 
 ## Checklist
 
@@ -36,7 +36,7 @@ The updater signing key is the most valuable secret in the project: anyone who h
 2. Under **Deployment branches and tags**, choose **Selected branches and tags** and add a **tag** rule `v*`. (Optionally add yourself under **Required reviewers**, so each release waits for your approval.)
 3. Add the signing secrets below (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and any `APPLE_*`) as **environment secrets** of `release`, and delete any repository-level copies under **Settings → Secrets and variables → Actions**.
 
-Only the tag-triggered desktop job uses the `release` environment. `TAURI_UPDATER_PUBKEY` is public and stays a repository variable.
+Only the tag-triggered desktop job uses the `release` environment. The public key is not a secret: it is committed as [`apps/desktop/updater.pub`](../apps/desktop/updater.pub) (below).
 
 ### Auto-update signing (required)
 
@@ -57,10 +57,11 @@ Tauri's updater only installs updates signed with your key, so installs of a rel
      - `TAURI_SIGNING_PRIVATE_KEY`: the whole content of `stream-delay.key`
        (`cat ~/.tauri/stream-delay.key`, or `Get-Content $HOME\.tauri\stream-delay.key` on Windows).
      - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password from step 1.
-   - **Settings → Secrets and variables → Actions → Variables** tab → *New repository variable*:
-     - `TAURI_UPDATER_PUBKEY`: the whole content of `stream-delay.key.pub`.
+3. Put the whole content of `stream-delay.key.pub` in [`apps/desktop/updater.pub`](../apps/desktop/updater.pub) and commit it.
 
 Releases then include `latest.json` and signed update bundles, and the app checks `releases/latest/download/latest.json` on start, from the tray menu and from the dashboard.
+
+**Never change the key pair once a release is out.** Every installed copy trusts only the public key it was built with, so it refuses updates signed with any other: they would all have to be reinstalled by hand. A release is built with the committed `updater.pub` and every update signature is checked against it, so a signing secret that no longer matches it fails the release instead of shipping updates nobody can install. (Earlier releases read the public key from the repository variable `TAURI_UPDATER_PUBKEY`, which is no longer used and can be deleted.)
 
 ### macOS signing and notarization
 

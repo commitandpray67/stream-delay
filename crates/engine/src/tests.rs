@@ -1386,6 +1386,40 @@ fn decoder_configuration_kept_for_splices_is_bounded() {
 }
 
 #[test]
+fn decoder_configuration_kept_takes_only_a_share_of_the_ram_cap() {
+    // As many configuration messages as are kept, each nearly as large as is
+    // kept, under the smallest cap the settings allow.
+    let cap = 16 << 20;
+    let header = |track: u8| {
+        let mut p = vec![0x96, 0x00, b'a', b'v', b'c', b'1', track];
+        p.resize(MAX_HEADER_BYTES - 64, 0);
+        Bytes::from(p)
+    };
+    let mut e = Engine::new(EngineConfig {
+        ram_cap_bytes: cap,
+        ..config()
+    });
+    e.ingest_start(0);
+    for track in 0..MAX_HEADERS as u8 {
+        e.ingest(1_000 * SEC, Kind::Video, 0, header(track));
+    }
+    let headers = &e.sessions.last().unwrap().headers;
+    let kept: usize = headers.iter().map(|h| cost(h.payload.len())).sum();
+    assert!(
+        kept <= cap / HEADER_SHARE_OF_RAM_CAP,
+        "{kept} bytes of configuration kept"
+    );
+    assert_eq!(
+        headers.last().unwrap().class,
+        u16::from(MAX_HEADERS as u8 - 1) << 8,
+        "the newest are kept"
+    );
+    // Eviction keeps the rest of the buffer within what is left.
+    let held = e.snapshot(1_000 * SEC).buffered_bytes as usize;
+    assert!(held <= cap + cost(MAX_HEADER_BYTES), "{held} bytes held");
+}
+
+#[test]
 fn tiny_messages_count_against_the_ram_cap() {
     // 200 000 one-byte messages: 200 KB of payload, far below the cap, but
     // several times the cap once what each message costs is counted.

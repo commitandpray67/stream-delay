@@ -473,14 +473,24 @@ async fn changing_to_another_server_forgets_the_stored_key() {
         .body(Body::from(r#"{"key":"live_123"}"#))
         .unwrap();
     assert_eq!(send(&app, r).await.1["destination_key_set"], true);
-    // Same service over RTMPS, or one of its regional servers: the key stays.
+    // One of the same service's regional servers, or the service over RTMPS: the
+    // key stays.
     for url in [
-        "rtmps://live.twitch.tv:443/app",
         "rtmp://sea02.contribute.live-video.net/app",
+        "rtmps://live.twitch.tv:443/app",
     ] {
         let (_, body) = put_config(&app, &dest(url)).await;
         assert_eq!(body["destination_key_set"], true, "{url}");
     }
+    // Back to RTMP it would travel unencrypted: it must be entered again.
+    let (s, body) = put_config(&app, &dest("rtmp://live.twitch.tv/app")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["destination_key_set"], false, "RTMPS to RTMP");
+    let r = authed("PUT", "/api/v1/destination/key")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"key":"live_123"}"#))
+        .unwrap();
+    assert_eq!(send(&app, r).await.1["destination_key_set"], true);
     // Another server: the key must not follow.
     let (s, body) = put_config(&app, &dest("rtmp://ingest.example.net/live")).await;
     assert_eq!(s, StatusCode::OK);
