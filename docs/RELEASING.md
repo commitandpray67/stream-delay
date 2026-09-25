@@ -22,7 +22,7 @@ Publishing it runs [`publish-image.yml`](../.github/workflows/publish-image.yml)
 3. Run the 12-hour soak (`DURATION=43200 tests/soak/run.sh`) on the release commit's `streamdelayd`.
 4. Move the `Unreleased` section of `CHANGELOG.md` under the new version and date.
 5. `git tag v0.x.y && git push origin v0.x.y`.
-6. When the workflow has finished, check that the draft has `SHA256SUMS.txt` and `release-checks.txt` (see above), that the run `release-checks.txt` names is the latest run for this tag and passed, and that its commit is the tag's. To check the files themselves, download the draft's assets into an empty folder and run `sha256sum -c SHA256SUMS.txt` (macOS: `shasum -a 256 -c`).
+6. When the workflow has finished, check that the draft has `SHA256SUMS.txt` and `release-checks.txt` (see above). A run can show success without them when a job was skipped, and the container image is never pushed without `SHA256SUMS.txt`: if either is missing, don't publish; see which job on the run's page failed or was skipped. Check that the run `release-checks.txt` names is the latest run for this tag and passed, and that its commit is the tag's. To check the files themselves, download the draft's assets into an empty folder and run `sha256sum -c SHA256SUMS.txt` (macOS: `shasum -a 256 -c`).
 7. Install the draft's installers and test on a real Twitch account with `?bandwidthtest=true` on each OS you can reach, following [`docs/testing.md`](testing.md). Nothing is public yet: if something is wrong, delete the draft and the tag, fix it, and tag again.
 8. Paste the changelog entry into the draft release notes, then publish (not as a pre-release). The container image follows.
 

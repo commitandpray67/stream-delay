@@ -6,6 +6,15 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Release builds skipped the job that adds `SHA256SUMS.txt` and
+  `release-checks.txt` although every check passed (GitHub skips a job when any
+  job before it was skipped, here the dry-run build a release doesn't make), so
+  the container image, which is checked against `SHA256SUMS.txt`, was not pushed
+  either. A test now runs the release workflow's jobs as GitHub would, on a tag
+  and on a dry run.
+
 ## [0.3.0] - 2026-09-24
 
 ### Added

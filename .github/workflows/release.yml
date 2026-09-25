@@ -420,7 +420,11 @@ jobs:
 
   checksums:
     name: Add checksums
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Without a status function, GitHub also requires every job before these,
+    # however far back, to have run, and a release skips desktop-dry-run: that
+    # skipped this job for v0.3.0. Every job before it passed if these two did
+    # (test_release_workflow.py).
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.smoke.result == 'success' && needs.container.result == 'success' }}
     # Publishing pushes the image, so it must build too.
     needs: [smoke, container]
     permissions:
