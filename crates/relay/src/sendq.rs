@@ -238,6 +238,51 @@ mod os {
             unacked: u64::from(info.BytesInFlight),
         })
     }
+
+    /// The numbers behind [`query`] and more, for test failures.
+    #[cfg(test)]
+    pub fn describe(sock: &socket2::Socket) -> String {
+        use windows_sys::Win32::Networking::WinSock::TCP_INFO_v1;
+        let version: u32 = 1;
+        // SAFETY: as in `query`.
+        let mut info: TCP_INFO_v1 = unsafe { std::mem::zeroed() };
+        let mut returned: u32 = 0;
+        // SAFETY: as in `query`, for `info`.
+        let r = unsafe {
+            WSAIoctl(
+                sock.as_raw_socket() as SOCKET,
+                SIO_TCP_INFO,
+                (&version as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+                (&mut info as *mut TCP_INFO_v1).cast(),
+                std::mem::size_of::<TCP_INFO_v1>() as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+                None,
+            )
+        };
+        if r != 0 {
+            return format!("SIO_TCP_INFO v1: {}", std::io::Error::last_os_error());
+        }
+        format!(
+            "BytesOut {}, BytesRetrans {}, BytesInFlight {}, SndWnd {}, Cwnd {}, Mss {}, \
+             TimeoutEpisodes {}, FastRetrans {}, SndLimTransRwin {}, SndLimTimeRwin {}, \
+             SndLimBytesRwin {}, SndLimTransSnd {}, SndLimBytesSnd {}",
+            info.BytesOut,
+            info.BytesRetrans,
+            info.BytesInFlight,
+            info.SndWnd,
+            info.Cwnd,
+            info.Mss,
+            info.TimeoutEpisodes,
+            info.FastRetrans,
+            info.SndLimTransRwin,
+            info.SndLimTimeRwin,
+            info.SndLimBytesRwin,
+            info.SndLimTransSnd,
+            info.SndLimBytesSnd,
+        )
+    }
 }
 
 #[cfg(not(any(
@@ -271,20 +316,27 @@ mod tests {
         let (mut server, _) = listener.accept().unwrap();
         let sock = socket2::Socket::from(client.try_clone().unwrap());
         client.set_nonblocking(true).unwrap();
-        // Written while the other end reads nothing, until the OS takes no more.
+        // Written while the other end reads nothing, until the OS takes no more
+        // even after the connection has settled: meanwhile, macOS may move what
+        // it holds into the other end's receive buffer, which it grows.
         let mut written = 0u64;
         let chunk = vec![7u8; 64 * 1024];
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            match client.write(&chunk) {
-                Ok(n) => written += n as u64,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => panic!("{e}"),
+            let before = written;
+            loop {
+                match client.write(&chunk) {
+                    Ok(n) => written += n as u64,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("{e}"),
+                }
+                assert!(Instant::now() < deadline, "the OS kept taking data");
             }
-            assert!(Instant::now() < deadline, "the OS kept taking data");
+            if written == before {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
-        // Let the connection settle into its stalled state.
-        std::thread::sleep(Duration::from_millis(200));
         match query(&sock, written) {
             Some(q) => assert!(
                 q.unsent > 0,
@@ -327,5 +379,97 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// No more counts as sent than has reached the other end, on a connection
+    /// like the stalled destination's in `tests/chaos.rs`: a 64 KiB receive
+    /// buffer, data trickling in, the other end reading, then not, for long
+    /// enough that the OS probes the closed window. A dump keeps the connection
+    /// when nothing is unsent, and counts what was acknowledged as delivered:
+    /// counting more as sent airs what the dump threw away.
+    #[test]
+    fn what_counts_as_sent_has_reached_the_other_end() {
+        let listener =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        // Connections accepted later take it over.
+        listener.set_recv_buffer_size(64 * 1024).unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        listener.bind(&addr.into()).unwrap();
+        listener.listen(1).unwrap();
+        let listener = TcpListener::from(listener);
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let sock = socket2::Socket::from(client.try_clone().unwrap());
+        client.set_nonblocking(true).unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut buf = vec![0u8; 16 * 1024 * 1024];
+        // Everything waiting for the other end now, read (at most `limit`).
+        let mut read_waiting = |server: &mut TcpStream, limit: u64| {
+            let mut got = 0u64;
+            while got < limit {
+                let n = (limit - got).min(buf.len() as u64) as usize;
+                match server.read(&mut buf[..n]) {
+                    Ok(0) => panic!("closed"),
+                    Ok(n) => got += n as u64,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            got
+        };
+        // 16 KB every 50 ms, what the OS takes of it: read for the first second,
+        // then not for two.
+        let chunk = vec![7u8; 16_000];
+        let (mut written, mut read) = (0u64, 0u64);
+        for i in 0..60 {
+            match client.write(&chunk) {
+                Ok(n) => written += n as u64,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("{e}"),
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            if i < 20 {
+                read += read_waiting(&mut server, u64::MAX);
+            }
+        }
+        // Stalled for long enough for several retransmission timeouts.
+        std::thread::sleep(Duration::from_secs(2));
+        check_sent(&sock, &server, written, read, "stalled");
+        // Read a little, and let the sender go on into the window that opens.
+        read += read_waiting(&mut server, 48 * 1024);
+        std::thread::sleep(Duration::from_millis(500));
+        check_sent(&sock, &server, written, read, "after reading a little");
+    }
+
+    /// Checks that no more of `written` counts as sent than the other end has:
+    /// `read` of it, and what waits in its receive buffer.
+    fn check_sent(sock: &socket2::Socket, server: &TcpStream, written: u64, read: u64, when: &str) {
+        // Where the OS cannot tell, a dump resets the connection.
+        let Some(q) = query(sock, written) else {
+            return;
+        };
+        let raw = describe(sock);
+        let mut peeked = vec![0u8; 16 * 1024 * 1024];
+        let waiting = match server.peek(&mut peeked) {
+            Ok(n) => n as u64,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+            Err(e) => panic!("{e}"),
+        };
+        let sent = written.saturating_sub(q.unsent);
+        assert!(
+            sent <= read + waiting,
+            "{when}: {q:?} of {written} written counts {sent} as sent, but the other end has \
+             {read} read and {waiting} waiting; {raw}"
+        );
+    }
+
+    #[cfg(windows)]
+    fn describe(sock: &socket2::Socket) -> String {
+        super::os::describe(sock)
+    }
+
+    #[cfg(not(windows))]
+    fn describe(_sock: &socket2::Socket) -> String {
+        String::new()
     }
 }
