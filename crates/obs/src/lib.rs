@@ -10,6 +10,7 @@ use obws::client::{ConnectConfig, DangerousConnectConfig};
 use obws::requests::inputs::{Create, InputId, SetSettings};
 use obws::requests::scenes::SceneId;
 use serde_json::{Value, json};
+use streamdelay_rtmp::url::{TWITCH_DOMAINS, in_domain};
 use thiserror::Error;
 use tracing::debug;
 
@@ -207,10 +208,8 @@ fn twitch_host(server: &str) -> bool {
         Some(v6) => v6.split(']').next().unwrap_or(""),
         None => host.split(':').next().unwrap_or(""),
     };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    ["twitch.tv", "live-video.net"]
-        .iter()
-        .any(|d| host == *d || host.strip_suffix(d).is_some_and(|p| p.ends_with('.')))
+    let host = host.trim_end_matches('.');
+    TWITCH_DOMAINS.iter().any(|d| in_domain(host, d))
 }
 
 /// Snapshot of OBS for the wizard.

@@ -4620,6 +4620,7 @@ dependencies = [
  "obws",
  "serde",
  "serde_json",
+ "streamdelay-rtmp",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

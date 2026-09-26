@@ -14,6 +14,7 @@ use streamdelay_relay::{
     Ack, DelayMode, Destination, DestinationKey, EngineConfig, GoLiveWhen, RelayConfig, RelayError,
     RelayHandle, RtmpUrl,
 };
+use streamdelay_rtmp::url::{TWITCH_DOMAINS, YOUTUBE_DOMAINS, in_domain};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -453,7 +454,7 @@ pub(crate) fn split_url_key(url: &str) -> (String, Option<String>) {
 
 /// Services whose stream keys work on several ingest hosts (RTMP and RTMPS,
 /// regional servers).
-const SERVICE_DOMAINS: &[&[&str]] = &[&["twitch.tv", "live-video.net"], &["youtube.com"]];
+const SERVICE_DOMAINS: &[&[&str]] = &[TWITCH_DOMAINS, YOUTUBE_DOMAINS];
 
 /// True when `new` publishes to another server than `old`, so a stream key meant
 /// for `old` must not be sent to it. Clearing the destination is no change (the key
@@ -474,11 +475,9 @@ pub(crate) fn different_server(old: &str, new: &str) -> bool {
     };
     let (host_a, host_b) = (a.host.to_ascii_lowercase(), b.host.to_ascii_lowercase());
     let service = |host: &str| {
-        SERVICE_DOMAINS.iter().position(|domains| {
-            domains
-                .iter()
-                .any(|d| host == *d || host.strip_suffix(d).is_some_and(|p| p.ends_with('.')))
-        })
+        SERVICE_DOMAINS
+            .iter()
+            .position(|domains| domains.iter().any(|d| in_domain(host, d)))
     };
     if a.encrypted() && !b.encrypted() {
         return true;

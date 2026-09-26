@@ -144,6 +144,23 @@ impl RtmpUrl {
     }
 }
 
+/// Twitch's ingest servers are under these: a stream key works on any of them.
+pub const TWITCH_DOMAINS: &[&str] = &["twitch.tv", "live-video.net"];
+
+/// YouTube's ingest servers are under these.
+pub const YOUTUBE_DOMAINS: &[&str] = &["youtube.com"];
+
+/// True if `host` is `domain` or a name under it (`live.twitch.tv` under
+/// `twitch.tv`, but not `nottwitch.tv`), ignoring case.
+pub fn in_domain(host: &str, domain: &str) -> bool {
+    let (host, domain) = (host.as_bytes(), domain.as_bytes());
+    let Some(split) = host.len().checked_sub(domain.len()) else {
+        return false;
+    };
+    let (head, tail) = host.split_at(split);
+    tail.eq_ignore_ascii_case(domain) && (head.is_empty() || head.ends_with(b"."))
+}
+
 fn host_for_url(host: &str) -> String {
     if host.contains(':') {
         format!("[{host}]")
@@ -178,6 +195,28 @@ fn split_host_port(authority: &str, default_port: u16) -> Result<(String, u16), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_is_in_its_domain_and_the_domains_under_it() {
+        for host in [
+            "twitch.tv",
+            "live.twitch.tv",
+            "LIVE.Twitch.TV",
+            "a.b.twitch.tv",
+        ] {
+            assert!(in_domain(host, "twitch.tv"), "{host}");
+        }
+        for host in [
+            "nottwitch.tv",
+            "twitch.tv.example.com",
+            "tv",
+            "",
+            "witch.tv",
+            "é.tv",
+        ] {
+            assert!(!in_domain(host, "twitch.tv"), "{host}");
+        }
+    }
 
     #[test]
     fn twitch() {
