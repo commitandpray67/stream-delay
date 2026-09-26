@@ -35,6 +35,9 @@ struct Upstream {
     /// What was waiting then. Windows throws it away when the connection is
     /// reset, so the sink may never see all that reached the proxy.
     waiting_bytes: Mutex<Vec<u8>>,
+    /// All the proxy's TCP had received, as last seen while stalled, where a
+    /// peek does not show all that waits (see [`received`]).
+    received: AtomicU64,
     /// Once this much is forwarded, forwarding pauses for a second (see
     /// [`FaultProxy::pause_at`]).
     pause_at: AtomicU64,
@@ -43,6 +46,11 @@ struct Upstream {
 impl Upstream {
     /// Everything that has left the relay's computer on this connection.
     fn arrived(&self) -> u64 {
+        self.seen().max(self.received.load(Ordering::SeqCst))
+    }
+
+    /// Of [`Upstream::arrived`], what was forwarded or a peek showed.
+    fn seen(&self) -> u64 {
         self.forwarded.load(Ordering::SeqCst) + self.waiting.load(Ordering::SeqCst)
     }
 }
@@ -152,6 +160,9 @@ async fn pump(
                     up.waiting.store(n as u64, Ordering::SeqCst);
                     *up.waiting_bytes.lock().unwrap() = peek[..n].to_vec();
                 }
+                if let Some(n) = received(from.as_ref()) {
+                    up.received.store(n, Ordering::SeqCst);
+                }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
             continue;
@@ -195,6 +206,92 @@ async fn pump(
     if let Ok(stream) = from.reunite(to) {
         let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
     }
+}
+
+/// Of `leaked` (frame, connection, end), those that had not reached the
+/// destination. When the relay resets a connection, Windows throws away what
+/// waits at the proxy, `hidden` bytes of which no peek showed: what the relay
+/// sent right after the frames seen (`reached`). It sends them again on the
+/// next connection, from a keyframe before them; there, the frames right after
+/// the last one seen that fit in `hidden` bytes had arrived.
+fn not_hidden(
+    log: &SinkLog,
+    leaked: Vec<(u32, usize, u64)>,
+    reset: usize,
+    reached: &std::collections::HashSet<u32>,
+    hidden: u64,
+) -> Vec<(u32, usize, u64)> {
+    let Some(&last_seen) = reached.iter().max() else {
+        return leaked;
+    };
+    let mut next = last_seen + 1;
+    let mut rest = Vec::new();
+    for (f, conn, end) in leaked {
+        let fits = sent_between(log, conn, last_seen, f).is_some_and(|n| n <= hidden);
+        if conn != reset && f == next && fits {
+            next += 1;
+        } else {
+            rest.push((f, conn, end));
+        }
+    }
+    rest
+}
+
+/// The media bytes on sink connection `conn` after video frame `from`, up to
+/// and including frame `to`: at least what they took on the wire, less only
+/// RTMP chunk headers.
+fn sent_between(log: &SinkLog, conn: usize, from: u32, to: u32) -> Option<u64> {
+    let frame = |m: &Received| {
+        (m.kind == MediaKind::Video)
+            .then(|| frame_of(&m.payload))
+            .flatten()
+    };
+    let mut media = log.media.iter().filter(|m| m.conn == conn);
+    media.find(|m| frame(m) == Some(from))?;
+    let mut n = 0;
+    for m in media {
+        n += m.payload.len() as u64;
+        if frame(m) == Some(to) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// All that TCP received on `stream`, where a peek does not show all that
+/// waits: on Windows, it shows about a receive buffer's worth, the rest
+/// waiting in TCP itself (acknowledged, so the relay counts it as delivered).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn received(stream: &TcpStream) -> Option<u64> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{SIO_TCP_INFO, SOCKET, TCP_INFO_v0, WSAIoctl};
+    let version: u32 = 0;
+    // SAFETY: a C struct of integers, for which all zeroes is valid.
+    let mut info: TCP_INFO_v0 = unsafe { std::mem::zeroed() };
+    let mut returned: u32 = 0;
+    // SAFETY: the input and output pointers and lengths describe `version` and
+    // `info`; the call is synchronous (no overlapped structure).
+    let r = unsafe {
+        WSAIoctl(
+            stream.as_raw_socket() as SOCKET,
+            SIO_TCP_INFO,
+            (&version as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+            (&mut info as *mut TCP_INFO_v0).cast(),
+            std::mem::size_of::<TCP_INFO_v0>() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    (r == 0).then_some(info.BytesIn)
+}
+
+/// Elsewhere a peek shows all that waits.
+#[cfg(not(windows))]
+fn received(_stream: &TcpStream) -> Option<u64> {
+    None
 }
 
 /// The video frames whose start is in `bytes`, raw RTMP as the relay sent it
@@ -662,6 +759,8 @@ async fn dump_on_a_stalled_upload(mode: DelayMode, stall: Stall) {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let up = proxy.conns.lock().unwrap()[conn].clone();
     let arrived = up.arrived();
+    // Of it, what no peek showed (Windows; see `received`).
+    let hidden = arrived - up.seen();
     let waiting = frames_in(&up.waiting_bytes.lock().unwrap());
     up.pause_at.store(arrived, Ordering::SeqCst);
     proxy.stall(false);
@@ -670,7 +769,10 @@ async fn dump_on_a_stalled_upload(mode: DelayMode, stall: Stall) {
     // then not one more byte of it arrived, not even part of a frame.
     let reset = proxy.conns.lock().unwrap().len() > conn + 1;
     let carried = up.forwarded.load(Ordering::SeqCst);
-    eprintln!("reset: {reset}; {arrived} bytes had arrived at the dump, {carried} in all");
+    eprintln!(
+        "reset: {reset}; {arrived} bytes had arrived at the dump ({hidden} where no peek showed \
+         them), {carried} in all"
+    );
     if reset {
         assert!(
             carried <= arrived,
@@ -696,6 +798,10 @@ async fn dump_on_a_stalled_upload(mode: DelayMode, stall: Stall) {
             .filter_map(|m| Some((frame_of(&m.payload)?, m.conn, m.end)))
             .filter(|&(f, ..)| f <= last_before_dump && !reached.contains(&f))
             .collect();
+        let leaked = match reset {
+            true => not_hidden(&l, leaked, conn, &reached, hidden),
+            false => leaked,
+        };
         assert!(
             leaked.is_empty(),
             "recorded before the dump, aired after it (frame, connection, end): {leaked:?}"

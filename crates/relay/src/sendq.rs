@@ -239,9 +239,11 @@ mod os {
         })
     }
 
-    /// The numbers behind [`query`] and more, for test failures.
+    /// Windows' numbers for the connection, for tests.
     #[cfg(test)]
-    pub fn describe(sock: &socket2::Socket) -> String {
+    pub fn info(
+        sock: &socket2::SockRef<'_>,
+    ) -> std::io::Result<windows_sys::Win32::Networking::WinSock::TCP_INFO_v1> {
         use windows_sys::Win32::Networking::WinSock::TCP_INFO_v1;
         let version: u32 = 1;
         // SAFETY: as in `query`.
@@ -261,9 +263,19 @@ mod os {
                 None,
             )
         };
-        if r != 0 {
-            return format!("SIO_TCP_INFO v1: {}", std::io::Error::last_os_error());
+        match r {
+            0 => Ok(info),
+            _ => Err(std::io::Error::last_os_error()),
         }
+    }
+
+    /// The numbers behind [`query`] and more, for test failures.
+    #[cfg(test)]
+    pub fn describe(sock: &socket2::Socket) -> String {
+        let info = match info(&socket2::SockRef::from(sock)) {
+            Ok(info) => info,
+            Err(e) => return format!("SIO_TCP_INFO v1: {e}"),
+        };
         format!(
             "BytesOut {}, BytesRetrans {}, BytesInFlight {}, SndWnd {}, Cwnd {}, Mss {}, \
              TimeoutEpisodes {}, FastRetrans {}, SndLimTransRwin {}, SndLimTimeRwin {}, \
@@ -442,25 +454,41 @@ mod tests {
     }
 
     /// Checks that no more of `written` counts as sent than the other end has:
-    /// `read` of it, and what waits in its receive buffer.
+    /// `read` of it, and what waits for it to read.
     fn check_sent(sock: &socket2::Socket, server: &TcpStream, written: u64, read: u64, when: &str) {
         // Where the OS cannot tell, a dump resets the connection.
         let Some(q) = query(sock, written) else {
             return;
         };
         let raw = describe(sock);
-        let mut peeked = vec![0u8; 16 * 1024 * 1024];
-        let waiting = match server.peek(&mut peeked) {
-            Ok(n) => n as u64,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
-            Err(e) => panic!("{e}"),
-        };
+        let waiting = waiting(server, read);
         let sent = written.saturating_sub(q.unsent);
         assert!(
             sent <= read + waiting,
             "{when}: {q:?} of {written} written counts {sent} as sent, but the other end has \
              {read} read and {waiting} waiting; {raw}"
         );
+    }
+
+    /// What waits for `server` to read, of which it has read `read`.
+    fn waiting(server: &TcpStream, read: u64) -> u64 {
+        // A peek shows only about a receive buffer's worth of it on Windows, the
+        // rest waiting in TCP: count what TCP received instead.
+        #[cfg(windows)]
+        {
+            let info = super::os::info(&socket2::SockRef::from(server)).unwrap();
+            info.BytesIn - read
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = read;
+            let mut peeked = vec![0u8; 16 * 1024 * 1024];
+            match server.peek(&mut peeked) {
+                Ok(n) => n as u64,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+                Err(e) => panic!("{e}"),
+            }
+        }
     }
 
     #[cfg(windows)]
