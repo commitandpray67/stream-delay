@@ -630,9 +630,7 @@ async fn connect(
         let data = match pending.take() {
             Some(d) if !d.is_empty() => d.to_vec(),
             _ => {
-                let n = stream
-                    .read(&mut buf)
-                    .await
+                let n = read_or_closed(stream.read(&mut buf).await)
                     .map_err(|e| Failure::new(format!("read failed: {e}")))?;
                 if n == 0 {
                     // What servers do with a wrong stream key, too.
@@ -667,6 +665,17 @@ async fn connect(
                 }
             }
         }
+    }
+}
+
+/// A read, with a connection closed without TLS's own ending counted as closed
+/// (0 bytes), as without TLS: over RTMPS that is how a destination refusing a
+/// stream key (Twitch) or dropping the stream ends it, and rustls reports it as
+/// an error.
+fn read_or_closed(r: std::io::Result<usize>) -> std::io::Result<usize> {
+    match r {
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(0),
+        other => other,
     }
 }
 
@@ -808,7 +817,7 @@ async fn publish(
                 return (ended_by(c, aborter), last_written);
             }
             n = rd.read(&mut buf) => {
-                let n = match n {
+                let n = match read_or_closed(n) {
                     Ok(0) => return (RunEnd::Failed(Failure::new("the destination closed the connection")), last_written),
                     Ok(n) => n,
                     Err(e) => return (RunEnd::Failed(Failure::new(format!("read failed: {e}"))), last_written),
@@ -1075,10 +1084,13 @@ mod tests {
     }
 
     /// An RTMPS destination on `localhost` with the test certificate. It takes one
-    /// stream (`None` if the relay gave up on the TLS handshake).
+    /// stream (`None` if the relay gave up on the TLS handshake), or with
+    /// `refuse`, drops the connection when asked to publish, without ending TLS
+    /// first, as Twitch does with a wrong stream key.
     async fn rtmps_destination(
         tls: Arc<rustls::ServerConfig>,
         rcvbuf: Option<usize>,
+        refuse: bool,
     ) -> (Target, tokio::task::JoinHandle<Option<Destination>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         if let Some(size) = rcvbuf {
@@ -1100,6 +1112,9 @@ mod tests {
                 let mut key = None;
                 for ev in session.feed(&data).unwrap() {
                     if let ServerEvent::PublishRequest { stream_key, .. } = ev {
+                        if refuse {
+                            return None;
+                        }
                         session.accept_publish();
                         key = Some(stream_key);
                     }
@@ -1136,7 +1151,7 @@ mod tests {
     #[tokio::test]
     async fn rtmps_publishes_to_a_destination_whose_certificate_checks_out() {
         let (client_tls, server_tls) = test_tls();
-        let (target, destination) = rtmps_destination(server_tls.clone(), None).await;
+        let (target, destination) = rtmps_destination(server_tls.clone(), None, false).await;
         let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
         let mut far = destination.await.unwrap().unwrap();
         assert_eq!(far.key, "k");
@@ -1148,7 +1163,7 @@ mod tests {
         assert!(matches!(p.ended().await, RunEnd::Stopped));
         // Certificates are checked: the built-in roots, which the real services'
         // certificates are checked against, do not include the test CA.
-        let (target, destination) = rtmps_destination(server_tls, None).await;
+        let (target, destination) = rtmps_destination(server_tls, None, false).await;
         match connect(&target, io::tls_config()).await {
             Ok(_) => panic!("an untrusted certificate was accepted"),
             Err(f) => assert!(f.message.contains("TLS handshake failed"), "{}", f.message),
@@ -1157,13 +1172,15 @@ mod tests {
     }
 
     /// Twitch's and YouTube's RTMPS ingest, with a key they refuse (nothing is
-    /// streamed): if the refusal comes from the RTMP exchange, or the key is
-    /// even taken, the TLS connection and the certificate check against the
-    /// built-in roots worked on the real servers, which the local tests above
-    /// cannot show. Needs the internet: run by the "Real destinations" workflow.
+    /// streamed). A refusal means the TLS connection, the certificate check
+    /// against the built-in roots and the RTMP exchange worked on the real
+    /// servers, which the local tests above cannot show, and that the refusal is
+    /// told as one ("check the stream key"). Needs the internet: run by the
+    /// "Real destinations" workflow.
     #[tokio::test]
     #[ignore = "connects to Twitch and YouTube"]
     async fn real_rtmps_destinations_take_the_tls_connection() {
+        let mut failed = Vec::new();
         for url in [
             "rtmps://live.twitch.tv:443/app",
             "rtmps://a.rtmps.youtube.com:443/live2",
@@ -1180,19 +1197,46 @@ mod tests {
             match result {
                 Ok(_) => eprintln!("{url}: TLS and RTMP connect worked; the key was taken"),
                 Err(f) => {
-                    eprintln!("{url}: {}", f.message);
-                    for failed in ["could not reach", "TLS", "RTMP handshake failed"] {
-                        assert!(!f.message.contains(failed), "{url}: {}", f.message);
+                    eprintln!("{url}: {} (refused: {})", f.message, f.refused);
+                    if !f.refused {
+                        failed.push(format!("{url}: {}", f.message));
                     }
                 }
             }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[tokio::test]
+    async fn an_rtmps_destination_that_drops_the_stream_refuses_it() {
+        // Over TLS, a connection closed without TLS's own ending reads as an
+        // error, not as the end: it is still the destination refusing the key.
+        let (client_tls, server_tls) = test_tls();
+        let (target, destination) = rtmps_destination(server_tls.clone(), None, true).await;
+        match connect(&target, client_tls.clone()).await {
+            Ok(_) => panic!("the stream was not refused"),
+            Err(f) => {
+                assert!(f.refused, "{}", f.message);
+                assert!(f.message.contains("check the stream key"), "{}", f.message);
+            }
+        }
+        assert!(destination.await.unwrap().is_none());
+        // The same while streaming: the connection ended, it did not fail to read.
+        let (target, destination) = rtmps_destination(server_tls, None, false).await;
+        let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
+        let far = destination.await.unwrap().unwrap();
+        let mut p = Publishing::start_with(stream, session, aborter);
+        drop(far);
+        match p.ended().await {
+            RunEnd::Failed(f) => assert_eq!(f.message, "the destination closed the connection"),
+            _ => panic!("the lost connection was not noticed"),
         }
     }
 
     #[tokio::test]
     async fn a_dump_over_rtmps_resets_a_connection_that_is_behind() {
         let (client_tls, server_tls) = test_tls();
-        let (target, destination) = rtmps_destination(server_tls, Some(4 * 1024)).await;
+        let (target, destination) = rtmps_destination(server_tls, Some(4 * 1024), false).await;
         let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
         // The destination reads nothing more.
         let _far = destination.await.unwrap().unwrap();
@@ -1218,7 +1262,7 @@ mod tests {
     #[tokio::test]
     async fn a_dump_over_rtmps_keeps_a_connection_that_has_sent_everything() {
         let (client_tls, server_tls) = test_tls();
-        let (target, destination) = rtmps_destination(server_tls, None).await;
+        let (target, destination) = rtmps_destination(server_tls, None, false).await;
         let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
         let mut far = destination.await.unwrap().unwrap();
         let mut p = Publishing::start_with(stream, session, aborter);

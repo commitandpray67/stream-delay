@@ -8,6 +8,13 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- Over RTMPS (now the default for Twitch and YouTube), a destination refusing
+  the stream key showed "read failed: peer closed connection without sending TLS
+  close_notify" and was tried again every few seconds: Twitch refuses a key by
+  closing the connection without ending TLS first. It now reads "the
+  destination closed the connection (check the stream key)", and the waits
+  between tries grow as for any refusal. A connection closed that way while
+  streaming reads "the destination closed the connection".
 - Asking for a delay a hair below the one in effect could leave the change
   pending for good, with "Changing delay…" in the dock until Cancel or another
   preset. A rewind rounds back to a keyframe, so asking for 5 s can give 6.001 s,
