@@ -17,7 +17,7 @@ body:
     id: version
     attributes:
       label: stream-delay version
-      placeholder: "0.3.1"
+      placeholder: "0.3.2"
     validations:
       required: true
   - type: dropdown

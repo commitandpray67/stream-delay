@@ -6,6 +6,8 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-26
+
 ### Changed
 
 - Twitch and YouTube are reached over RTMPS, which encrypts the stream key.
@@ -506,7 +508,8 @@ The first public beta. Everything below is new.
 - One destination at a time; the buffer is kept in memory.
 - Installers are not code-signed yet (SmartScreen and Gatekeeper warnings).
 
-[Unreleased]: https://github.com/commitandpray67/stream-delay/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/commitandpray67/stream-delay/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/commitandpray67/stream-delay/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/commitandpray67/stream-delay/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/commitandpray67/stream-delay/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/commitandpray67/stream-delay/compare/v0.1.0...v0.2.0
