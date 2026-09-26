@@ -1156,6 +1156,39 @@ mod tests {
         assert!(destination.await.unwrap().is_none());
     }
 
+    /// Twitch's and YouTube's RTMPS ingest, with a key they refuse (nothing is
+    /// streamed): if the refusal comes from the RTMP exchange, or the key is
+    /// even taken, the TLS connection and the certificate check against the
+    /// built-in roots worked on the real servers, which the local tests above
+    /// cannot show. Needs the internet: run by the "Real destinations" workflow.
+    #[tokio::test]
+    #[ignore = "connects to Twitch and YouTube"]
+    async fn real_rtmps_destinations_take_the_tls_connection() {
+        for url in [
+            "rtmps://live.twitch.tv:443/app",
+            "rtmps://a.rtmps.youtube.com:443/live2",
+        ] {
+            let target = Target {
+                url: RtmpUrl::parse(url).unwrap(),
+                key: "stream-delay-ci-invalid-key".into(),
+                connect_props: Vec::new(),
+            };
+            let result =
+                tokio::time::timeout(Duration::from_secs(30), connect(&target, io::tls_config()))
+                    .await
+                    .unwrap_or_else(|_| panic!("{url}: no answer in 30 s"));
+            match result {
+                Ok(_) => eprintln!("{url}: TLS and RTMP connect worked; the key was taken"),
+                Err(f) => {
+                    eprintln!("{url}: {}", f.message);
+                    for failed in ["could not reach", "TLS", "RTMP handshake failed"] {
+                        assert!(!f.message.contains(failed), "{url}: {}", f.message);
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_dump_over_rtmps_resets_a_connection_that_is_behind() {
         let (client_tls, server_tls) = test_tls();

@@ -1,0 +1,29 @@
+name: Real destinations
+
+# Connects to Twitch's and YouTube's RTMPS ingest with a made-up key, which they
+# refuse: nothing is streamed. It checks what the relay's tests cannot, with a
+# local server: that the TLS connection and the certificate check work against
+# the real servers, from each OS. Nightly, and by hand before a release.
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rtmps:
+    name: RTMPS (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Connect to Twitch and YouTube over RTMPS
+        run: cargo test -p streamdelay-relay --lib real_rtmps -- --ignored --nocapture
