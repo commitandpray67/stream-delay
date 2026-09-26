@@ -287,6 +287,7 @@ impl App {
                 relay,
                 tokens: Tokens::new(&config.api.token),
                 allow_lan: config.api.allow_lan,
+                allowed_hosts: config.api.allowed_hosts.clone(),
                 download_codes: Default::default(),
                 saved: std::sync::Mutex::new(saved),
                 config: RwLock::new(config),

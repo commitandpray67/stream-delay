@@ -20,19 +20,39 @@ pub use streamdelay_engine::DelayMode;
 
 /// Why `text` does not parse, for logs and error messages: where, and the
 /// parser's reason, without quoting the file (the parser's own message shows the
-/// offending line) or any text value, since the settings and secrets files hold
-/// tokens and stream keys.
+/// offending line) or any value from it, since the settings and secrets files hold
+/// tokens and stream keys. Values are quoted in double quotes (strings) or in
+/// backticks (``unknown variant `…` ``, ``integer `…` ``); backticks after
+/// "expected" name what the setting accepts, and stay.
 pub(crate) fn parse_error(text: &str, e: &toml::de::Error) -> String {
+    let message = e.message();
+    let expected_at = message.find("expected").unwrap_or(message.len());
     let mut why = String::new();
-    let mut quoted = false;
-    for c in e.message().chars() {
-        if c == '"' {
-            if !quoted {
-                why.push_str("\"…\"");
+    let mut quote: Option<(char, bool)> = None;
+    for (i, c) in message.char_indices() {
+        match quote {
+            Some((q, shown)) if c == q => {
+                if shown {
+                    why.push(c);
+                }
+                quote = None;
             }
-            quoted = !quoted;
-        } else if !quoted && !c.is_control() {
-            why.push(c);
+            Some((_, shown)) => {
+                if shown && !c.is_control() {
+                    why.push(c);
+                }
+            }
+            None if c == '"' || c == '`' => {
+                let shown = c == '`' && i > expected_at;
+                why.push(c);
+                if !shown {
+                    why.push('…');
+                    why.push(c);
+                }
+                quote = Some((c, shown));
+            }
+            None if !c.is_control() => why.push(c),
+            None => {}
         }
     }
     match e.span() {
@@ -133,6 +153,31 @@ impl Default for DestinationConfig {
     }
 }
 
+impl DestinationConfig {
+    /// Moves a destination set by an earlier version to what it is called now,
+    /// and Twitch's and YouTube's default addresses from RTMP to RTMPS (the
+    /// same service, so a saved key stays). Returns true if anything changed.
+    pub fn upgrade(&mut self) -> bool {
+        const EARLIER: &[(&str, &str, &str)] = &[
+            ("twitch", "rtmp://live.twitch.tv/app", "twitch"),
+            ("youtube", "rtmp://a.rtmp.youtube.com/live2", "youtube"),
+            ("twitch-rtmps", "", "twitch"),
+            ("youtube-rtmps", "", "youtube"),
+        ];
+        let before = self.clone();
+        for &(service, url, now) in EARLIER {
+            if self.service == service && (url.is_empty() || self.url == url) {
+                self.service = now.into();
+                if !url.is_empty() {
+                    let s = SERVICES.iter().find(|s| s.id == now);
+                    self.url = s.map_or(String::new(), |s| s.url.into());
+                }
+            }
+        }
+        *self != before
+    }
+}
+
 /// Well-known ingest endpoints offered in the UI.
 pub struct Service {
     pub id: &'static str,
@@ -140,26 +185,28 @@ pub struct Service {
     pub url: &'static str,
 }
 
+/// Twitch and YouTube are reached over RTMPS, which encrypts the stream key; the
+/// RTMP addresses are there for networks where it does not get through.
 pub const SERVICES: &[Service] = &[
     Service {
         id: "twitch",
         name: "Twitch",
-        url: "rtmp://live.twitch.tv/app",
-    },
-    Service {
-        id: "twitch-rtmps",
-        name: "Twitch (RTMPS)",
         url: "rtmps://live.twitch.tv:443/app",
     },
     Service {
         id: "youtube",
         name: "YouTube",
-        url: "rtmp://a.rtmp.youtube.com/live2",
+        url: "rtmps://a.rtmps.youtube.com:443/live2",
     },
     Service {
-        id: "youtube-rtmps",
-        name: "YouTube (RTMPS)",
-        url: "rtmps://a.rtmps.youtube.com:443/live2",
+        id: "twitch-rtmp",
+        name: "Twitch (RTMP, unencrypted)",
+        url: "rtmp://live.twitch.tv/app",
+    },
+    Service {
+        id: "youtube-rtmp",
+        name: "YouTube (RTMP, unencrypted)",
+        url: "rtmp://a.rtmp.youtube.com/live2",
     },
     Service {
         id: "custom",
@@ -226,6 +273,11 @@ pub struct ApiConfig {
     pub token: String,
     /// Allow other devices on the network to use the API (still token-protected).
     pub allow_lan: bool,
+    /// With `allow_lan`, host names other devices may use for this computer
+    /// besides its addresses and local names (`nas`, `pc.local`), such as a name
+    /// on your own DNS. Any other name is refused, so that a web page whose domain
+    /// points here (DNS rebinding) is not taken for this server.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for ApiConfig {
@@ -234,6 +286,7 @@ impl Default for ApiConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 7788)),
             token: String::new(),
             allow_lan: false,
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -361,11 +414,16 @@ impl Config {
                 });
             }
         };
+        let upgraded = config.destination.upgrade();
         if config.api.token.is_empty() || !path.exists() {
             if config.api.token.is_empty() {
                 config.api.token = new_token();
             }
             config.save(path)?;
+        } else if upgraded {
+            // So the file says what is used. If it cannot be written (a
+            // read-only volume), this run uses the upgrade all the same.
+            let _ = config.save(path);
         }
         Ok(config)
     }
@@ -620,6 +678,69 @@ mod tests {
     }
 
     #[test]
+    fn twitch_and_youtube_use_rtmps() {
+        assert_eq!(
+            DestinationConfig::default().url,
+            "rtmps://live.twitch.tv:443/app"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (service, url, now, now_url) in [
+            // The earlier defaults.
+            (
+                "twitch",
+                "rtmp://live.twitch.tv/app",
+                "twitch",
+                "rtmps://live.twitch.tv:443/app",
+            ),
+            (
+                "youtube",
+                "rtmp://a.rtmp.youtube.com/live2",
+                "youtube",
+                "rtmps://a.rtmps.youtube.com:443/live2",
+            ),
+            // The earlier RTMPS entries.
+            (
+                "twitch-rtmps",
+                "rtmps://live.twitch.tv:443/app",
+                "twitch",
+                "rtmps://live.twitch.tv:443/app",
+            ),
+            (
+                "youtube-rtmps",
+                "rtmps://a.rtmps.youtube.com:443/live2",
+                "youtube",
+                "rtmps://a.rtmps.youtube.com:443/live2",
+            ),
+            // Anything else stays as it is.
+            (
+                "twitch",
+                "rtmp://fra05.contribute.live-video.net/app",
+                "twitch",
+                "rtmp://fra05.contribute.live-video.net/app",
+            ),
+            (
+                "custom",
+                "rtmp://live.twitch.tv/app",
+                "custom",
+                "rtmp://live.twitch.tv/app",
+            ),
+        ] {
+            let text = format!(
+                "[api]\ntoken = \"0123456789abcdef\"\n\n[destination]\nservice = \"{service}\"\nurl = \"{url}\"\n"
+            );
+            fs::write(&path, text).unwrap();
+            let c = Config::load_or_create(&path).unwrap();
+            assert_eq!(
+                (c.destination.service.as_str(), c.destination.url.as_str()),
+                (now, now_url)
+            );
+            // Saved, so the settings file says what is used.
+            assert_eq!(Config::load_or_create(&path).unwrap(), c);
+        }
+    }
+
+    #[test]
     fn parse_errors_never_quote_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -631,11 +752,20 @@ mod tests {
                 "[api]\ntoken = \"x\"\n\n[ingest]\ngrace_seconds = \"SENTINEL-key\"\n",
                 5,
             ),
+            // A value that is not one of the choices: the message quotes it in
+            // backticks.
+            ("[destination]\nkey_mode = \"SENTINEL_live_123\"\n", 2),
+            // A number of the wrong kind, also in backticks.
+            ("[ingest]\ngrace_seconds = -987654321\n", 2),
         ] {
             fs::write(&path, text).unwrap();
             let e = Config::load_or_create(&path).unwrap_err().to_string();
-            assert!(!e.contains("SENTINEL"), "{e}");
+            assert!(!e.contains("SENTINEL") && !e.contains("987654321"), "{e}");
             assert!(e.contains(&format!("line {line}: ")), "{e}");
         }
+        // What the setting accepts is still said.
+        fs::write(&path, "[destination]\nkey_mode = \"x\"\n").unwrap();
+        let e = Config::load_or_create(&path).unwrap_err().to_string();
+        assert!(e.contains("`stored`") && e.contains("`passthrough`"), "{e}");
     }
 }

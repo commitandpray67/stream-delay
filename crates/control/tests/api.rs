@@ -784,9 +784,10 @@ async fn a_stored_key_never_reaches_another_server_even_when_removing_it_fails()
         authed("GET", "/api/v1/config").body(Body::empty()).unwrap(),
     )
     .await;
+    // The default destination, as shown.
     assert_eq!(
         cfg["config"]["destination"]["url"],
-        "rtmp://live.twitch.tv/app"
+        "rtmps://live.twitch.tv/app"
     );
     assert_eq!(cfg["destination_key_set"], true);
 
@@ -797,7 +798,7 @@ async fn a_stored_key_never_reaches_another_server_even_when_removing_it_fails()
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(body["destination_key_set"], false);
     // Twitch again (the key was meant to be forgotten): no more than before.
-    let (_, body) = put_config(&app, &dest("rtmp://live.twitch.tv/app")).await;
+    let (_, body) = put_config(&app, &dest("rtmps://live.twitch.tv:443/app")).await;
     assert_eq!(
         body["destination_key_set"], true,
         "bound to Twitch, so only Twitch"

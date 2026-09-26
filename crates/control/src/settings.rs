@@ -528,7 +528,7 @@ mod transaction_tests {
             // Another server: the key would be forgotten.
             dest("rtmp://ingest.example.net/live"),
             // A new key in the URL: it would replace the saved one.
-            dest("rtmp://live.twitch.tv/app/live_1_b"),
+            dest("rtmps://live.twitch.tv:443/app/live_1_b"),
         ] {
             let (s, body) = call(&app, "PUT", "/api/v1/config", &update).await;
             assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
@@ -537,7 +537,10 @@ mod transaction_tests {
                 secrets.get(secret::DESTINATION_KEY).as_deref(),
                 Some(saved.as_str())
             );
-            assert_eq!(st.config().destination.url, "rtmp://live.twitch.tv/app");
+            assert_eq!(
+                st.config().destination.url,
+                "rtmps://live.twitch.tv:443/app"
+            );
             assert_eq!(applied_key(&st).as_deref(), Some("live_1_a"));
         }
     }

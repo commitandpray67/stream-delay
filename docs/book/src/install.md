@@ -55,18 +55,22 @@ key saved for your usual destination; pass its key with `STREAMDELAY_KEY`.
 ```sh
 docker run -d --name stream-delay --restart unless-stopped \
   -p 1935:1935 -p 127.0.0.1:7788:7788 -v stream-delay:/data \
-  -e STREAMDELAY_INGEST_KEY=choose-a-secret \
   ghcr.io/commitandpray67/stream-delay
-docker logs stream-delay          # shows the dashboard link with its token
+docker exec stream-delay streamdelayd urls   # the links with their tokens, and the OBS key
 ```
+
+The links' access tokens and the OBS key are not written to `docker logs`, where
+anyone who can read the logs would get them; `streamdelayd urls` shows them.
 
 `docker stop` ends a running broadcast cleanly, like Ctrl+C in a terminal.
 
 The container listens on all interfaces, so it requires an ingest key: OBS must
 stream with that key (Settings → Stream → Stream Key), and nobody else can
-publish to your relay. Set it with `STREAMDELAY_INGEST_KEY`; without it,
-stream-delay generates one, saves it in `/data/config.toml` and prints it next to
-the OBS server address in `docker logs`.
+publish to your relay. stream-delay generates one and saves it in
+`/data/config.toml`; `streamdelayd urls` shows it. To choose your own, set
+`STREAMDELAY_INGEST_KEY` (`-e STREAMDELAY_INGEST_KEY=…`) to at least 16
+characters: a shorter one could be guessed, and is refused. Anyone who guesses
+it could stream to your channel while you are not live.
 
 Port 7788 is the dashboard and control API. The command above makes it reachable
 only from the machine running Docker. To use the dashboard from other devices on
@@ -79,7 +83,7 @@ computer) or a VPN.
 ### Two-PC setups
 
 On the streaming PC, run stream-delay with `--ingest 0.0.0.0:1935 --ingest-key …`
-(or the Docker image). In OBS on the gaming PC, use
+(at least 16 characters; or the Docker image). In OBS on the gaming PC, use
 `rtmp://<streaming-pc-ip>:1935/live` and the ingest key. If you leave out
 `--ingest-key`, one is generated; `streamdelayd urls` and the Setup tab show it. To control it from
 another device, or for OBS on the gaming PC to load the overlay, stream-delay's
@@ -87,6 +91,17 @@ web server has to listen on the network too: run it with
 `--api 0.0.0.0:7788 --allow-lan` (or set `bind = "0.0.0.0:7788"` under `[api]`
 in the settings file and enable *Allow control from other devices* on the
 Advanced tab), and restart it.
+
+Other devices then reach it by this computer's IP address
+(`http://192.168.1.20:7788/…`) or its local name (`http://gaming-pc.local:7788/…`,
+or a name under `.home.arpa`, `.internal` or `.lan`). Any other name is refused
+with `421 Misdirected Request`, so that a web page cannot pass for stream-delay
+(DNS rebinding); to use a name of your own, list it in the settings file:
+
+```toml
+[api]
+allowed_hosts = ["stream.example.com"]
+```
 
 ## Where things are stored
 

@@ -278,7 +278,7 @@ async fn configure_imports_key_adds_overlay_and_restores() {
     let saved: serde_json::Value =
         serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
     assert_eq!(saved["value"], "live_987_secret");
-    assert_eq!(saved["for"], "rtmp://live.twitch.tv/app");
+    assert_eq!(saved["for"], "rtmps://live.twitch.tv:443/app");
     assert!(!r.to_string().contains("live_987_secret"));
     let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
     assert_eq!(cfg["destination_key_set"], true);
@@ -583,14 +583,14 @@ async fn an_obs_on_another_computer_gets_no_overlay_it_cannot_load() {
     // The RTMP input takes streams from the network; the web pages do not.
     let relay = streamdelay_relay::start(RelayConfig {
         ingest_bind: "0.0.0.0:0".parse().unwrap(),
-        ingest_key: Some("ingest-key-1234".into()),
+        ingest_key: Some("ingest-key-0123456789".into()),
         ..Default::default()
     })
     .await
     .unwrap();
     let mut config = Config::default();
     config.api.token = TOKEN.into();
-    config.ingest.key = Some("ingest-key-1234".into());
+    config.ingest.key = Some("ingest-key-0123456789".into());
     config.obs.host = "192.0.2.10".into();
     config.obs.port = obs_port;
     let dir = tempfile::tempdir().unwrap();

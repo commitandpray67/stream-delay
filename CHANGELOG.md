@@ -6,8 +6,60 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Twitch and YouTube are reached over RTMPS, which encrypts the stream key.
+  Settings on their earlier default RTMP addresses move to it, keeping the saved
+  key. The RTMP addresses are still there, as *Twitch (RTMP, unencrypted)* and
+  *YouTube (RTMP, unencrypted)*, for networks where RTMPS doesn't get through.
+- When the RTMP input can be reached from other devices, its ingest key must have
+  at least 16 characters (a generated one has 32); a shorter one is refused at
+  startup. The example key in the Docker instructions, `choose-a-secret`, was
+  too short: leave `STREAMDELAY_INGEST_KEY` unset to use a generated key.
+- While wrong ingest keys come from many addresses at once (20 in a minute), each
+  address gets one try every 10 minutes. Addresses that sent no wrong key, like
+  your encoder's, are not held up. The key comparison no longer reveals the key's
+  length through its timing.
+- With LAN access (always on in the Docker image), the dashboard and API only
+  answer requests that name this computer by an IP address, a local name (`nas`,
+  `gaming-pc.local`, names under `.home.arpa`, `.internal` or `.lan`) or a name
+  listed in the new `allowed_hosts` setting under `[api]`. Other names are
+  refused, which blocks DNS rebinding in LAN mode too.
+- `streamdelayd run` prints the links' access tokens and the OBS key only to a
+  terminal, not to `docker logs` or a service's log. `streamdelayd urls` shows
+  them (`docker exec <container> streamdelayd urls`).
+- The diagnostics file for bug reports masks public IP addresses, such as a
+  server's or those of whoever connected to it.
+- A destination that refuses the stream (a wrong stream key, for example) is
+  tried again after 10 s, 30 s, 1 min and 2 min, then every 5 min, rather than
+  every 10 s for as long as OBS streams, and the status says when. A new key or
+  destination is tried at once.
+- Installing an update while you are streaming asks first, as quitting does, and
+  ends the stream cleanly before installing. On Windows the broadcast was cut
+  off, and what was in the delay buffer lost.
+
 ### Fixed
 
+- An encoder sending its decoder configuration again, or a new one (after a
+  resolution change, say), could leave a keyframe still in the delay buffer
+  without it: after the destination reconnected, or a delay change went back to
+  it, the picture could not be decoded until the next configuration.
+- The record of which decoder configuration the destination has kept a copy of
+  each, outside the RAM cap: an encoder with many tracks could make it hold
+  hundreds of MiB.
+- Connecting to the destination tried its addresses one after another, so one
+  that never answers (IPv6 on a network where it doesn't work) used up the whole
+  10 s every time and the stream never got through. They are now tried in turn
+  250 ms apart, the first to answer winning.
+- The OBS setup took any server with "twitch.tv" anywhere in it for Twitch, and
+  sent its key there. It now goes by the server's host name.
+- The OBS status on the dashboard showed a login, query or stream key that OBS's
+  server URL contained.
+- An error in the settings file could quote a value in backticks, such as a
+  stream key typed into `key_mode`.
+- The user guide said the dock link could only change the delay. It controls the
+  stream (the delay, Dump buffer, End stream, resuming), so keep it as private as
+  the dashboard link.
 - A stream started with no delay (or a short one) showed "Delayed 2 s" and the
   overlay's "Stream delay: 2 s" for the whole broadcast: connecting to Twitch
   takes a moment after OBS starts sending, and the broadcast kept that lag. It

@@ -329,21 +329,44 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
         .await
         .map_err(startup_error)?;
         let urls = app.urls();
+        // An ephemeral run has no settings file for `streamdelayd urls` to read.
+        let show = shown_to_a_person() || config_path.is_none();
+        // Without the token, the link only says where the page is.
+        let link = |url: &str| {
+            if show {
+                url.to_string()
+            } else {
+                url.split_once('?')
+                    .map_or(url, |(page, _)| page)
+                    .to_string()
+            }
+        };
         if app.config().ingest.key.is_some_and(|k| !k.is_empty()) {
             println!(
                 "OBS server:  {}  (Settings → Stream → Custom)",
                 urls.obs_server
             );
-            println!("OBS key:     {}", urls.obs_key);
+            if show {
+                println!("OBS key:     {}", urls.obs_key);
+            } else {
+                println!("OBS key:     (see below)");
+            }
         } else {
             println!(
                 "OBS server:  {}  (Settings → Stream → Custom, any stream key)",
                 urls.obs_server
             );
         }
-        println!("Dashboard:   {}", urls.dashboard);
-        println!("OBS dock:    {}", urls.dock);
-        println!("Overlay:     {}", urls.overlay);
+        println!("Dashboard:   {}", link(&urls.dashboard));
+        println!("OBS dock:    {}", link(&urls.dock));
+        println!("Overlay:     {}", link(&urls.overlay));
+        if !show {
+            println!(
+                "The links' access tokens and the OBS key are not written to logs: \
+                 `streamdelayd urls` shows them (under Docker: \
+                 `docker exec <container> streamdelayd urls`)."
+            );
+        }
         if let Some(p) = &config_path {
             info!("settings file: {}", p.display());
         }
@@ -352,6 +375,17 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
         app.shutdown().await;
         Ok(())
     })
+}
+
+/// True when what is printed goes to a person at a terminal. Otherwise (a
+/// service manager such as systemd, a container, output sent to a file) it is
+/// kept in logs, where the links' tokens and the OBS key would give anyone who
+/// can read them control of the stream.
+fn shown_to_a_person() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+        && std::env::var_os("container").is_none()
+        && !std::path::Path::new("/.dockerenv").exists()
 }
 
 /// Waits for Ctrl+C, or for the request to stop that service managers send:

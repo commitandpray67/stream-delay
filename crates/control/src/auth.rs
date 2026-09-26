@@ -94,6 +94,35 @@ fn is_loopback_host(host: &str, port: u16) -> bool {
     )
 }
 
+/// With LAN access, the Host header may name this server by any address, but not
+/// by just any name: a web page whose own domain resolves to this computer (DNS
+/// rebinding) would pass for it. Names no one outside the network can point here
+/// are accepted (a single label such as `nas`, `.local`, `.home.arpa`,
+/// `.internal`, `.lan`, `localhost`), and those in `allowed`. Any port: Docker
+/// may publish this one under another.
+fn is_lan_host(host: &str, allowed: &[String]) -> bool {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest
+            .split_once(']')
+            .is_some_and(|(v6, _)| v6.parse::<std::net::Ipv6Addr>().is_ok());
+    }
+    let name = host.rsplit_once(':').map_or(host, |(n, _)| n);
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    if name.is_empty() || name.contains(':') {
+        return false;
+    }
+    if name.parse::<std::net::Ipv4Addr>().is_ok() || !name.contains('.') {
+        return true;
+    }
+    const LOCAL: &[&str] = &["localhost", "local", "home.arpa", "internal", "lan"];
+    LOCAL
+        .iter()
+        .any(|s| name.strip_suffix(s).is_some_and(|p| p.ends_with('.')))
+        || allowed
+            .iter()
+            .any(|a| a.trim_end_matches('.').eq_ignore_ascii_case(&name))
+}
+
 /// Rejects requests whose Host header does not name this server (DNS rebinding) and
 /// browser requests from other origins.
 pub(crate) fn check_origin(
@@ -104,7 +133,12 @@ pub(crate) fn check_origin(
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if !state.shared.allow_lan && !is_loopback_host(host, state.shared.port) {
+    let known = if state.shared.allow_lan {
+        is_lan_host(host, &state.shared.allowed_hosts)
+    } else {
+        is_loopback_host(host, state.shared.port)
+    };
+    if !known {
         return Err((StatusCode::MISDIRECTED_REQUEST, "unexpected Host header"));
     }
     if let Some(origin) = headers.get(header::ORIGIN) {
@@ -179,6 +213,41 @@ mod tests {
         assert!(!is_loopback_host("127.0.0.1:80", 7788));
         assert!(!is_loopback_host("evil.example:7788", 7788));
         assert!(!is_loopback_host("", 7788));
+    }
+
+    #[test]
+    fn lan_hosts_are_addresses_and_local_names() {
+        let allowed = vec!["stream.example.com".to_string()];
+        for host in [
+            "192.168.1.20:7788",
+            "203.0.113.5:8080",
+            "[fd00::1]:7788",
+            "[::1]:7788",
+            "localhost:7788",
+            "nas:7788",
+            "nas",
+            "gaming-pc.local:7788",
+            "Gaming-PC.LOCAL.",
+            "stream.home.arpa:7788",
+            "box.internal",
+            "router.lan",
+            "stream.example.com:7788",
+        ] {
+            assert!(is_lan_host(host, &allowed), "{host}");
+        }
+        // A rebinding page arrives under its own domain.
+        for host in [
+            "evil.example:7788",
+            "rebind.attacker.test",
+            "local.evil.example",
+            "evil.example.com",
+            "",
+            ":7788",
+            "[not-an-address]:7788",
+            "::1",
+        ] {
+            assert!(!is_lan_host(host, &allowed), "{host}");
+        }
     }
 
     #[test]

@@ -632,6 +632,114 @@ fn destination_reconnect_resumes_without_losing_content() {
     assert!(effective(&s) >= 13_000);
 }
 
+/// The newest video decoder configuration the current session has kept.
+fn video_config(s: &Sim) -> Bytes {
+    let session = s.e.sessions.last().unwrap();
+    let h = session.headers.iter().rev().find(|h| h.kind == Kind::Video);
+    h.unwrap().payload.clone()
+}
+
+/// Drops the destination connection and connects again; returns where in `sent`
+/// the new connection starts.
+fn reconnect(s: &mut Sim) -> usize {
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    let from = s.sent.len();
+    s.connect();
+    from
+}
+
+#[test]
+fn a_repeated_codec_header_still_comes_before_older_keyframes() {
+    // Some encoders send their decoder configuration again, unchanged. Keyframes
+    // recorded before the repeat still need it, after a reconnect or a splice.
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(15 * SEC);
+    let config = video_config(&s);
+    let ts = s.ts_base + s.video_index * FRAME_MS;
+    s.e.ingest(s.now, Kind::Video, ts, config.clone());
+    s.advance(SEC);
+    let from = reconnect(&mut s);
+    s.advance(SEC);
+    let first_video = s.sent[from..].iter().find(|x| x.msg.kind == Kind::Video);
+    assert_eq!(
+        first_video.unwrap().msg.payload,
+        config,
+        "a keyframe went out without its decoder configuration"
+    );
+}
+
+#[test]
+fn a_changed_codec_header_keeps_the_old_one_for_older_keyframes() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(15 * SEC);
+    let old = video_config(&s);
+    // A new configuration, as after a resolution change.
+    let ts = s.ts_base + s.video_index * FRAME_MS;
+    s.push(Kind::Video, ts, &[0x17, 0x00, 0, 0, 0, 0x02], false);
+    let new = video_config(&s);
+    assert_ne!(old, new);
+    s.advance(SEC);
+    let from = reconnect(&mut s);
+    s.advance(SEC);
+    let first_video = s.sent[from..].iter().find(|x| x.msg.kind == Kind::Video);
+    assert_eq!(first_video.unwrap().msg.payload, old);
+    // The new one goes out when the output gets to it.
+    s.advance(12 * SEC);
+    let sent: Vec<_> = s.sent[from..].iter().map(|x| &x.msg.payload).collect();
+    let at = |p: &Bytes| sent.iter().position(|x| *x == p);
+    assert!(at(&new).unwrap() > at(&old).unwrap());
+    // Once nothing buffered is older than the change, the old one is forgotten.
+    s.advance(150 * SEC);
+    let kept = &s.e.sessions.last().unwrap().headers;
+    assert!(!kept.iter().any(|h| h.payload == old));
+    assert!(kept.iter().any(|h| h.payload == new));
+}
+
+#[test]
+fn decoder_configuration_sent_is_not_kept_beyond_the_buffer() {
+    // The output remembers what configuration the destination has, so as not to
+    // send it twice. It must not hold on to the configuration itself: it can be
+    // large, and there can be one per track.
+    let mut s = Sim::new(EngineConfig {
+        ram_cap_bytes: 16 * 1024 * 1024,
+        ..config()
+    });
+    s.connect();
+    s.advance(5 * SEC);
+    let mut configs = Vec::new();
+    for track in 0..32u8 {
+        // Enhanced RTMP: multitrack audio, one track, AAC sequence start.
+        let mut p = vec![0x95, 0x00, b'm', b'p', b'4', b'a', track];
+        p.resize(2 * 1024 * 1024, 0);
+        let p = Bytes::from(p);
+        let ts = s.ts_base + s.audio_index * 21;
+        s.e.ingest(s.now, Kind::Audio, ts, p.clone());
+        s.poll();
+        configs.push(p);
+    }
+    s.advance(5 * SEC);
+    s.sent.clear();
+    let in_buffer = |p: &Bytes| s.e.ring.iter().any(|e| e.payload.as_ptr() == p.as_ptr());
+    let gone: Vec<_> = configs.into_iter().filter(|p| !in_buffer(p)).collect();
+    assert!(gone.len() >= 16, "{} left the buffer", gone.len());
+    for p in gone {
+        assert!(
+            p.is_unique(),
+            "track {} still held outside the buffer",
+            p[6]
+        );
+    }
+}
+
 #[test]
 fn encoder_reconnect_continues_the_same_output() {
     let mut s = live_sim();

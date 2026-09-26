@@ -53,9 +53,11 @@ pub(crate) struct Shared {
     pub secrets: Arc<dyn SecretStore>,
     /// Accepted API tokens, derived from `config.api.token` at startup.
     pub tokens: auth::Tokens,
-    /// Requests may name any host (LAN access). Like the listening address, this
-    /// changes at the next start, not when the setting is saved.
+    /// Requests may come from other devices (LAN access), naming this server by
+    /// any address or local name, or by `allowed_hosts`. Like the listening
+    /// address, this changes at the next start, not when the setting is saved.
     pub allow_lan: bool,
+    pub allowed_hosts: Vec<String>,
     /// Single-use codes for downloading diagnostics; see [`diagnostics`].
     pub download_codes: diagnostics::Codes,
     /// Destination key given on the command line or environment (not persisted).
@@ -156,6 +158,7 @@ pub(crate) fn state(
             relay,
             tokens: auth::Tokens::new(&config.api.token),
             allow_lan: config.api.allow_lan,
+            allowed_hosts: config.api.allowed_hosts.clone(),
             download_codes: Default::default(),
             saved: Mutex::new(config.clone()),
             config: RwLock::new(config),

@@ -312,8 +312,7 @@ fn on_menu(app: &AppHandle, id: &str) {
         }
         "updates" => check_for_updates(app.clone(), true),
         "quit" => {
-            let state = core.relay().state();
-            if !state.ingest.connected && state.egress.status != EgressStatus::Live {
+            if !streaming(&core) {
                 info!("quitting from the tray");
                 app.exit(0);
                 return;
@@ -353,10 +352,52 @@ fn on_menu(app: &AppHandle, id: &str) {
     }
 }
 
+/// True while OBS streams to stream-delay or the destination is live: quitting
+/// or updating then ends the stream.
+fn streaming(core: &App) -> bool {
+    let state = core.relay().state();
+    state.ingest.connected || state.egress.status == EgressStatus::Live
+}
+
 fn copy(app: &AppHandle, text: String) {
     if let Err(e) = app.clipboard().write_text(text) {
         warn!("clipboard: {e}");
     }
+}
+
+/// Downloads and installs `update`, then restarts. The stream is ended cleanly
+/// before installing, as quitting does: on Windows, installing exits the app at
+/// once, without its shutdown, and the broadcast would just be cut off.
+async fn install_update(app: AppHandle, update: tauri_plugin_updater::Update) {
+    let bytes = match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("update download failed: {e}");
+            app.dialog()
+                .message(format!("Could not download the update: {e}"))
+                .title("stream-delay")
+                .show(|_| {});
+            return;
+        }
+    };
+    if let Some(core) = app.try_state::<Core>() {
+        info!("stopping the relay to install the update");
+        core.0.shutdown().await;
+    }
+    if let Err(e) = update.install(bytes) {
+        warn!("update failed: {e}");
+        // The relay has stopped: start again, as this version.
+        let app2 = app.clone();
+        app.dialog()
+            .message(format!(
+                "Could not install the update: {e}. stream-delay restarts."
+            ))
+            .title("stream-delay")
+            .kind(MessageDialogKind::Error)
+            .show(move |_| app2.restart());
+        return;
+    }
+    app.restart();
 }
 
 /// Checks GitHub Releases for a signed update. `interactive` reports "up to date"
@@ -371,28 +412,45 @@ pub fn check_for_updates(app: AppHandle, interactive: bool) {
         match result {
             Ok(Some(update)) => {
                 let version = update.version.clone();
+                let live = app.try_state::<Core>().is_some_and(|c| streaming(&c.0));
+                // Like quitting: while live, say what installing does to the stream.
+                let (message, install, later) = if live {
+                    (
+                        format!(
+                            "stream-delay {version} is available. You are streaming through \
+                             stream-delay: installing it ends your stream now, and what is still \
+                             in the delay buffer does not air. The app restarts afterwards."
+                        ),
+                        "Install and end the stream",
+                        "Keep streaming",
+                    )
+                } else {
+                    (
+                        format!(
+                            "stream-delay {version} is available. Install it now? The app \
+                             restarts afterwards."
+                        ),
+                        "Install",
+                        "Later",
+                    )
+                };
                 let app2 = app.clone();
-                app.dialog()
-                    .message(format!(
-                        "stream-delay {version} is available. Install it now? The app restarts afterwards; \
-                         don't do this while you are live."
-                    ))
+                let mut dialog = app
+                    .dialog()
+                    .message(message)
                     .title("Update available")
                     .buttons(MessageDialogButtons::OkCancelCustom(
-                        "Install".into(),
-                        "Later".into(),
-                    ))
-                    .show(move |install| {
-                        if !install {
-                            return;
-                        }
-                        tauri::async_runtime::spawn(async move {
-                            match update.download_and_install(|_, _| {}, || {}).await {
-                                Ok(()) => app2.restart(),
-                                Err(e) => warn!("update failed: {e}"),
-                            }
-                        });
-                    });
+                        install.into(),
+                        later.into(),
+                    ));
+                if live {
+                    dialog = dialog.kind(MessageDialogKind::Warning);
+                }
+                dialog.show(move |install| {
+                    if install {
+                        tauri::async_runtime::spawn(install_update(app2, update));
+                    }
+                });
             }
             Ok(None) if interactive => {
                 app.dialog()

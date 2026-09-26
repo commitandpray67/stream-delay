@@ -97,7 +97,7 @@
         </label>
         <label>
           Server URL
-          <input bind:value={url} placeholder="rtmp://live.twitch.tv/app" required spellcheck="false" />
+          <input bind:value={url} placeholder="rtmps://ingest.example.com/live" required spellcheck="false" />
         </label>
         <label class="inline">
           <input type="checkbox" bind:checked={passthrough} />

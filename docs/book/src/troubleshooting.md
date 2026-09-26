@@ -98,8 +98,9 @@ green or smeared frames, or the stream stalls, please
 
 1. On the dashboard's **Advanced** tab, click **Download diagnostics** (or run
    `streamdelayd diagnostics -o diagnostics.json`). The file contains the version,
-   your settings, the current state and recent log lines. Stream keys, passwords
-   and the access token are removed; have a look before you share it.
+   your settings, the current state and recent log lines. Stream keys, passwords,
+   the access token and public IP addresses are removed; have a look before you
+   share it.
 2. [Open an issue](https://github.com/commitandpray67/stream-delay/issues/new/choose),
    describe what happened and what you expected, and attach the file.
 

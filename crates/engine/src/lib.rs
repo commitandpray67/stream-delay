@@ -167,6 +167,15 @@ fn cost(len: usize) -> usize {
     len + ENTRY_OVERHEAD
 }
 
+/// Tells decoder configurations apart without keeping them. Two different ones
+/// of the same track would have to collide in 64 bits for one not to be sent.
+fn fingerprint(payload: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    payload.hash(&mut h);
+    h.finish()
+}
+
 struct Entry {
     seq: u64,
     arrival: Time,
@@ -275,7 +284,10 @@ struct Output {
     skip_rasl_after: Option<u64>,
     gate: Option<(u32, u64)>,
     pending_headers: bool,
-    sent_headers: Vec<(Kind, u16, Bytes)>,
+    /// The decoder configuration the destination has, one per kind and class,
+    /// by [`fingerprint`]: keeping the payloads would hold memory outside the
+    /// RAM cap, as many as an encoder has tracks.
+    sent_headers: Vec<(Kind, u16, u64)>,
     sent_metadata: Option<Bytes>,
     pending: Pending,
     mask_visible: bool,
@@ -470,14 +482,22 @@ impl Engine {
         let seq = self.next_seq;
         self.next_seq += 1;
         let budget = self.config.ram_cap_bytes / HEADER_SHARE_OF_RAM_CAP;
+        // An unchanged repeat changes nothing: the one kept applies from where it
+        // first came, also to the keyframes recorded before the repeat.
+        let repeat = config.is_some_and(|class| {
+            let last = session.headers.iter().rev();
+            last.map(|h| (h.kind, h.class, &h.payload))
+                .find(|&(k, c, _)| k == kind && c == class)
+                .is_some_and(|(_, _, p)| *p == payload)
+        });
         if let Some(class) = config
+            && !repeat
             && payload.len() <= MAX_HEADER_BYTES
             && cost(payload.len()) <= budget
         {
-            session
-                .headers
-                .retain(|h| !(h.kind == kind && h.class == class));
-            // The oldest go, to keep within the count and the budget.
+            // A changed one is added: the earlier stays for the keyframes before
+            // the change while they are buffered (see `forget_headers`). The
+            // oldest go, to keep within the count and the budget.
             let mut kept: usize = session.headers.iter().map(|h| cost(h.payload.len())).sum();
             while session.headers.len() >= MAX_HEADERS || kept + cost(payload.len()) > budget {
                 kept -= cost(session.headers.remove(0).payload.len());
@@ -619,6 +639,7 @@ impl Engine {
             .flatten();
         self.sessions.retain(|s| Some(s.id) == current);
         self.count_sessions();
+        self.forget_headers();
         self.out.next_seq = self.next_seq;
         self.out.need_sync = true;
     }
@@ -718,6 +739,7 @@ impl Engine {
         if self.ring.is_empty() {
             self.base_seq = self.base_seq.max(seq.min(self.next_seq));
         }
+        self.forget_headers();
     }
 
     // ----- commands -------------------------------------------------------------
@@ -1264,12 +1286,13 @@ impl Engine {
             return;
         };
         let metadata = session.metadata.clone();
-        let headers: Vec<(Kind, u16, Bytes)> = session
-            .headers
-            .iter()
-            .filter(|h| h.seq < seq)
-            .map(|h| (h.kind, h.class, h.payload.clone()))
-            .collect();
+        // For each kind of configuration, the version in effect at the splice
+        // point. They are kept in order, so a later one replaces an earlier one.
+        let mut headers: Vec<(Kind, u16, Bytes)> = Vec::new();
+        for h in session.headers.iter().filter(|h| h.seq < seq) {
+            headers.retain(|&(k, c, _)| !(k == h.kind && c == h.class));
+            headers.push((h.kind, h.class, h.payload.clone()));
+        }
         if let Some(m) = metadata
             && self.out.sent_metadata.as_ref() != Some(&m)
         {
@@ -1297,16 +1320,14 @@ impl Engine {
     }
 
     /// Records a header as sent. Returns false if the destination already has it.
-    fn mark_header_sent(&mut self, kind: Kind, class: u16, payload: &Bytes) -> bool {
+    fn mark_header_sent(&mut self, kind: Kind, class: u16, payload: &[u8]) -> bool {
+        let print = fingerprint(payload);
         let sent = &mut self.out.sent_headers;
-        if sent
-            .iter()
-            .any(|(k, c, p)| *k == kind && *c == class && p == payload)
-        {
+        if sent.contains(&(kind, class, print)) {
             return false;
         }
-        sent.retain(|(k, c, _)| !(*k == kind && *c == class));
-        sent.push((kind, class, payload.clone()));
+        sent.retain(|&(k, c, _)| !(k == kind && c == class));
+        sent.push((kind, class, print));
         true
     }
 
@@ -1437,6 +1458,7 @@ impl Engine {
     /// the oldest buffered message's all have some (see [`Engine::ingest_start`]),
     /// except perhaps the current one.
     fn forget_sessions(&mut self) {
+        self.forget_headers();
         let Some(front) = self.ring.front() else {
             return;
         };
@@ -1445,6 +1467,31 @@ impl Engine {
             let current = self.sessions.last().map(|s| s.id);
             self.sessions
                 .retain(|s| s.id >= oldest || Some(s.id) == current);
+            self.count_sessions();
+        }
+    }
+
+    /// Forgets decoder configuration that a newer version replaces for everything
+    /// still buffered: the newer one came before the oldest buffered message.
+    fn forget_headers(&mut self) {
+        let base = self.base_seq;
+        let mut changed = false;
+        for s in &mut self.sessions {
+            let mut i = 0;
+            while i < s.headers.len() {
+                let h = &s.headers[i];
+                let replaced = s.headers[i + 1..]
+                    .iter()
+                    .any(|n| n.kind == h.kind && n.class == h.class && n.seq < base);
+                if replaced {
+                    s.headers.remove(i);
+                    changed = true;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if changed {
             self.count_sessions();
         }
     }

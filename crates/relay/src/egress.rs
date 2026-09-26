@@ -2,6 +2,7 @@
 //! with backoff when the connection drops.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -35,8 +36,18 @@ const RETRY_WAITS: [Duration; 5] = [
 ];
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(5);
 /// After the destination refused the stream (a wrong stream key, for example),
-/// trying again at once would not help and could look like abuse.
-const REFUSED_RETRY_WAIT: Duration = Duration::from_secs(10);
+/// trying again at once would not help and could look like abuse: the waits grow
+/// to minutes. A new key or destination is tried at once all the same.
+const REFUSED_RETRY_WAITS: [Duration; 4] = [
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+];
+const MAX_REFUSED_RETRY_WAIT: Duration = Duration::from_secs(300);
+/// While no address of the destination has answered, the next one is tried after
+/// this long (Happy Eyeballs, RFC 8305).
+const CONNECT_STAGGER: Duration = Duration::from_millis(250);
 /// A connection that stayed up this long was working: when it drops, the next
 /// attempt comes at once again.
 const STABLE_CONNECTION: Duration = Duration::from_secs(10);
@@ -224,16 +235,34 @@ fn replace_word(text: &str, word: &str, with: &str) -> String {
     out
 }
 
-/// How long to wait before the next attempt, counting `failures` in a row.
-fn retry_wait(failures: &mut usize, refused: bool) -> Duration {
-    let wait = RETRY_WAITS
-        .get(*failures)
-        .copied()
-        .unwrap_or(MAX_RETRY_WAIT);
-    *failures += 1;
-    if refused {
-        wait.max(REFUSED_RETRY_WAIT)
-    } else {
+/// Failed attempts in a row: all of them, and refusals among them.
+#[derive(Default)]
+struct Failures {
+    all: usize,
+    refused: usize,
+}
+
+impl Failures {
+    /// How long to wait before the next attempt after `f`. A refusal also says
+    /// when that is, since it can be minutes.
+    fn wait(&mut self, f: &mut Failure) -> Duration {
+        let wait = RETRY_WAITS.get(self.all).copied().unwrap_or(MAX_RETRY_WAIT);
+        self.all += 1;
+        if !f.refused {
+            return wait;
+        }
+        let wait = REFUSED_RETRY_WAITS
+            .get(self.refused)
+            .copied()
+            .unwrap_or(MAX_REFUSED_RETRY_WAIT);
+        self.refused += 1;
+        let secs = wait.as_secs();
+        let when = if secs < 60 {
+            format!("{secs} s")
+        } else {
+            format!("{} min", secs / 60)
+        };
+        f.message = format!("{}; trying again in {when}", f.message);
         wait
     }
 }
@@ -246,8 +275,7 @@ pub(crate) async fn run(
     stall_timeout: Duration,
 ) {
     let mut target: Option<Target> = None;
-    // Failed attempts in a row.
-    let mut failures = 0usize;
+    let mut failures = Failures::default();
     loop {
         let Some(t) = target.clone() else {
             // Idle: wait for a start request, discarding anything stale.
@@ -255,7 +283,7 @@ pub(crate) async fn run(
                 c = ctl.recv() => match c {
                     Some(EgressCtl::Start(t)) => {
                         // A new broadcast: earlier failures don't count.
-                        failures = 0;
+                        failures = Failures::default();
                         target = Some(t);
                     }
                     Some(EgressCtl::Cut(n)) => cut_done(&events, n, false, None),
@@ -305,9 +333,9 @@ pub(crate) async fn run(
         let (stream, session, aborter) = match connected {
             Ok(Ok(c)) => c,
             Ok(Err(f)) => {
-                let f = f.scrubbed(&t);
+                let mut f = f.scrubbed(&t);
                 warn!("destination connection failed: {}", f.message);
-                let wait = retry_wait(&mut failures, f.refused);
+                let wait = failures.wait(&mut f);
                 target = wait_backoff(
                     &mut ctl, &mut media, &events, &counters, t, &f.message, wait,
                 )
@@ -315,13 +343,18 @@ pub(crate) async fn run(
                 continue;
             }
             Err(_) => {
-                let e = "timed out connecting to the destination";
-                warn!("{e}");
-                let wait = retry_wait(&mut failures, false);
-                target = wait_backoff(&mut ctl, &mut media, &events, &counters, t, e, wait).await;
+                let mut f = Failure::new("timed out connecting to the destination");
+                warn!("{}", f.message);
+                let wait = failures.wait(&mut f);
+                target = wait_backoff(
+                    &mut ctl, &mut media, &events, &counters, t, &f.message, wait,
+                )
+                .await;
                 continue;
             }
         };
+        // The destination took the stream: refusals before don't count.
+        failures.refused = 0;
         // The destination accepted the stream just as a stop arrived: end it at once.
         let pending = loop {
             match ctl.try_recv() {
@@ -394,12 +427,12 @@ pub(crate) async fn run(
             RunEnd::CutReset { .. } => info!(
                 "reset the destination connection for a dump, since it was behind; connecting again"
             ),
-            RunEnd::Failed(f) => {
+            RunEnd::Failed(mut f) => {
                 warn!("destination connection lost: {}", f.message);
                 if started.elapsed() >= STABLE_CONNECTION {
-                    failures = 0;
+                    failures.all = 0;
                 }
-                let wait = retry_wait(&mut failures, f.refused);
+                let wait = failures.wait(&mut f);
                 target = wait_backoff(
                     &mut ctl, &mut media, &events, &counters, t, &f.message, wait,
                 )
@@ -506,15 +539,58 @@ async fn wait_backoff(
     }
 }
 
+/// Connects to the first of `addrs` that answers. They are tried alternating
+/// between IPv6 and IPv4, the next one after [`CONNECT_STAGGER`] while none has
+/// answered, or at once when one fails (Happy Eyeballs, RFC 8305): an address
+/// that silently drops the connection (IPv6 without a working route, say) must
+/// not hold up the others until the attempt times out.
+async fn connect_first(addrs: Vec<SocketAddr>) -> std::io::Result<TcpStream> {
+    let first_v6 = addrs.first().is_some_and(SocketAddr::is_ipv6);
+    let (mut a, mut b): (VecDeque<_>, VecDeque<_>) =
+        addrs.into_iter().partition(|x| x.is_ipv6() == first_v6);
+    let mut order = Vec::new();
+    while !a.is_empty() || !b.is_empty() {
+        order.extend(a.pop_front());
+        order.extend(b.pop_front());
+    }
+    let mut addrs = order.into_iter();
+    // Dropping the set cancels the attempts still running.
+    let mut attempts = tokio::task::JoinSet::new();
+    let mut last_error = None;
+    loop {
+        // Every round starts the next address: after the stagger, or after one
+        // failed.
+        if let Some(a) = addrs.next() {
+            attempts.spawn(TcpStream::connect(a));
+        }
+        let more = addrs.len() > 0;
+        let Some(done) = (tokio::select! {
+            r = attempts.join_next() => r,
+            _ = tokio::time::sleep(CONNECT_STAGGER), if more => continue,
+        }) else {
+            return Err(last_error.unwrap_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no address found")
+            }));
+        };
+        match done {
+            Ok(Ok(tcp)) => return Ok(tcp),
+            Ok(Err(e)) => last_error = Some(e),
+            Err(e) => last_error = Some(std::io::Error::other(e)),
+        }
+    }
+}
+
 async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Failure> {
-    let tcp = TcpStream::connect((t.url.host.as_str(), t.url.port))
+    let unreachable = |e| {
+        Failure::new(format!(
+            "could not reach {}:{}: {e}",
+            t.url.host, t.url.port
+        ))
+    };
+    let addrs = tokio::net::lookup_host((t.url.host.as_str(), t.url.port))
         .await
-        .map_err(|e| {
-            Failure::new(format!(
-                "could not reach {}:{}: {e}",
-                t.url.host, t.url.port
-            ))
-        })?;
+        .map_err(unreachable)?;
+    let tcp = connect_first(addrs.collect()).await.map_err(unreachable)?;
     io::tune(&tcp);
     let written = Arc::new(AtomicU64::new(0));
     let aborter = Aborter::new(&tcp, written.clone());
@@ -932,6 +1008,58 @@ mod tests {
         let written = Arc::new(AtomicU64::new(0));
         let aborter = Aborter::new(&tcp, written.clone());
         (Box::pin(Counted::new(tcp, written)), aborter, far)
+    }
+
+    #[tokio::test]
+    async fn an_address_that_never_answers_does_not_hold_up_the_next() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let working = listener.local_addr().unwrap();
+        // Not routed anywhere: a connection attempt waits until it times out, as
+        // with IPv6 on a network where it does not work.
+        let silent: SocketAddr = "10.255.255.1:9".parse().unwrap();
+        let started = Instant::now();
+        let tcp =
+            tokio::time::timeout(Duration::from_secs(3), connect_first(vec![silent, working]))
+                .await
+                .expect("still waiting on the first address")
+                .unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), working);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // One that fails is followed at once, and all failing is an error.
+        let refused = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let tcp = connect_first(vec![refused, working]).await.unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), working);
+        assert!(connect_first(vec![refused]).await.is_err());
+        assert!(connect_first(Vec::new()).await.is_err());
+    }
+
+    #[test]
+    fn refusals_wait_longer_each_time() {
+        let mut failures = Failures::default();
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            let mut f = Failure {
+                message: "destination refused the stream".into(),
+                refused: true,
+            };
+            waits.push(failures.wait(&mut f).as_secs());
+            if waits.len() == 4 {
+                assert!(
+                    f.message.ends_with("; trying again in 2 min"),
+                    "{}",
+                    f.message
+                );
+            }
+        }
+        assert_eq!(waits, [10, 30, 60, 120, 300, 300]);
+        // Other failures keep the quick schedule, and say nothing more.
+        let mut failures = Failures::default();
+        let mut f = Failure::new("could not reach x");
+        assert_eq!(failures.wait(&mut f), Duration::ZERO);
+        assert_eq!(f.message, "could not reach x");
     }
 
     #[tokio::test]

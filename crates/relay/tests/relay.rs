@@ -232,14 +232,34 @@ async fn network_ingest_requires_a_key() {
     })
     .await;
     assert!(empty_key.is_err(), "an empty key is no key");
+    // One that could be guessed is refused too.
+    let weak = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "0.0.0.0:0".parse().unwrap(),
+        ingest_key: Some("choose-a-secret".into()),
+        ..Default::default()
+    })
+    .await;
+    assert!(matches!(
+        weak,
+        Err(streamdelay_relay::RelayError::WeakIngestKey(_))
+    ));
     let relay = streamdelay_relay::start(RelayConfig {
         ingest_bind: "0.0.0.0:0".parse().unwrap(),
-        ingest_key: Some("k".into()),
+        ingest_key: Some("k".repeat(streamdelay_relay::MIN_INGEST_KEY_LEN)),
         ..Default::default()
     })
     .await
     .unwrap();
     relay.shutdown().await;
+    // Only reachable from this computer, any key will do.
+    let local = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "127.0.0.1:0".parse().unwrap(),
+        ingest_key: Some("k".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    local.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -369,7 +369,8 @@ mod tests {
 
     use super::*;
 
-    const TWITCH: &str = "rtmp://live.twitch.tv/app";
+    /// The default destination.
+    const TWITCH: &str = "rtmps://live.twitch.tv:443/app";
 
     async fn setup(path: Option<PathBuf>) -> (AppState, Arc<MemorySecrets>) {
         let relay = streamdelay_relay::start(RelayConfig {

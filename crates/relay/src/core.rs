@@ -336,6 +336,20 @@ pub(crate) async fn run(
     }
 }
 
+/// Compares a stream key with a guess in constant time, so response timing
+/// reveals neither how much of the guess was right nor the key's length: the
+/// comparison runs over the guess, with the key repeated to its length.
+fn same_key(want: &str, got: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let (want, got) = (want.as_bytes(), got.as_bytes());
+    if want.is_empty() {
+        return got.is_empty();
+    }
+    let padded: Vec<u8> = (0..got.len()).map(|i| want[i % want.len()]).collect();
+    let lengths = (want.len() as u64).ct_eq(&(got.len() as u64));
+    bool::from(padded.ct_eq(got) & lengths)
+}
+
 fn redacted(d: &Destination) -> String {
     RtmpUrl::parse(&d.url)
         .map(|u| u.redacted())
@@ -572,13 +586,8 @@ impl Core {
                 untrusted(app)
             )));
         }
-        // Constant time, so response timing does not reveal how much of a guess
-        // was right.
         if let Some(want) = &self.config.ingest_key
-            && !bool::from(subtle::ConstantTimeEq::ct_eq(
-                want.as_bytes(),
-                key.as_bytes(),
-            ))
+            && !same_key(want, key)
         {
             return Err(Rejection {
                 reason: "wrong stream key for stream-delay".into(),
@@ -829,6 +838,25 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_keys_are_compared_exactly() {
+        let key = "0123456789abcdef";
+        assert!(same_key(key, key));
+        for guess in [
+            "",
+            "0",
+            "0123456789abcde",
+            "0123456789abcdeF",
+            "0123456789abcdef0",
+            // The key twice: the comparison repeats the key to the guess's length.
+            "0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(!same_key(key, guess), "{guess}");
+        }
+        assert!(same_key("", ""));
+        assert!(!same_key("", "x"));
+    }
 
     #[test]
     fn text_from_strangers_is_kept_short_and_on_one_line() {

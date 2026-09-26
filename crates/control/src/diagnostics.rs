@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -216,7 +217,73 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
     {
         out = out.replace(home, "~");
     }
+    mask_public_ips(&out)
+}
+
+/// Replaces public IP addresses in `text` (the streamer's home address on a
+/// server, anyone's who connected) with `<public IP xxxx>`: a tag that is the
+/// same for the same address within this run, so connections can still be told
+/// apart, but does not give the address away. Local and private ones stay.
+fn mask_public_ips(text: &str) -> String {
+    let ip_char = |c: char| c.is_ascii_hexdigit() || c == ':' || c == '.';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(ip_char) {
+        out.push_str(&rest[..start]);
+        let run = &rest[start..];
+        let end = run.find(|c| !ip_char(c)).unwrap_or(run.len());
+        let (candidate, tail) = run[..end].split_at(ip_end(&run[..end]));
+        match candidate.parse::<IpAddr>() {
+            Ok(ip) if is_public(ip) => out.push_str(&ip_tag(ip)),
+            _ => out.push_str(candidate),
+        }
+        out.push_str(tail);
+        rest = &run[end..];
+    }
+    out.push_str(rest);
     out
+}
+
+/// Where the address in `run` ends: before a trailing `:port` of an IPv4 address,
+/// or a full stop that ends a sentence.
+fn ip_end(run: &str) -> usize {
+    let run = run.trim_end_matches('.');
+    match run.rsplit_once(':') {
+        Some((v4, port))
+            if v4.parse::<Ipv4Addr>().is_ok() && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            v4.len()
+        }
+        _ => run.len(),
+    }
+}
+
+fn is_public(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                // Carrier-grade NAT (100.64.0.0/10).
+                || (a == 100 && (64..128).contains(&b)))
+        }
+        // Global unicast (2000::/3), which unique-local and link-local are not.
+        IpAddr::V6(v6) => v6.segments()[0] & 0xe000 == 0x2000,
+    }
+}
+
+fn ip_tag(ip: IpAddr) -> String {
+    use std::hash::BuildHasher;
+    // Random for each run: without it the tag could be matched to an address by
+    // trying them all.
+    static SALT: OnceLock<std::collections::hash_map::RandomState> = OnceLock::new();
+    let hash = SALT.get_or_init(Default::default).hash_one(ip);
+    format!("<public IP {:04x}>", hash & 0xffff)
 }
 
 /// `<digits>_<something>`: what follows `live_` in a Twitch stream key.
@@ -324,6 +391,31 @@ mod tests {
         assert!(r.contains("token=<redacted>&x=1"));
         // Too-short values are not blindly replaced everywhere.
         assert!(r.ends_with("abc"));
+    }
+
+    #[test]
+    fn public_ip_addresses_are_masked() {
+        let text = "encoder connected peer=203.0.113.9:51234; from 198.51.100.7. \
+                    [2a01:4f8::7]:1935 and 2a01:4f8::7 again, 8.8.8.8, ::ffff:8.8.4.4";
+        let r = redact(text, &[]);
+        for ip in ["51234", "1935"] {
+            assert!(r.contains(ip), "port {ip} kept: {r}");
+        }
+        for ip in ["2a01", "8.8.8.8", "8.8.4.4"] {
+            assert!(!r.contains(ip), "{ip} in {r}");
+        }
+        // Documentation addresses are not real ones, so they stay.
+        assert!(r.contains("203.0.113.9") && r.contains("198.51.100.7"));
+        // The same address gets the same tag.
+        let tag = ip_tag("2a01:4f8::7".parse().unwrap());
+        assert_eq!(r.matches(&tag).count(), 2, "{r}");
+        assert!(r.contains(&format!("[{tag}]:1935")), "{r}");
+        // Local, private and link-local ones, and things that only look similar,
+        // stay.
+        let kept = "127.0.0.1:1935 192.168.1.20 10.0.0.5 172.16.3.4 100.64.1.1 \
+                    169.254.1.1 ::1 fe80::1 fd12:3456::1 0.0.0.0 version 0.3.1 \
+                    at 12:34:56 hash deadbeef build 10.0.19045.1";
+        assert_eq!(redact(kept, &[]), kept);
     }
 
     #[test]

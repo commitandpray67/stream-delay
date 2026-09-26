@@ -1,6 +1,6 @@
 //! RTMP ingest server: accepts the encoder's publish connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,13 @@ const MAX_CONNECTIONS_PER_IP: usize = 4;
 /// network-reachable ingest key from being guessed.
 const MAX_BAD_KEYS: u32 = 5;
 const BAD_KEY_COOLDOWN: Duration = Duration::from_secs(60);
+/// Wrong keys from all addresses together within [`BAD_KEY_WINDOW`] that mean
+/// someone is guessing from many: then each address gets one try, and waits
+/// [`ATTACK_COOLDOWN`] after it. Addresses that sent no wrong key (the
+/// streamer's encoder) are never held up.
+const MAX_BAD_KEYS_OVERALL: usize = 20;
+const BAD_KEY_WINDOW: Duration = Duration::from_secs(60);
+const ATTACK_COOLDOWN: Duration = Duration::from_secs(600);
 /// Addresses whose wrong keys are remembered at once.
 const MAX_TRACKED_ADDRESSES: usize = 4096;
 
@@ -205,38 +212,96 @@ impl Drop for ConnSlot {
     }
 }
 
-/// Wrong stream keys per address.
+/// Wrong stream keys per address, and from all addresses together.
 #[derive(Clone, Default)]
-struct BadKeys(Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>);
+struct BadKeys(Arc<Mutex<BadKeyLog>>);
+
+#[derive(Default)]
+struct BadKeyLog {
+    /// Per address: how many in a row, and when the last came.
+    per_addr: HashMap<IpAddr, (u32, Instant)>,
+    /// When the recent ones came, from any address (within [`BAD_KEY_WINDOW`]).
+    recent: VecDeque<Instant>,
+}
+
+impl BadKeyLog {
+    /// Guessing from many addresses at once: each gets fewer tries, for longer.
+    fn under_attack(&mut self, now: Instant) -> bool {
+        while self
+            .recent
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= BAD_KEY_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        self.recent.len() >= MAX_BAD_KEYS_OVERALL
+    }
+
+    /// Tries per address, and how long one that used them up waits.
+    fn limits(&mut self, now: Instant) -> (u32, Duration) {
+        if self.under_attack(now) {
+            (1, ATTACK_COOLDOWN)
+        } else {
+            (MAX_BAD_KEYS, BAD_KEY_COOLDOWN)
+        }
+    }
+}
 
 impl BadKeys {
     /// True while `addr` has used up its tries.
     fn blocked(&self, addr: IpAddr) -> bool {
-        self.0.lock().is_ok_and(|m| {
-            m.get(&addr)
-                .is_some_and(|(n, last)| *n >= MAX_BAD_KEYS && last.elapsed() < BAD_KEY_COOLDOWN)
-        })
-    }
-
-    /// Records a wrong key from `addr`. Returns true when this one used up its
-    /// tries.
-    fn record(&self, addr: IpAddr) -> bool {
-        let Ok(mut m) = self.0.lock() else {
+        let Ok(mut log) = self.0.lock() else {
             return false;
         };
         let now = Instant::now();
-        // An address that has kept quiet for the cooldown starts afresh.
-        m.retain(|_, (_, last)| now.duration_since(*last) < BAD_KEY_COOLDOWN);
-        if m.len() >= MAX_TRACKED_ADDRESSES
-            && !m.contains_key(&addr)
-            && let Some(oldest) = m.iter().min_by_key(|(_, (_, t))| *t).map(|(a, _)| *a)
-        {
-            m.remove(&oldest);
+        let (tries, cooldown) = log.limits(now);
+        log.per_addr
+            .get(&addr)
+            .is_some_and(|(n, last)| *n >= tries && now.duration_since(*last) < cooldown)
+    }
+
+    /// Records a wrong key from `addr`. Returns how long it has to wait, when this
+    /// one used up its tries.
+    fn record(&self, addr: IpAddr) -> Option<Duration> {
+        let Ok(mut log) = self.0.lock() else {
+            return None;
+        };
+        let now = Instant::now();
+        let before = log.under_attack(now);
+        // The latest ones, enough to tell.
+        if log.recent.len() >= MAX_BAD_KEYS_OVERALL {
+            log.recent.pop_front();
         }
-        let entry = m.entry(addr).or_insert((0, now));
+        log.recent.push_back(now);
+        if !before && log.under_attack(now) {
+            warn!(
+                "wrong stream keys from many addresses: someone may be guessing the ingest \
+                 key; each address now gets one try every {} min",
+                ATTACK_COOLDOWN.as_secs() / 60
+            );
+        }
+        // Remembered as long as they may count.
+        log.per_addr
+            .retain(|_, (_, last)| now.duration_since(*last) < ATTACK_COOLDOWN);
+        if log.per_addr.len() >= MAX_TRACKED_ADDRESSES
+            && !log.per_addr.contains_key(&addr)
+            && let Some(oldest) = log
+                .per_addr
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(a, _)| *a)
+        {
+            log.per_addr.remove(&oldest);
+        }
+        let (tries, cooldown) = log.limits(now);
+        let entry = log.per_addr.entry(addr).or_insert((0, now));
+        // An address that kept quiet for the cooldown starts afresh.
+        if now.duration_since(entry.1) >= BAD_KEY_COOLDOWN {
+            entry.0 = 0;
+        }
         entry.0 += 1;
         entry.1 = now;
-        entry.0 == MAX_BAD_KEYS
+        (entry.0 == tries).then_some(cooldown)
     }
 }
 
@@ -388,12 +453,12 @@ async fn handle(
                             let ip = peer.ip().to_canonical();
                             if rejection.bad_key
                                 && !ip.is_loopback()
-                                && bad_keys.record(addr_key(ip))
+                                && let Some(wait) = bad_keys.record(addr_key(ip))
                             {
                                 warn!(
                                     %peer,
                                     "too many wrong stream keys from this address; refusing it for {} s",
-                                    BAD_KEY_COOLDOWN.as_secs()
+                                    wait.as_secs()
                                 );
                             }
                             // Answer slowly: with the per-address limits, one address
@@ -505,17 +570,44 @@ mod tests {
         let a: IpAddr = "192.0.2.7".parse().unwrap();
         let b: IpAddr = "192.0.2.8".parse().unwrap();
         for i in 1..MAX_BAD_KEYS {
-            assert!(!bad.record(a), "on hold after {i}");
+            assert!(bad.record(a).is_none(), "on hold after {i}");
             assert!(!bad.blocked(a));
         }
-        assert!(bad.record(a), "the last try should put it on hold");
+        assert_eq!(
+            bad.record(a),
+            Some(BAD_KEY_COOLDOWN),
+            "the last try should put it on hold"
+        );
         assert!(bad.blocked(a));
         assert!(!bad.blocked(b), "other addresses are not affected");
         // Addresses that stay quiet are forgotten.
-        if let Ok(mut m) = bad.0.lock() {
-            m.get_mut(&a).unwrap().1 = Instant::now() - BAD_KEY_COOLDOWN;
+        if let Ok(mut log) = bad.0.lock() {
+            log.per_addr.get_mut(&a).unwrap().1 = Instant::now() - BAD_KEY_COOLDOWN;
         }
         assert!(!bad.blocked(a));
+    }
+
+    #[test]
+    fn guessing_from_many_addresses_leaves_each_one_try() {
+        let bad = BadKeys::default();
+        let addr = |i: u32| IpAddr::from(std::net::Ipv4Addr::from(0xc633_6400 + i));
+        // Each stays within its own tries...
+        for i in 0..MAX_BAD_KEYS_OVERALL as u32 - 1 {
+            assert!(bad.record(addr(i)).is_none());
+        }
+        // ...but together they are too many: now one wrong key is enough.
+        let late = addr(1000);
+        assert_eq!(bad.record(late), Some(ATTACK_COOLDOWN));
+        assert!(bad.blocked(late));
+        assert!(bad.blocked(addr(0)));
+        // An address that sent no wrong key, such as the streamer's encoder, is not
+        // held up.
+        assert!(!bad.blocked(addr(2000)));
+        // Once the guessing stops, the usual limits are back.
+        if let Ok(mut log) = bad.0.lock() {
+            log.recent.clear();
+        }
+        assert!(!bad.blocked(addr(0)));
     }
 
     #[test]

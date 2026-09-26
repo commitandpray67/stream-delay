@@ -116,6 +116,12 @@ pub enum RelayError {
          could stream to your channel"
     )]
     IngestKeyRequired(SocketAddr),
+    #[error(
+        "the RTMP input on {0} can be reached from other devices, so its ingest key must \
+         be at least {MIN_INGEST_KEY_LEN} characters long, or it could be guessed; leave it \
+         unset to use a generated one"
+    )]
+    WeakIngestKey(SocketAddr),
     #[error("the relay has shut down")]
     Closed,
 }
@@ -296,14 +302,24 @@ impl RelayHandle {
     }
 }
 
+/// Shortest ingest key accepted when the RTMP input can be reached from other
+/// devices, as for API tokens: generated keys have 32 characters.
+pub const MIN_INGEST_KEY_LEN: usize = 16;
+
 /// Starts the relay on the current tokio runtime.
 pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     if let Some(d) = &config.destination {
         RtmpUrl::parse(&d.url)?;
     }
     config.ingest_key = config.ingest_key.filter(|k| !k.is_empty());
-    if config.ingest_key.is_none() && !config.ingest_bind.ip().to_canonical().is_loopback() {
-        return Err(RelayError::IngestKeyRequired(config.ingest_bind));
+    if !config.ingest_bind.ip().to_canonical().is_loopback() {
+        match &config.ingest_key {
+            None => return Err(RelayError::IngestKeyRequired(config.ingest_bind)),
+            Some(k) if k.chars().count() < MIN_INGEST_KEY_LEN => {
+                return Err(RelayError::WeakIngestKey(config.ingest_bind));
+            }
+            Some(_) => {}
+        }
     }
     let listener = TcpListener::bind(config.ingest_bind)
         .await

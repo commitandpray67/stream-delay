@@ -69,7 +69,7 @@ Commands return an acknowledgement:
     "warnings": []
   },
   "ingest": { "listen": "127.0.0.1:1935", "connected": true, "peer": "127.0.0.1:53546", "app": "live", "last_error": null },
-  "egress": { "status": "live", "destination": "rtmp://live.twitch.tv/app", "last_error": null,
+  "egress": { "status": "live", "destination": "rtmps://live.twitch.tv:443/app", "last_error": null,
               "bitrate_kbps": 6150, "backlog_bytes": 0, "reconnects": 0 },
   "ended": false,
   "ending": false

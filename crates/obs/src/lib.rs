@@ -74,13 +74,14 @@ pub struct StreamSettings {
 }
 
 impl StreamSettings {
-    /// The server OBS streams to, for display.
+    /// The server OBS streams to, for display: without a login, query or stream
+    /// key someone may have put in the URL (see [`shown_server`]).
     pub fn server(&self) -> Option<String> {
-        let server = self.settings.get("server").and_then(Value::as_str)?;
+        let server = shown_server(self.settings.get("server").and_then(Value::as_str)?);
         let service = self.settings.get("service").and_then(Value::as_str);
         Some(match service {
             Some(s) if self.service_type == "rtmp_common" => format!("{s} ({server})"),
-            _ => server.to_string(),
+            _ => server,
         })
     }
 
@@ -103,8 +104,12 @@ impl StreamSettings {
             .get("server")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let twitch = service.eq_ignore_ascii_case("twitch") || server.contains("twitch.tv");
-        if twitch { self.key() } else { None }
+        let listed = self.service_type == "rtmp_common" && service.eq_ignore_ascii_case("twitch");
+        if listed || twitch_host(server) {
+            self.key()
+        } else {
+            None
+        }
     }
 
     /// True if OBS already streams to `server` (our ingest address).
@@ -116,6 +121,59 @@ impl StreamSettings {
                 .and_then(Value::as_str)
                 .is_some_and(|s| s.trim_end_matches('/') == server.trim_end_matches('/'))
     }
+}
+
+/// Splits a server URL into its scheme (with `://`), the host (and port), and
+/// whether a login, more path after the application, or a query follow.
+fn server_parts(server: &str) -> (&str, &str, &str, bool, bool) {
+    let (scheme, rest) = match server.find("://") {
+        Some(i) => server.split_at(i + 3),
+        None => ("", server),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(end);
+    let (login, host) = match authority.rsplit_once('@') {
+        Some((_, host)) => (true, host),
+        None => (false, authority),
+    };
+    let (path, query) = match path.find(['?', '#']) {
+        Some(i) => (&path[..i], true),
+        None => (path, false),
+    };
+    (scheme, host, path, login, query)
+}
+
+/// A server URL for display: a login (`user:password@`), a query and anything
+/// after the application (where a stream key may have been pasted) are replaced
+/// by `…`.
+pub fn shown_server(server: &str) -> String {
+    let (scheme, host, path, login, query) = server_parts(server.trim());
+    let mut segments = path.split('/').filter(|s| !s.is_empty());
+    let mut shown = format!("{scheme}{}{host}", if login { "…@" } else { "" });
+    if let Some(app) = segments.next() {
+        shown.push('/');
+        shown.push_str(app);
+    }
+    if segments.next().is_some() {
+        shown.push_str("/…");
+    }
+    if query {
+        shown.push_str("?…");
+    }
+    shown
+}
+
+/// True if `server` is one of Twitch's ingest servers, by its host.
+fn twitch_host(server: &str) -> bool {
+    let (_, host, ..) = server_parts(server.trim());
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    ["twitch.tv", "live-video.net"]
+        .iter()
+        .any(|d| host == *d || host.strip_suffix(d).is_some_and(|p| p.ends_with('.')))
 }
 
 /// Snapshot of OBS for the wizard.
@@ -330,6 +388,67 @@ mod tests {
             settings: json!({"service": "YouTube - RTMPS", "server": "x", "key": "yt"}),
         };
         assert_eq!(youtube.twitch_key(), None);
+    }
+
+    fn custom(server: &str) -> StreamSettings {
+        StreamSettings {
+            service_type: "rtmp_custom".into(),
+            settings: json!({"server": server, "key": "private"}),
+        }
+    }
+
+    #[test]
+    fn twitch_is_told_by_the_host() {
+        for server in [
+            "rtmp://live.twitch.tv/app",
+            "rtmps://live.twitch.tv:443/app",
+            "rtmps://ingest.global-contribute.live-video.net/app",
+            "rtmp://fra05.contribute.live-video.net/app/",
+        ] {
+            assert_eq!(custom(server).twitch_key(), Some("private"), "{server}");
+        }
+        for server in [
+            "rtmps://ingest.example.com/twitch.tv/relay",
+            "rtmp://twitch.tv.example.net/live",
+            "rtmp://ingest.example.com/live?target=twitch.tv",
+            "rtmp://nottwitch.tv/app",
+            "rtmp://live.twitch.tv@evil.example/app",
+        ] {
+            assert_eq!(custom(server).twitch_key(), None, "{server}");
+        }
+        // A listed service only counts as such.
+        let stale = StreamSettings {
+            service_type: "rtmp_custom".into(),
+            settings: json!({"service": "Twitch", "server": "rtmp://ingest.example.com/live", "key": "k"}),
+        };
+        assert_eq!(stale.twitch_key(), None);
+    }
+
+    #[test]
+    fn the_server_shown_has_no_credentials() {
+        for (server, shown) in [
+            ("rtmp://live.twitch.tv/app", "rtmp://live.twitch.tv/app"),
+            ("rtmp://127.0.0.1:1935/live/", "rtmp://127.0.0.1:1935/live"),
+            (
+                "rtmp://user:SECRET@host.example/live",
+                "rtmp://…@host.example/live",
+            ),
+            (
+                "rtmp://host.example/live?token=SECRET",
+                "rtmp://host.example/live?…",
+            ),
+            (
+                "rtmp://host.example/app/SECRET_live_key",
+                "rtmp://host.example/app/…",
+            ),
+            (
+                "rtmp://host.example/app#SECRET",
+                "rtmp://host.example/app?…",
+            ),
+            ("auto", "auto"),
+        ] {
+            assert_eq!(custom(server).server().as_deref(), Some(shown));
+        }
     }
 
     #[tokio::test]

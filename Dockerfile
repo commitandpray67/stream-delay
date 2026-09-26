@@ -1,11 +1,13 @@
 # Headless stream-delay (streamdelayd) for servers and two-PC setups.
 #
-#   docker run -p 1935:1935 -p 127.0.0.1:7788:7788 -v stream-delay:/data \
-#     -e STREAMDELAY_INGEST_KEY=choose-a-secret ghcr.io/commitandpray67/stream-delay
+#   docker run -d --name stream-delay -p 1935:1935 -p 127.0.0.1:7788:7788 \
+#     -v stream-delay:/data ghcr.io/commitandpray67/stream-delay
+#   docker exec stream-delay streamdelayd urls
 #
 # Then stream from OBS to rtmp://<host>:1935/live with the ingest key, and open
-# the dashboard link printed in the logs (`docker logs`). Without
-# STREAMDELAY_INGEST_KEY a key is generated, saved in /data and printed there too.
+# the dashboard link `streamdelayd urls` shows (they are not written to the logs).
+# The ingest key is generated and saved in /data; to choose one, set
+# STREAMDELAY_INGEST_KEY to at least 16 characters.
 # Port 7788 (dashboard and API, plain HTTP) stays on this machine; see the user
 # guide before publishing it more widely.
 

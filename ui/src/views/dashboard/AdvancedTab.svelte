@@ -115,7 +115,7 @@
       <h2>Diagnostics</h2>
       <p class="muted small">
         When reporting a problem, attach this file to your issue. It holds the version, your settings, the current
-        state and recent log lines. Stream keys, passwords and the API token are removed.
+        state and recent log lines. Stream keys, passwords, the API token and public IP addresses are removed.
       </p>
       <div class="row">
         <button type="button" onclick={downloadDiagnostics}>Download diagnostics</button>

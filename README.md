@@ -53,8 +53,8 @@ With Docker:
 ```sh
 docker run -d --name stream-delay --restart unless-stopped \
   -p 1935:1935 -p 127.0.0.1:7788:7788 -v stream-delay:/data \
-  -e STREAMDELAY_INGEST_KEY=choose-a-secret \
   ghcr.io/commitandpray67/stream-delay
+docker exec stream-delay streamdelayd urls   # the dashboard link and the OBS key
 ```
 
 To run stream-delay on another computer than OBS, see [Installing: headless and two-PC setups](https://commitandpray67.github.io/stream-delay/install.html#headless-servers-second-pc-advanced-users).
