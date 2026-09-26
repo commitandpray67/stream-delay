@@ -1145,7 +1145,19 @@ impl Engine {
                     break;
                 }
                 let delay = self.out.delay.max(now - arrival);
+                // Connecting to the destination takes a moment, so a short delay
+                // can already have passed when the broadcast starts. Catch up to
+                // it at the next keyframe rather than keep the lag for good:
+                // nobody has seen more than the first moments yet.
+                let late = !self.out.started
+                    && self.out.pending == Pending::None
+                    && delay >= self.out.target + 500 * MS;
                 self.splice_to(k, delay);
+                if late {
+                    self.set_pending(Pending::Reduce {
+                        delay: self.out.target,
+                    });
+                }
                 if self.out.end_mark.is_some_and(|m| self.out.next_seq > m) {
                     break;
                 }

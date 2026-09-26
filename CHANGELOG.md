@@ -6,6 +6,13 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A stream started with no delay (or a short one) showed "Delayed 2 s" and the
+  overlay's "Stream delay: 2 s" for the whole broadcast: connecting to Twitch
+  takes a moment after OBS starts sending, and the broadcast kept that lag. It
+  now catches up at the next keyframe, a second or two after it starts.
+
 ## [0.3.1] - 2026-09-25
 
 ### Changed

@@ -393,6 +393,76 @@ fn go_live_now_skips_to_next_keyframe() {
 }
 
 #[test]
+fn a_destination_that_connects_late_catches_up_at_the_next_keyframe() {
+    // Connecting to the destination takes a moment after the encoder starts, and
+    // the output starts on a keyframe: the broadcast starts that far behind.
+    let mut s = Sim::new(config());
+    s.advance(1_500 * MS);
+    let connected = s.now;
+    s.connect();
+    s.advance(10 * MS);
+    assert!(
+        (1_400..=1_600).contains(&effective(&s)),
+        "{:?}",
+        s.snapshot()
+    );
+    // It catches up at the next keyframe, instead of keeping the lag for good.
+    s.advance(SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Live, "{snap:?}");
+    assert!(snap.effective_ms < 100, "{snap:?}");
+    assert_eq!(snap.target_ms, 0);
+    // What aired late was only the start, up to that keyframe.
+    for (sent, info) in s.media_sent() {
+        if sent.at - info.arrival > 100 * MS {
+            assert!(info.arrival < connected, "late from {}", info.arrival);
+        }
+    }
+    s.advance(20 * SEC);
+    assert!(effective(&s) < 100);
+    assert_eq!(s.snapshot().output.splices, 1);
+    s.check_invariants();
+}
+
+#[test]
+fn a_late_destination_catches_up_to_the_delay_asked_for() {
+    let mut s = Sim::new(config());
+    s.cmd(Command::SetDelay {
+        ms: 1_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(3_500 * MS);
+    s.connect();
+    // The newest keyframe that is due (at 2 s) is 1.5 s old.
+    assert!(
+        (1_400..=1_600).contains(&effective(&s)),
+        "{:?}",
+        s.snapshot()
+    );
+    s.advance(3 * SEC);
+    let snap = s.snapshot();
+    assert!((1_000..=1_100).contains(&snap.effective_ms), "{snap:?}");
+    assert_eq!(snap.phase, Phase::Delayed);
+    s.check_invariants();
+}
+
+#[test]
+fn a_destination_ready_in_time_starts_at_the_delay_without_a_splice() {
+    let mut s = Sim::new(config());
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(8 * SEC);
+    s.connect();
+    s.advance(20 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.effective_ms, 10_000, "{snap:?}");
+    assert_eq!(snap.output.splices, 0);
+    s.check_invariants();
+}
+
+#[test]
 fn go_live_after_air_sends_everything_up_to_the_mark() {
     let mut s = live_sim();
     s.cmd(Command::SetDelay {
