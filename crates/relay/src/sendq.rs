@@ -234,16 +234,17 @@ mod os {
             .checked_sub(u64::from(info.BytesRetrans))
             .filter(|&sent| sent <= written)?;
         // While the other end's window is (nearly) closed, what Windows probes
-        // it with counts as sent, and not in flight, though the other end
-        // drops it: tens of bytes seen, beyond what it received. Up to a
-        // segment more counts as unsent then.
+        // it with counts as sent but not as in flight, though the other end
+        // drops it: tens of bytes seen, beyond what it received. It is sent,
+        // and sent again until taken, so up to a segment more counts as not
+        // acknowledged then.
         let probed = match info.SndWnd < info.Mss {
-            true => u64::from(info.Mss).min(sent),
+            true => u64::from(info.Mss),
             false => 0,
         };
         Some(SendQueue {
-            unsent: written - sent + probed,
-            unacked: u64::from(info.BytesInFlight),
+            unsent: written - sent,
+            unacked: (u64::from(info.BytesInFlight) + probed).min(sent),
         })
     }
 
@@ -461,8 +462,9 @@ mod tests {
         check_sent(&sock, &server, written, read, "after reading a little");
     }
 
-    /// Checks that no more of `written` counts as sent than the other end has:
-    /// `read` of it, and what waits for it to read.
+    /// Checks that no more of `written` counts as delivered (sent and
+    /// acknowledged) than the other end has: `read` of it, and what waits for
+    /// it to read. Except on Windows, nor as sent.
     fn check_sent(sock: &socket2::Socket, server: &TcpStream, written: u64, read: u64, when: &str) {
         // Where the OS cannot tell, a dump resets the connection.
         let Some(q) = query(sock, written) else {
@@ -470,9 +472,17 @@ mod tests {
         };
         let raw = describe(sock);
         let waiting = waiting(server, read);
+        let delivered = written.saturating_sub(q.unsent + q.unacked);
+        assert!(
+            delivered <= read + waiting,
+            "{when}: {q:?} of {written} written counts {delivered} as delivered, but the other \
+             end has {read} read and {waiting} waiting; {raw}"
+        );
+        // Windows counts what it probes a closed window with as sent, though
+        // the other end drops it.
         let sent = written.saturating_sub(q.unsent);
         assert!(
-            sent <= read + waiting,
+            cfg!(windows) || sent <= read + waiting,
             "{when}: {q:?} of {written} written counts {sent} as sent, but the other end has \
              {read} read and {waiting} waiting; {raw}"
         );

@@ -87,10 +87,11 @@ All notable changes to stream-delay are listed here. The format follows
   delay changes are unchanged. A change soon after a dump or several encoder
   restarts in a row can still end up a few seconds over; pressing the preset
   again usually fixes it.
-- On Windows, a dump while the destination was barely taking data could count
-  a few bytes more as delivered than it had: the end of one message, which then
-  aired after the dump. Windows counts what it probes a closed window with as
-  sent; up to a network packet more now counts as not sent then.
+- On Windows, a dump that reset the connection to a destination barely taking
+  data could count one message more as delivered than the destination had (its
+  last few bytes were missing), and a rewind dump could then air it after the
+  dump. Windows counts what it probes a closed window with as sent; up to a
+  network packet more now counts as not yet acknowledged then.
 
 ## [0.3.1] - 2026-09-25
 
