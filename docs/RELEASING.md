@@ -87,5 +87,6 @@ The release workflow checks the tagged commit, but only repository rules stop so
 
 1. A **branch** ruleset for the default branch: require a pull request (or at least block force pushes and deletion) and require the `CI` checks to pass.
 2. A **tag** ruleset for `v*`: restrict creation, updates and deletion to maintainers, so a release tag cannot be moved to another commit after the fact.
+3. In the branch ruleset, **Require review from Code Owners**. [`.github/CODEOWNERS`](../.github/CODEOWNERS) names the maintainer for the workflows and release scripts, the updater's public key, the desktop app's settings and permissions, the Dockerfiles, `deny.toml` and this document, so a change to any of them needs the maintainer's approval. GitHub never counts a pull request author's own approval: with a single maintainer, their own changes to these files need a second code owner or a ruleset bypass for pull requests.
 
 Combined with the `release` environment's tag rule (and optionally its required reviewers), a release then needs a reviewed, CI-checked commit and a maintainer's tag, and publishes nothing until the draft is published by hand.

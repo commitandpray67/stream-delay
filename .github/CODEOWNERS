@@ -1,0 +1,27 @@
+# Files that decide how stream-delay is built, signed and released, and what
+# the desktop app's web view may do. Changing them needs the maintainer's review
+# when the main branch ruleset requires review from Code Owners (see
+# docs/RELEASING.md, "Protecting main and release tags"). The last matching
+# line decides who owns a file.
+
+# Workflows, the release scripts they run, issue templates, and this file.
+/.github/                                @commitandpray67
+
+# The updater's public key: a release built with another one would accept
+# updates signed by whoever holds the matching private key.
+/apps/desktop/updater.pub                @commitandpray67
+
+# The desktop app's settings (updater, content security policy) and what its
+# web view may call in the app.
+/apps/desktop/src-tauri/tauri.conf.json  @commitandpray67
+/apps/desktop/src-tauri/capabilities/    @commitandpray67
+
+# The container images: built from source, and packaged from release binaries.
+/Dockerfile                              @commitandpray67
+/Dockerfile.release                      @commitandpray67
+
+# Which dependencies, licenses and advisories are allowed.
+/deny.toml                               @commitandpray67
+
+# The release process and the protections it relies on.
+/docs/RELEASING.md                       @commitandpray67
