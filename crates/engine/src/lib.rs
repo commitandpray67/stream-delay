@@ -891,6 +891,13 @@ impl Engine {
             let delay = now.saturating_sub(arrival);
             if delay > self.out.delay {
                 self.splice_to(k, delay);
+                // Before a gap (a dump, the encoder gone): the next keyframe was
+                // too recent, so this one is well over. Come down to the delay
+                // asked for once the next one is old enough, skipping only what
+                // viewers saw before this rewind.
+                if newest.is_some() && self.gap_after(k, delay.saturating_sub(d)) {
+                    self.set_pending(Pending::Reduce { delay: d });
+                }
             }
         }
     }
@@ -949,6 +956,24 @@ impl Engine {
         self.count_sessions();
     }
 
+    /// For a reduction: true when skipping ahead to keyframe `k`, `over` past the
+    /// delay asked for, should wait for the next keyframe instead. Rounding back
+    /// to a keyframe leaves up to a keyframe interval over; more means a gap after
+    /// `k` (a dump threw that stretch away, or the encoder was gone), and the
+    /// next keyframe, after it, will soon give the delay asked for. Waiting keeps
+    /// the higher delay a little longer, but the skip then lands on it.
+    fn gap_after(&self, k: u64, over: Time) -> bool {
+        let arrival = |s: u64| self.entry(s).map(|e| e.arrival);
+        let interval = self
+            .syncs
+            .iter()
+            .rev()
+            .find(|&&s| s < k)
+            .and_then(|&p| Some(arrival(k)?.saturating_sub(arrival(p)?)));
+        let later = self.syncs.back().is_some_and(|&s| s > k);
+        later && interval.is_some_and(|i| over > i)
+    }
+
     fn newest_sync_arrived_by(&self, t: Option<Time>) -> Option<u64> {
         let t = t?;
         self.syncs
@@ -997,6 +1022,10 @@ impl Engine {
                         && k > self.out.next_seq
                     {
                         let arrival = self.entry(k).map(|e| e.arrival).unwrap_or(now);
+                        let over = now.saturating_sub(arrival).saturating_sub(delay);
+                        if self.gap_after(k, over) {
+                            return;
+                        }
                         self.splice_to(k, now.saturating_sub(arrival));
                         self.out.pending = Pending::None;
                     }

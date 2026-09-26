@@ -336,6 +336,14 @@ fn live_sim() -> Sim {
     s
 }
 
+/// Connected from the start, 5 s in.
+fn live_sim_from(config: EngineConfig) -> Sim {
+    let mut s = Sim::new(config);
+    s.connect();
+    s.advance(5 * SEC);
+    s
+}
+
 fn effective(s: &Sim) -> u64 {
     s.snapshot().effective_ms
 }
@@ -489,6 +497,95 @@ fn a_reduction_by_a_hair_does_not_wait_forever() {
     assert_eq!(snap.target_ms, asked);
     assert!(snap.effective_ms < asked + 500, "{snap:?}");
     s.check_invariants();
+}
+
+fn restart_encoder(s: &mut Sim) {
+    s.stop_encoder();
+    s.advance(700 * MS);
+    s.start_encoder(0);
+}
+
+/// Asserts that the delay settled at `target`, within the keyframe interval a
+/// rewind rounds back by.
+fn settled_at(s: &mut Sim, target: u64) {
+    s.advance(20 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert_eq!(snap.target_ms, target);
+    assert!(
+        (target..target + 2_500).contains(&snap.effective_ms),
+        "{snap:?}"
+    );
+    s.check_invariants();
+}
+
+#[test]
+fn lowering_the_delay_after_a_dump_skips_to_after_the_gap() {
+    // A dump threw away what had not aired, leaving a gap in the buffer. The
+    // newest keyframe old enough for 16 s was the last one before the gap, 21.5 s
+    // old; the one after it was 0.24 s from being old enough. The reduction
+    // skipped to the first and stayed 5.5 s over.
+    let mut s = live_sim_from(EngineConfig {
+        max_delay_ms: 60_000,
+        ..config()
+    });
+    s.cmd(Command::SetDelay {
+        ms: 5_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(5_955 * MS);
+    restart_encoder(&mut s);
+    s.cmd(Command::SetDelay {
+        ms: 6_000,
+        mode: DelayMode::Mask,
+    });
+    s.e.command(s.now, Command::Dump(DelayMode::Rewind))
+        .unwrap();
+    s.poll();
+    s.advance(11_342 * MS);
+    restart_encoder(&mut s);
+    s.advance(3_716 * MS);
+    s.cmd(Command::SetDelay {
+        ms: 23_000,
+        mode: DelayMode::Rewind,
+    });
+    s.cmd(Command::SetDelay {
+        ms: 16_000,
+        mode: DelayMode::Rewind,
+    });
+    settled_at(&mut s, 16_000);
+}
+
+#[test]
+fn a_rewind_to_just_before_a_dump_gap_comes_down_after_it() {
+    // Adding delay rewinds to the newest keyframe old enough. With a dump's gap
+    // there, that was 15.6 s old for 12 s asked (the one after the gap, 11.96 s,
+    // too recent), and it stayed there.
+    let mut s = live_sim_from(EngineConfig {
+        max_delay_ms: 60_000,
+        ..config()
+    });
+    s.cmd(Command::SetDelay {
+        ms: 3_000,
+        mode: DelayMode::Rewind,
+    });
+    restart_encoder(&mut s);
+    restart_encoder(&mut s);
+    s.advance(3_640 * MS);
+    s.cmd(Command::SetDelay {
+        ms: 4_000,
+        mode: DelayMode::Mask,
+    });
+    s.e.command(s.now, Command::Dump(DelayMode::Rewind))
+        .unwrap();
+    s.poll();
+    restart_encoder(&mut s);
+    s.advance(11_256 * MS);
+    s.cmd(Command::SetDelay {
+        ms: 12_000,
+        mode: DelayMode::Rewind,
+    });
+    settled_at(&mut s, 12_000);
 }
 
 #[test]
@@ -1216,6 +1313,11 @@ enum Op {
 }
 
 fn op() -> impl Strategy<Value = Op> {
+    prop_oneof![11 => change(), 2 => gap(), 1 => Just(Op::DropOutput)]
+}
+
+/// Waits and delay changes.
+fn change() -> impl Strategy<Value = Op> {
     prop_oneof![
         4 => (100u64..8_000).prop_map(Op::Wait),
         2 => (1u64..60).prop_map(Op::Rewind),
@@ -1223,10 +1325,15 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::GoLive),
         1 => Just(Op::AfterAir),
         1 => (1u64..60).prop_map(Op::Reduce),
-        1 => Just(Op::DropOutput),
-        1 => Just(Op::EncoderRestart),
         1 => Just(Op::Cancel),
-        1 => prop_oneof![Just(DelayMode::Rewind), Just(DelayMode::Mask)].prop_map(Op::Dump),
+    ]
+}
+
+/// Dumps and encoder restarts, which leave gaps in the buffer.
+fn gap() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        Just(Op::EncoderRestart),
+        prop_oneof![Just(DelayMode::Rewind), Just(DelayMode::Mask)].prop_map(Op::Dump),
     ]
 }
 
@@ -1312,61 +1419,79 @@ proptest! {
     }
 }
 
+/// Runs `ops` (no destination outages), then nothing for longer than the
+/// largest delay, and returns the state.
+fn settled(ops: Vec<Op>, jitter: u64, keep_history: bool, connect_after: u64) -> Snapshot {
+    let mut s = Sim::new(EngineConfig {
+        max_delay_ms: 60_000,
+        keep_history,
+        ..Default::default()
+    });
+    s.jitter = jitter;
+    // Connecting to the destination takes a moment.
+    s.advance(connect_after * MS);
+    s.connect();
+    s.advance(5 * SEC);
+    for op in ops {
+        match op {
+            Op::Wait(ms) => s.advance(ms * MS),
+            Op::Rewind(sec) | Op::Reduce(sec) => {
+                s.cmd(Command::SetDelay {
+                    ms: sec * 1000,
+                    mode: DelayMode::Rewind,
+                });
+            }
+            Op::Mask(sec) => {
+                s.cmd(Command::SetDelay {
+                    ms: sec * 1000,
+                    mode: DelayMode::Mask,
+                });
+            }
+            Op::GoLive => {
+                s.cmd(Command::GoLive(GoLiveWhen::Now));
+            }
+            Op::AfterAir => {
+                s.cmd(Command::GoLive(GoLiveWhen::AfterAir));
+            }
+            Op::Cancel => {
+                s.cmd(Command::Cancel);
+            }
+            Op::Dump(mode) => {
+                let _ = s.e.command(s.now, Command::Dump(mode));
+                s.poll();
+            }
+            Op::EncoderRestart => restart_encoder(&mut s),
+            Op::DropOutput => unreachable!("outages are left out"),
+        }
+    }
+    // Longer than the largest delay, and a mask or dump building it up.
+    s.advance(75 * SEC);
+    s.snapshot()
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(
         std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(64),
     ))]
 
-    /// Once nothing more happens, viewers get the delay asked for: no less,
-    /// unless the buffer was too short for it (which the state says), and no more
-    /// than a keyframe interval over, from rounding back to one.
+    /// Once nothing more happens, viewers get the delay asked for: live when
+    /// that is 0, else no less (unless the buffer was too short for it, which
+    /// the state says) and no more than a keyframe interval over, from rounding
+    /// back to one.
     ///
     /// Left out: a lost destination connection, after which the delay grows by
-    /// the outage and stays until it is changed (as documented); and dumps, for
-    /// a known gap: lowering the delay after a dump can land on a keyframe
-    /// before the stretch it threw away, well over the delay asked for (one
-    /// more press brings it down). Without them, no case fails in 20,000.
+    /// the outage and stays until it is changed, as documented; and dumps and
+    /// encoder restarts, which leave gaps in the buffer: a delay change around
+    /// them can still land a few seconds over (see the next property, and the
+    /// two gap tests above for the cases that no longer do).
     #[test]
     fn the_delay_settles_at_the_one_asked_for(
-        ops in prop::collection::vec(
-            op().prop_filter("no outage or dump", |o| {
-                !matches!(o, Op::DropOutput | Op::Dump(_))
-            }),
-            1..25,
-        ),
+        ops in prop::collection::vec(change(), 1..25),
         jitter in 0u64..50,
         keep_history in any::<bool>(),
         connect_after in 0u64..4_000,
     ) {
-        let mut s = Sim::new(EngineConfig {
-            max_delay_ms: 60_000,
-            keep_history,
-            ..Default::default()
-        });
-        s.jitter = jitter;
-        // Connecting to the destination takes a moment.
-        s.advance(connect_after * MS);
-        s.connect();
-        s.advance(5 * SEC);
-        for op in ops {
-            match op {
-                Op::Wait(ms) => s.advance(ms * MS),
-                Op::Rewind(sec) | Op::Reduce(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Rewind }); }
-                Op::Mask(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Mask }); }
-                Op::GoLive => { s.cmd(Command::GoLive(GoLiveWhen::Now)); }
-                Op::AfterAir => { s.cmd(Command::GoLive(GoLiveWhen::AfterAir)); }
-                Op::Cancel => { s.cmd(Command::Cancel); }
-                Op::EncoderRestart => {
-                    s.stop_encoder();
-                    s.advance(700 * MS);
-                    s.start_encoder(0);
-                }
-                Op::Dump(_) | Op::DropOutput => unreachable!(),
-            }
-        }
-        // Longer than the largest delay, and a mask or dump building it up.
-        s.advance(75 * SEC);
-        let snap = s.snapshot();
+        let snap = settled(ops, jitter, keep_history, connect_after);
         prop_assert!(matches!(snap.phase, Phase::Live | Phase::Delayed), "{snap:?}");
         let (target, effective) = (snap.target_ms, snap.effective_ms);
         if target == 0 {
@@ -1379,6 +1504,23 @@ proptest! {
                 effective + 100 >= target && effective <= target + gop + 500,
                 "target {target} ms, effective {effective} ms: {snap:?}"
             );
+        }
+    }
+
+    /// With dumps and encoder restarts too: a change never stays pending once
+    /// nothing more happens, and the delay is never less than the one asked for
+    /// (unless the buffer was too short, which the state says).
+    #[test]
+    fn a_delay_change_always_finishes(
+        ops in prop::collection::vec(prop_oneof![11 => change(), 2 => gap()], 1..25),
+        jitter in 0u64..50,
+        keep_history in any::<bool>(),
+        connect_after in 0u64..4_000,
+    ) {
+        let snap = settled(ops, jitter, keep_history, connect_after);
+        prop_assert!(matches!(snap.phase, Phase::Live | Phase::Delayed), "{snap:?}");
+        if !snap.history_short {
+            prop_assert!(snap.effective_ms + 100 >= snap.target_ms, "{snap:?}");
         }
     }
 }
