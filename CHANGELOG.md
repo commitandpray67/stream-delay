@@ -29,7 +29,8 @@ All notable changes to stream-delay are listed here. The format follows
   terminal, not to `docker logs` or a service's log. `streamdelayd urls` shows
   them (`docker exec <container> streamdelayd urls`).
 - The diagnostics file for bug reports masks public IP addresses, such as a
-  server's or those of whoever connected to it.
+  server's or those of whoever connected to it, also where other text is joined
+  to them (`could not reach 8.8.4.4:1935: timed out`, `ip:8.8.4.4`).
 - A destination that refuses the stream (a wrong stream key, for example) is
   tried again after 10 s, 30 s, 1 min and 2 min, then every 5 min, rather than
   every 10 s for as long as OBS streams, and the status says when. A new key or
@@ -54,9 +55,11 @@ All notable changes to stream-delay are listed here. The format follows
 - The OBS setup took any server with "twitch.tv" anywhere in it for Twitch, and
   sent its key there. It now goes by the server's host name.
 - The OBS status on the dashboard showed a login, query or stream key that OBS's
-  server URL contained.
+  server URL contained. A URL whose host cannot be told apart from its login (a
+  password with a `/`, `?` or `#` in it) is shown as `rtmp://…`.
 - An error in the settings file could quote a value in backticks, such as a
-  stream key typed into `key_mode`.
+  stream key typed into `key_mode`, or the part of a value after a quote
+  character in it. Values are left out of these errors entirely.
 - The user guide said the dock link could only change the delay. It controls the
   stream (the delay, Dump buffer, End stream, resuming), so keep it as private as
   the dashboard link.

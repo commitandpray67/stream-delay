@@ -232,30 +232,105 @@ fn mask_public_ips(text: &str) -> String {
         out.push_str(&rest[..start]);
         let run = &rest[start..];
         let end = run.find(|c| !ip_char(c)).unwrap_or(run.len());
-        let (candidate, tail) = run[..end].split_at(ip_end(&run[..end]));
-        match candidate.parse::<IpAddr>() {
-            Ok(ip) if is_public(ip) => out.push_str(&ip_tag(ip)),
-            _ => out.push_str(candidate),
-        }
-        out.push_str(tail);
+        mask_run(&run[..end], &mut out);
         rest = &run[end..];
     }
     out.push_str(rest);
     out
 }
 
-/// Where the address in `run` ends: before a trailing `:port` of an IPv4 address,
-/// or a full stop that ends a sentence.
-fn ip_end(run: &str) -> usize {
-    let run = run.trim_end_matches('.');
-    match run.rsplit_once(':') {
-        Some((v4, port))
-            if v4.parse::<Ipv4Addr>().is_ok() && port.bytes().all(|b| b.is_ascii_digit()) =>
-        {
-            v4.len()
+/// Longest stretch of hex digits, `:` and `.` searched for an IPv6 address: one
+/// with a port and some text joined to it fits.
+const MAX_V6_RUN: usize = 64;
+
+/// Appends `run`, a stretch of hex digits, `:` and `.`, with its public addresses
+/// masked. The text around an address can be part of the stretch
+/// (`ip:8.8.8.8`, `8.8.8.8:1935: timed out`, `ip:2a01:4f8::7`, `hostA8.8.8.8`),
+/// so addresses are looked for inside it rather than taken as all of it.
+fn mask_run(run: &str, out: &mut String) {
+    match public_v6(run) {
+        Some((start, end, ip)) => {
+            mask_v4(&run[..start], out);
+            out.push_str(&ip_tag(ip));
+            mask_v4(&run[end..], out);
         }
-        _ => run.len(),
+        None => mask_v4(run, out),
     }
+}
+
+/// The IPv6 address in `run` and where it is, if it is public (IPv4-mapped ones
+/// included). It ends where the stretch does, before a `:` or `.` that ends it,
+/// and is the longest that parses: from the start of the stretch, else from after
+/// a `:` (`ip:2a01:4f8::7`). The longest decides, so a private address keeps its
+/// tail (`3456::1` of `fd12:3456::1`); a label ending in a hex digit and joined to
+/// an address (`ipv6:2a01:…`) reads as one address with it. An address written
+/// with a port and no brackets reads as a longer address, masked all the same.
+fn public_v6(run: &str) -> Option<(usize, usize, IpAddr)> {
+    if run.len() > MAX_V6_RUN || run.matches(':').count() < 2 {
+        return None;
+    }
+    let end = run.trim_end_matches([':', '.']).len();
+    let (start, ip) = std::iter::once(0)
+        .chain(run.match_indices(':').map(|(i, _)| i + 1))
+        .filter(|&start| start < end)
+        .find_map(|start| {
+            let ip = run[start..end].parse::<std::net::Ipv6Addr>().ok()?;
+            Some((start, IpAddr::V6(ip)))
+        })?;
+    is_public(ip).then_some((start, end, ip))
+}
+
+/// Appends `s` (hex digits, `:` and `.`) with its public IPv4 addresses masked:
+/// four numbers joined by dots that are not part of a longer dotted number (a
+/// version such as `10.0.19045.1`).
+fn mask_v4(s: &str, out: &mut String) {
+    let b = s.as_bytes();
+    let mut copied = 0;
+    let mut i = 0;
+    while i < b.len() {
+        let starts =
+            b[i].is_ascii_digit() && (i == 0 || !(b[i - 1].is_ascii_digit() || b[i - 1] == b'.'));
+        if starts && let Some(len) = dotted_quad(&b[i..]) {
+            let end = i + len;
+            let continues = b.get(end).is_some_and(u8::is_ascii_digit)
+                || (b.get(end) == Some(&b'.') && b.get(end + 1).is_some_and(u8::is_ascii_digit));
+            if let Ok(ip) = s[i..end].parse::<Ipv4Addr>()
+                && !continues
+                && is_public(IpAddr::V4(ip))
+            {
+                out.push_str(&s[copied..i]);
+                out.push_str(&ip_tag(IpAddr::V4(ip)));
+                copied = end;
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&s[copied..]);
+}
+
+/// Length of the `n.n.n.n` (one to three digits each) at the start of `b`.
+fn dotted_quad(b: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    for part in 0..4 {
+        if part > 0 {
+            if b.get(i) != Some(&b'.') {
+                return None;
+            }
+            i += 1;
+        }
+        let digits = b[i..]
+            .iter()
+            .take(3)
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            return None;
+        }
+        i += digits;
+    }
+    Some(i)
 }
 
 fn is_public(ip: IpAddr) -> bool {
@@ -282,7 +357,10 @@ fn ip_tag(ip: IpAddr) -> String {
     // Random for each run: without it the tag could be matched to an address by
     // trying them all.
     static SALT: OnceLock<std::collections::hash_map::RandomState> = OnceLock::new();
-    let hash = SALT.get_or_init(Default::default).hash_one(ip);
+    // Canonical, so `::ffff:8.8.8.8` gets the same tag as `8.8.8.8`.
+    let hash = SALT
+        .get_or_init(Default::default)
+        .hash_one(ip.to_canonical());
     format!("<public IP {:04x}>", hash & 0xffff)
 }
 
@@ -414,8 +492,46 @@ mod tests {
         // stay.
         let kept = "127.0.0.1:1935 192.168.1.20 10.0.0.5 172.16.3.4 100.64.1.1 \
                     169.254.1.1 ::1 fe80::1 fd12:3456::1 0.0.0.0 version 0.3.1 \
-                    at 12:34:56 hash deadbeef build 10.0.19045.1";
+                    at 12:34:56 hash deadbeef build 10.0.19045.1 version 1.2.3.4.5 \
+                    2026-09-26T12:44:28.123456Z streamdelay_relay::ingest: obws::client \
+                    ::ffff:10.0.0.1 64:ff9b::a00:1";
         assert_eq!(redact(kept, &[]), kept);
+    }
+
+    #[test]
+    fn public_ip_addresses_joined_to_other_text_are_masked() {
+        for text in [
+            // The destination's error, when it is given by address.
+            "could not reach 8.8.4.4:1935: timed out",
+            "remote ip:8.8.4.4 refused",
+            "hostA8.8.4.4 odd",
+            "(8.8.4.4)",
+            "ends with 8.8.4.4.",
+            "ip:2a01:4f8::7 refused",
+            "2a01:4f8::7: timed out",
+            "2a01:4f8::7:1935 without brackets",
+            "nat64 64:ff9b::8.8.4.4",
+        ] {
+            let r = redact(text, &[]);
+            assert!(
+                !r.contains("8.8.4.4") && !r.contains("2a01"),
+                "{text} -> {r}"
+            );
+            assert!(r.contains("<public IP "), "{text} -> {r}");
+        }
+        // The text around it stays.
+        assert_eq!(
+            redact("could not reach 8.8.4.4:1935: timed out", &[]),
+            format!(
+                "could not reach {}:1935: timed out",
+                ip_tag("8.8.4.4".parse().unwrap())
+            )
+        );
+        // One address, one tag, however it is written.
+        assert_eq!(
+            redact("::ffff:8.8.4.4", &[]),
+            ip_tag("8.8.4.4".parse().unwrap())
+        );
     }
 
     #[test]

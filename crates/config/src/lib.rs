@@ -21,40 +21,31 @@ pub use streamdelay_engine::DelayMode;
 /// Why `text` does not parse, for logs and error messages: where, and the
 /// parser's reason, without quoting the file (the parser's own message shows the
 /// offending line) or any value from it, since the settings and secrets files hold
-/// tokens and stream keys. Values are quoted in double quotes (strings) or in
-/// backticks (``unknown variant `…` ``, ``integer `…` ``); backticks after
-/// "expected" name what the setting accepts, and stay.
+/// tokens and stream keys.
+///
+/// A value appears only before the last ", expected …", which says what the
+/// setting accepts and is the parser's own text (``unknown variant `…`, expected
+/// `stored` or `passthrough` ``, `invalid type: string "…", expected u64`). It is
+/// quoted in backticks or double quotes, and may hold either itself, so
+/// everything from the first quote up to there is left out, not just what looks
+/// quoted.
 pub(crate) fn parse_error(text: &str, e: &toml::de::Error) -> String {
     let message = e.message();
-    let expected_at = message.find("expected").unwrap_or(message.len());
-    let mut why = String::new();
-    let mut quote: Option<(char, bool)> = None;
-    for (i, c) in message.char_indices() {
-        match quote {
-            Some((q, shown)) if c == q => {
-                if shown {
-                    why.push(c);
-                }
-                quote = None;
-            }
-            Some((_, shown)) => {
-                if shown && !c.is_control() {
-                    why.push(c);
-                }
-            }
-            None if c == '"' || c == '`' => {
-                let shown = c == '`' && i > expected_at;
-                why.push(c);
-                if !shown {
-                    why.push('…');
-                    why.push(c);
-                }
-                quote = Some((c, shown));
-            }
-            None if !c.is_control() => why.push(c),
-            None => {}
+    let (head, accepted) = message
+        .rfind(", expected ")
+        .map_or((message, ""), |i| message.split_at(i));
+    let head = match head.find(['`', '"']) {
+        Some(i) => {
+            let quote = &head[i..=i];
+            format!("{}{quote}…{quote}", &head[..i])
         }
-    }
+        None => head.to_string(),
+    };
+    let why: String = head
+        .chars()
+        .chain(accepted.chars())
+        .filter(|c| !c.is_control())
+        .collect();
     match e.span() {
         Some(span) => {
             let line = text
@@ -757,6 +748,14 @@ mod tests {
             ("[destination]\nkey_mode = \"SENTINEL_live_123\"\n", 2),
             // A number of the wrong kind, also in backticks.
             ("[ingest]\ngrace_seconds = -987654321\n", 2),
+            // Quotes inside the value do not end the quote around it: a
+            // backtick, an escaped double quote, and what the parser itself
+            // writes after a value.
+            ("[destination]\nkey_mode = 'x`SENTINEL'\n", 2),
+            ("[destination]\nkey_mode = 'x`y\"SENTINEL`'\n", 2),
+            ("[ingest]\ngrace_seconds = \"x\\\"SENTINEL\"\n", 2),
+            ("[destination]\nkey_mode = 'expected`SENTINEL'\n", 2),
+            ("[destination]\nkey_mode = 'x`, expected `SENTINEL'\n", 2),
         ] {
             fs::write(&path, text).unwrap();
             let e = Config::load_or_create(&path).unwrap_err().to_string();

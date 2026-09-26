@@ -123,15 +123,30 @@ impl StreamSettings {
     }
 }
 
-/// Splits a server URL into its scheme (with `://`), the host (and port), and
-/// whether a login, more path after the application, or a query follow.
-fn server_parts(server: &str) -> (&str, &str, &str, bool, bool) {
+/// The parts of a server URL.
+struct ServerParts<'a> {
+    /// With `://`, or empty.
+    scheme: &'a str,
+    /// The host, and the port if any.
+    host: &'a str,
+    /// From the `/` after the host, without the query.
+    path: &'a str,
+    /// A login (`user:password@`) comes before the host.
+    login: bool,
+    /// A query (`?…` or `#…`) follows.
+    query: bool,
+    /// An `@` comes after the host, in the path or the query.
+    later_at: bool,
+}
+
+fn server_parts(server: &str) -> ServerParts<'_> {
     let (scheme, rest) = match server.find("://") {
         Some(i) => server.split_at(i + 3),
         None => ("", server),
     };
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, path) = rest.split_at(end);
+    let later_at = path.contains('@');
     let (login, host) = match authority.rsplit_once('@') {
         Some((_, host)) => (true, host),
         None => (false, authority),
@@ -140,14 +155,36 @@ fn server_parts(server: &str) -> (&str, &str, &str, bool, bool) {
         Some(i) => (&path[..i], true),
         None => (path, false),
     };
-    (scheme, host, path, login, query)
+    ServerParts {
+        scheme,
+        host,
+        path,
+        login,
+        query,
+        later_at,
+    }
 }
 
 /// A server URL for display: a login (`user:password@`), a query and anything
 /// after the application (where a stream key may have been pasted) are replaced
 /// by `…`.
+///
+/// OBS keeps the server as it was typed, so a password may hold a `/`, `?` or
+/// `#`, which then looks like the end of the host (`rtmp://user:pa/ss@host/app`).
+/// An `@` after the host can be that, or part of the path or query; as which
+/// cannot be told, nothing after the scheme is shown then.
 pub fn shown_server(server: &str) -> String {
-    let (scheme, host, path, login, query) = server_parts(server.trim());
+    let ServerParts {
+        scheme,
+        host,
+        path,
+        login,
+        query,
+        later_at,
+    } = server_parts(server.trim());
+    if later_at {
+        return format!("{scheme}…");
+    }
     let mut segments = path.split('/').filter(|s| !s.is_empty());
     let mut shown = format!("{scheme}{}{host}", if login { "…@" } else { "" });
     if let Some(app) = segments.next() {
@@ -165,7 +202,7 @@ pub fn shown_server(server: &str) -> String {
 
 /// True if `server` is one of Twitch's ingest servers, by its host.
 fn twitch_host(server: &str) -> bool {
-    let (_, host, ..) = server_parts(server.trim());
+    let host = server_parts(server.trim()).host;
     let host = match host.strip_prefix('[') {
         Some(v6) => v6.split(']').next().unwrap_or(""),
         None => host.split(':').next().unwrap_or(""),
@@ -445,6 +482,15 @@ mod tests {
                 "rtmp://host.example/app#SECRET",
                 "rtmp://host.example/app?…",
             ),
+            // A password holding what would end the host: which part is the
+            // host cannot be told, so none of it is shown.
+            ("rtmp://user:SEC/RET@host.example/live", "rtmp://…"),
+            ("rtmp://user:SEC?RET@host.example/live", "rtmp://…"),
+            ("rtmp://user:SEC#RET@host.example/live", "rtmp://…"),
+            ("rtmp://u@x:SEC/RET@host.example/live", "rtmp://…"),
+            ("user:SEC/RET@host.example/live", "…"),
+            // An @ in the query or the key is hidden the same way.
+            ("rtmp://host.example/app?user=SECRET@x", "rtmp://…"),
             ("auto", "auto"),
         ] {
             assert_eq!(custom(server).server().as_deref(), Some(shown));
