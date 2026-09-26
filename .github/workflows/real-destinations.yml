@@ -3,10 +3,18 @@ name: Real destinations
 # Connects to Twitch's and YouTube's RTMPS ingest with a made-up key, which they
 # refuse: nothing is streamed. It checks what the relay's tests cannot, with a
 # local server: that the TLS connection and the certificate check work against
-# the real servers, from each OS. Nightly, and by hand before a release.
+# the real servers, from each OS. Nightly, when the connection code changes, and
+# by hand before a release.
 on:
   schedule:
     - cron: "41 4 * * *"
+  push:
+    branches: [main]
+    paths:
+      - crates/relay/src/egress.rs
+      - crates/relay/src/io.rs
+      - crates/relay/Cargo.toml
+      - .github/workflows/real-destinations.yml
   workflow_dispatch:
 
 permissions:
