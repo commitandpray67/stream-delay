@@ -463,6 +463,35 @@ fn a_destination_ready_in_time_starts_at_the_delay_without_a_splice() {
 }
 
 #[test]
+fn a_reduction_by_a_hair_does_not_wait_forever() {
+    // A rewind rounds back to a keyframe, so the delay can end up a hair over
+    // the next one asked for (5 s gave 6.001 s here; then 6 s). Skipping ahead
+    // that little needs a keyframe within that hair of what airs next, which
+    // hardly ever comes: the change stayed pending ("Changing delay…") for good.
+    let mut s = Sim::new(config());
+    s.jitter = 39;
+    s.advance(612 * MS);
+    s.connect();
+    s.advance(5_389 * MS);
+    s.cmd(Command::SetDelay {
+        ms: 5_000,
+        mode: DelayMode::Rewind,
+    });
+    let asked = effective(&s) - 1;
+    assert!(asked >= 5_000, "the rewind was not rounded back: {asked}");
+    s.cmd(Command::SetDelay {
+        ms: asked,
+        mode: DelayMode::Mask,
+    });
+    s.advance(20 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert_eq!(snap.target_ms, asked);
+    assert!(snap.effective_ms < asked + 500, "{snap:?}");
+    s.check_invariants();
+}
+
+#[test]
 fn go_live_after_air_sends_everything_up_to_the_mark() {
     let mut s = live_sim();
     s.cmd(Command::SetDelay {
@@ -1279,6 +1308,77 @@ proptest! {
                     prop_assert!(!waiting.contains(&id), "dumped content aired at {}", x.at);
                 }
             }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(
+        std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(64),
+    ))]
+
+    /// Once nothing more happens, viewers get the delay asked for: no less,
+    /// unless the buffer was too short for it (which the state says), and no more
+    /// than a keyframe interval over, from rounding back to one.
+    ///
+    /// Left out: a lost destination connection, after which the delay grows by
+    /// the outage and stays until it is changed (as documented); and dumps, for
+    /// a known gap: lowering the delay after a dump can land on a keyframe
+    /// before the stretch it threw away, well over the delay asked for (one
+    /// more press brings it down). Without them, no case fails in 20,000.
+    #[test]
+    fn the_delay_settles_at_the_one_asked_for(
+        ops in prop::collection::vec(
+            op().prop_filter("no outage or dump", |o| {
+                !matches!(o, Op::DropOutput | Op::Dump(_))
+            }),
+            1..25,
+        ),
+        jitter in 0u64..50,
+        keep_history in any::<bool>(),
+        connect_after in 0u64..4_000,
+    ) {
+        let mut s = Sim::new(EngineConfig {
+            max_delay_ms: 60_000,
+            keep_history,
+            ..Default::default()
+        });
+        s.jitter = jitter;
+        // Connecting to the destination takes a moment.
+        s.advance(connect_after * MS);
+        s.connect();
+        s.advance(5 * SEC);
+        for op in ops {
+            match op {
+                Op::Wait(ms) => s.advance(ms * MS),
+                Op::Rewind(sec) | Op::Reduce(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Rewind }); }
+                Op::Mask(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Mask }); }
+                Op::GoLive => { s.cmd(Command::GoLive(GoLiveWhen::Now)); }
+                Op::AfterAir => { s.cmd(Command::GoLive(GoLiveWhen::AfterAir)); }
+                Op::Cancel => { s.cmd(Command::Cancel); }
+                Op::EncoderRestart => {
+                    s.stop_encoder();
+                    s.advance(700 * MS);
+                    s.start_encoder(0);
+                }
+                Op::Dump(_) | Op::DropOutput => unreachable!(),
+            }
+        }
+        // Longer than the largest delay, and a mask or dump building it up.
+        s.advance(75 * SEC);
+        let snap = s.snapshot();
+        prop_assert!(matches!(snap.phase, Phase::Live | Phase::Delayed), "{snap:?}");
+        let (target, effective) = (snap.target_ms, snap.effective_ms);
+        if target == 0 {
+            // Live, from the newest keyframe: no rounding back.
+            prop_assert_eq!(snap.phase, Phase::Live, "{:?}", snap);
+        } else if !snap.history_short {
+            // A keyframe interval, frames coming up to 2 × jitter late.
+            let gop = GOP_FRAMES * FRAME_MS + GOP_FRAMES * jitter;
+            prop_assert!(
+                effective + 100 >= target && effective <= target + gop + 500,
+                "target {target} ms, effective {effective} ms: {snap:?}"
+            );
         }
     }
 }

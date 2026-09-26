@@ -6,6 +6,13 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Asking for a delay a hair below the one in effect could leave the change
+  pending for good, with "Changing delay…" in the dock until Cancel or another
+  preset. A rewind rounds back to a keyframe, so asking for 5 s can give 6.001 s,
+  and asking for 6 s after that did it. Within half a second now counts as there.
+
 ## [0.3.2] - 2026-09-26
 
 ### Changed

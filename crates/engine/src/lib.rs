@@ -985,7 +985,11 @@ impl Engine {
                     return;
                 }
                 Pending::Reduce { delay } => {
-                    if self.out.delay <= delay {
+                    // Within half a second counts as there, like a rewind that
+                    // rounds back to a keyframe: skipping ahead less would need
+                    // a keyframe just that far from what airs next, and would
+                    // hardly ever happen.
+                    if self.out.delay < delay + 500 * MS {
                         self.out.pending = Pending::None;
                         return;
                     }
