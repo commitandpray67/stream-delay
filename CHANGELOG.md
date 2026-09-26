@@ -6,28 +6,7 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-
-- Over RTMPS (now the default for Twitch and YouTube), a destination refusing
-  the stream key showed "read failed: peer closed connection without sending TLS
-  close_notify" and was tried again every few seconds: Twitch refuses a key by
-  closing the connection without ending TLS first. It now reads "the
-  destination closed the connection (check the stream key)", and the waits
-  between tries grow as for any refusal. A connection closed that way while
-  streaming reads "the destination closed the connection".
-- Asking for a delay a hair below the one in effect could leave the change
-  pending for good, with "Changing delay…" in the dock until Cancel or another
-  preset. A rewind rounds back to a keyframe, so asking for 5 s can give 6.001 s,
-  and asking for 6 s after that did it. Within half a second now counts as there.
-- After a dump, a delay change could settle several seconds over the one asked
-  for (12 s asked, 15.6 s given): the dump leaves a gap in the buffer, and the
-  keyframe the change landed on was the last one before it. The delay now comes
-  down to the one asked for once the stream after the gap is old enough. Other
-  delay changes are unchanged. A change soon after a dump or several encoder
-  restarts in a row can still end up a few seconds over; pressing the preset
-  again usually fixes it.
-
-## [0.3.2] - 2026-09-26
+## [0.3.2] - 2026-09-27
 
 ### Changed
 
@@ -90,6 +69,24 @@ All notable changes to stream-delay are listed here. The format follows
   overlay's "Stream delay: 2 s" for the whole broadcast: connecting to Twitch
   takes a moment after OBS starts sending, and the broadcast kept that lag. It
   now catches up at the next keyframe, a second or two after it starts.
+- Over RTMPS, a destination refusing the stream key showed "read failed: peer
+  closed connection without sending TLS close_notify" and was tried again
+  every few seconds: Twitch refuses a key by closing the connection without
+  ending TLS first. It now reads "the destination closed the connection (check
+  the stream key)", and the waits between tries grow as for any refusal. A
+  connection closed that way while streaming reads "the destination closed the
+  connection".
+- Asking for a delay a hair below the one in effect could leave the change
+  pending for good, with "Changing delay…" in the dock until Cancel or another
+  preset. A rewind rounds back to a keyframe, so asking for 5 s can give 6.001 s,
+  and asking for 6 s after that did it. Within half a second now counts as there.
+- After a dump, a delay change could settle several seconds over the one asked
+  for (12 s asked, 15.6 s given): the dump leaves a gap in the buffer, and the
+  keyframe the change landed on was the last one before it. The delay now comes
+  down to the one asked for once the stream after the gap is old enough. Other
+  delay changes are unchanged. A change soon after a dump or several encoder
+  restarts in a row can still end up a few seconds over; pressing the preset
+  again usually fixes it.
 
 ## [0.3.1] - 2026-09-25
 
