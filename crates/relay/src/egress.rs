@@ -303,7 +303,7 @@ pub(crate) async fn run(
         // Stop and End stream must win over a connection attempt: a publish that
         // completes after them would start a broadcast nobody wants.
         let connected = {
-            let connecting = tokio::time::timeout(CONNECT_TIMEOUT, connect(&t));
+            let connecting = tokio::time::timeout(CONNECT_TIMEOUT, connect(&t, io::tls_config()));
             tokio::pin!(connecting);
             loop {
                 tokio::select! {
@@ -580,7 +580,11 @@ async fn connect_first(addrs: Vec<SocketAddr>) -> std::io::Result<TcpStream> {
     }
 }
 
-async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Failure> {
+/// Connects and publishes to `t`, over TLS with `tls` for RTMPS.
+async fn connect(
+    t: &Target,
+    tls: Arc<rustls::ClientConfig>,
+) -> Result<(BoxStream, ClientSession, Aborter), Failure> {
     let unreachable = |e| {
         Failure::new(format!(
             "could not reach {}:{}: {e}",
@@ -600,7 +604,7 @@ async fn connect(t: &Target) -> Result<(BoxStream, ClientSession, Aborter), Fail
         Scheme::Rtmps => {
             let name = rustls::pki_types::ServerName::try_from(t.url.host.clone())
                 .map_err(|e| Failure::new(format!("invalid TLS server name: {e}")))?;
-            let tls = tokio_rustls::TlsConnector::from(io::tls_config())
+            let tls = tokio_rustls::TlsConnector::from(tls)
                 .connect(name, tcp)
                 .await
                 .map_err(|e| Failure::new(format!("TLS handshake failed: {e}")))?;
@@ -879,6 +883,7 @@ async fn publish(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use streamdelay_rtmp::session::{ServerConfig, ServerEvent, ServerSession};
 
     use super::*;
 
@@ -893,6 +898,11 @@ mod tests {
 
     impl Publishing {
         fn start(stream: BoxStream, aborter: Aborter) -> Self {
+            Self::start_with(stream, publishing_session(), aborter)
+        }
+
+        /// Publishing on `session`, which the destination has accepted.
+        fn start_with(stream: BoxStream, session: ClientSession, aborter: Aborter) -> Self {
             let (ctl, mut ctl_rx) = mpsc::unbounded_channel();
             let (media, mut media_rx) = mpsc::unbounded_channel();
             let (events_tx, events) = mpsc::unbounded_channel();
@@ -901,7 +911,7 @@ mod tests {
             let task = tokio::spawn(async move {
                 publish(
                     stream,
-                    publishing_session(),
+                    session,
                     &aborter,
                     1,
                     Duration::from_secs(30),
@@ -964,7 +974,6 @@ mod tests {
 
     /// A session the destination has accepted the stream on.
     fn publishing_session() -> ClientSession {
-        use streamdelay_rtmp::session::{ServerConfig, ServerEvent, ServerSession};
         let mut client = ClientSession::new(ClientConfig::new("app", "rtmp://x/app", "k"));
         let mut server = ServerSession::new(ServerConfig::default());
         for _ in 0..10 {
@@ -1008,6 +1017,205 @@ mod tests {
         let written = Arc::new(AtomicU64::new(0));
         let aborter = Aborter::new(&tcp, written.clone());
         (Box::pin(Counted::new(tcp, written)), aborter, far)
+    }
+
+    /// Client settings trusting the test CA, and a server's with its `localhost`
+    /// certificate (see `testdata/README.md`).
+    fn test_tls() -> (Arc<rustls::ClientConfig>, Arc<rustls::ServerConfig>) {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        let read = |name: &str| {
+            std::fs::read(format!("{}/testdata/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        };
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(read("test-ca.der")))
+            .unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(read("localhost.key.der")));
+        let server = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(read("localhost.der"))], key)
+            .unwrap();
+        (Arc::new(client), Arc::new(server))
+    }
+
+    /// The destination's end of an RTMPS connection, with its RTMP session.
+    struct Destination {
+        tls: tokio_rustls::server::TlsStream<TcpStream>,
+        session: ServerSession,
+        key: String,
+    }
+
+    impl Destination {
+        /// Reads until `count` media messages have come; returns their sizes.
+        async fn media(&mut self, count: usize) -> Vec<usize> {
+            let mut sizes = Vec::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            while sizes.len() < count {
+                let n = tokio::time::timeout(Duration::from_secs(5), self.tls.read(&mut buf))
+                    .await
+                    .expect("no media came")
+                    .unwrap();
+                assert!(n > 0, "the relay closed the connection");
+                for ev in self.session.feed(&buf[..n]).unwrap() {
+                    if let ServerEvent::Media { payload, .. } = ev {
+                        sizes.push(payload.len());
+                    }
+                }
+            }
+            sizes
+        }
+    }
+
+    /// An RTMPS destination on `localhost` with the test certificate. It takes one
+    /// stream (`None` if the relay gave up on the TLS handshake).
+    async fn rtmps_destination(
+        tls: Arc<rustls::ServerConfig>,
+        rcvbuf: Option<usize>,
+    ) -> (Target, tokio::task::JoinHandle<Option<Destination>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if let Some(size) = rcvbuf {
+            socket2::SockRef::from(&listener)
+                .set_recv_buffer_size(size)
+                .unwrap();
+        }
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = tokio_rustls::TlsAcceptor::from(tls)
+                .accept(tcp)
+                .await
+                .ok()?;
+            let mut data = io::server_handshake(&mut tls).await.unwrap().to_vec();
+            let mut session = ServerSession::new(ServerConfig::default());
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                let mut key = None;
+                for ev in session.feed(&data).unwrap() {
+                    if let ServerEvent::PublishRequest { stream_key, .. } = ev {
+                        session.accept_publish();
+                        key = Some(stream_key);
+                    }
+                }
+                tls.write_all(&session.take_output()).await.unwrap();
+                tls.flush().await.unwrap();
+                if let Some(key) = key {
+                    return Some(Destination { tls, session, key });
+                }
+                let n = tls.read(&mut buf).await.unwrap();
+                assert!(n > 0, "the relay closed the connection");
+                data = buf[..n].to_vec();
+            }
+        });
+        let target = Target {
+            url: RtmpUrl::parse(&format!("rtmps://localhost:{port}/app")).unwrap(),
+            key: "k".into(),
+            connect_props: Vec::new(),
+        };
+        (target, task)
+    }
+
+    /// Connects to `target` over RTMPS; panics with the reason if it fails.
+    async fn connect_rtmps(
+        target: &Target,
+        tls: Arc<rustls::ClientConfig>,
+    ) -> (BoxStream, ClientSession, Aborter) {
+        match connect(target, tls).await {
+            Ok(c) => c,
+            Err(f) => panic!("{}", f.message),
+        }
+    }
+
+    #[tokio::test]
+    async fn rtmps_publishes_to_a_destination_whose_certificate_checks_out() {
+        let (client_tls, server_tls) = test_tls();
+        let (target, destination) = rtmps_destination(server_tls.clone(), None).await;
+        let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
+        let mut far = destination.await.unwrap().unwrap();
+        assert_eq!(far.key, "k");
+        let mut p = Publishing::start_with(stream, session, aborter);
+        p.frame(1, 10_000, 0);
+        p.frame(2, 70_000, 0);
+        assert_eq!(far.media(2).await, [10_000, 70_000]);
+        p.ctl.send(EgressCtl::Stop).unwrap();
+        assert!(matches!(p.ended().await, RunEnd::Stopped));
+        // Certificates are checked: the built-in roots, which the real services'
+        // certificates are checked against, do not include the test CA.
+        let (target, destination) = rtmps_destination(server_tls, None).await;
+        match connect(&target, io::tls_config()).await {
+            Ok(_) => panic!("an untrusted certificate was accepted"),
+            Err(f) => assert!(f.message.contains("TLS handshake failed"), "{}", f.message),
+        }
+        assert!(destination.await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_dump_over_rtmps_resets_a_connection_that_is_behind() {
+        let (client_tls, server_tls) = test_tls();
+        let (target, destination) = rtmps_destination(server_tls, Some(4 * 1024)).await;
+        let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
+        // The destination reads nothing more.
+        let _far = destination.await.unwrap().unwrap();
+        let mut p = Publishing::start_with(stream, session, aborter);
+        for seq in 1..=20 {
+            p.frame(seq, 64_000, 0);
+            if tokio::time::timeout(Duration::from_secs(1), p.until_written())
+                .await
+                .is_err()
+            {
+                // No room even in the send buffer: a blocked write.
+                break;
+            }
+        }
+        p.dump();
+        let end = p.ended().await;
+        assert!(matches!(end, RunEnd::CutReset { cut: 1, .. }), "not reset");
+        while let Ok(ev) = p.events.try_recv() {
+            assert!(!matches!(ev, Event::CutDone { .. }), "answered too early");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dump_over_rtmps_keeps_a_connection_that_has_sent_everything() {
+        let (client_tls, server_tls) = test_tls();
+        let (target, destination) = rtmps_destination(server_tls, None).await;
+        let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
+        let mut far = destination.await.unwrap().unwrap();
+        let mut p = Publishing::start_with(stream, session, aborter);
+        for seq in 1..=3 {
+            p.frame(seq, 10_000, 0);
+        }
+        assert_eq!(far.media(3).await.len(), 3);
+        // Keep reading, as a destination does.
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            while let Ok(1..) = far.tls.read(&mut buf).await {}
+        });
+        p.dump();
+        let answer = loop {
+            match tokio::time::timeout(Duration::from_secs(5), p.events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                Event::CutDone {
+                    cut,
+                    reset,
+                    delivered,
+                } => break (cut, reset, delivered),
+                _ => continue,
+            }
+        };
+        assert_eq!(answer, (1, false, Some(3)));
+        p.ctl.send(EgressCtl::Stop).unwrap();
+        assert!(matches!(p.ended().await, RunEnd::Stopped));
     }
 
     #[tokio::test]
