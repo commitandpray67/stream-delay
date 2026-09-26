@@ -233,8 +233,16 @@ mod os {
             .BytesOut
             .checked_sub(u64::from(info.BytesRetrans))
             .filter(|&sent| sent <= written)?;
+        // While the other end's window is (nearly) closed, what Windows probes
+        // it with counts as sent, and not in flight, though the other end
+        // drops it: tens of bytes seen, beyond what it received. Up to a
+        // segment more counts as unsent then.
+        let probed = match info.SndWnd < info.Mss {
+            true => u64::from(info.Mss).min(sent),
+            false => 0,
+        };
         Some(SendQueue {
-            unsent: written - sent,
+            unsent: written - sent + probed,
             unacked: u64::from(info.BytesInFlight),
         })
     }
