@@ -800,6 +800,35 @@ fn a_repeated_codec_header_still_comes_before_older_keyframes() {
 }
 
 #[test]
+fn a_header_repeated_with_every_keyframe_keeps_the_other_headers() {
+    // Some encoders send their decoder configuration again with every keyframe.
+    // Kept once, the repeats must not crowd out the audio configuration.
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(15 * SEC);
+    let video = video_config(&s);
+    let headers = |s: &Sim| s.e.sessions.last().unwrap().headers.len();
+    let before = headers(&s);
+    for _ in 0..=MAX_HEADERS {
+        let ts = s.ts_base + s.video_index * FRAME_MS;
+        s.e.ingest(s.now, Kind::Video, ts, video.clone());
+        s.advance(100 * MS);
+    }
+    assert_eq!(headers(&s), before, "repeats were kept");
+    let from = reconnect(&mut s);
+    s.advance(SEC);
+    let first_audio = s.sent[from..].iter().find(|x| x.msg.kind == Kind::Audio);
+    assert_eq!(
+        &first_audio.unwrap().msg.payload[..2],
+        &[0xaf, 0x00],
+        "audio went out without its decoder configuration"
+    );
+}
+
+#[test]
 fn a_changed_codec_header_keeps_the_old_one_for_older_keyframes() {
     let mut s = live_sim();
     s.cmd(Command::SetDelay {
