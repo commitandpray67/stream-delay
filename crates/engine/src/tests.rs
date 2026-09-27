@@ -799,6 +799,44 @@ fn nothing_is_recorded_without_a_publisher_or_a_payload() {
 }
 
 #[test]
+fn a_reconnect_resumes_right_after_what_the_destination_took() {
+    // When the destination took everything up to a keyframe, the new connection
+    // starts at that keyframe, not a keyframe interval earlier (sent twice, and
+    // added to the delay). Also after a dump's reset reports what it took.
+    for unsent_first in [false, true] {
+        let mut s = live_sim();
+        s.cmd(Command::SetDelay {
+            ms: 10_000,
+            mode: DelayMode::Rewind,
+        });
+        s.advance(20 * SEC);
+        // The last keyframe sent, and the message before it.
+        let (key_seq, key_payload) = s
+            .media_sent()
+            .filter(|(_, i)| i.keyframe)
+            .map(|(x, _)| (x.msg.seq.unwrap(), x.msg.payload.clone()))
+            .last()
+            .unwrap();
+        let taken = Some(key_seq - 1);
+        if unsent_first {
+            s.e.unsend(taken);
+        }
+        s.e.output_disconnected(s.now, taken);
+        let from = s.sent.len();
+        s.connect();
+        s.advance(SEC);
+        let first_key = s.sent[from..]
+            .iter()
+            .find(|x| x.msg.kind == Kind::Video && x.msg.payload[..2] == [0x17, 0x01]);
+        assert_eq!(
+            first_key.unwrap().msg.payload,
+            key_payload,
+            "unsend: {unsent_first}"
+        );
+    }
+}
+
+#[test]
 fn a_repeated_codec_header_still_comes_before_older_keyframes() {
     // Some encoders send their decoder configuration again, unchanged. Keyframes
     // recorded before the repeat still need it, after a reconnect or a splice.
