@@ -82,6 +82,7 @@ export interface DelayConfig {
   default_mode: DelayMode;
   presets: Preset[];
   ram_cap_mb: number;
+  mask_margin_ms: number;
   /** Keep a rolling buffer so Rewind can add delay instantly. */
   keep_buffer: boolean;
 }

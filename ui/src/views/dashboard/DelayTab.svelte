@@ -83,13 +83,19 @@
         <input type="number" min="16" max="16384" bind:value={form.ram_cap_mb} />
       </label>
       <label>
+        Slate margin (ms)
+        <input type="number" min="500" max="5000" step="100" bind:value={form.mask_margin_ms} />
+      </label>
+      <label>
         Wait for OBS to reconnect after a crash or dropped connection (s)
         <input type="number" min="0" max="600" bind:value={grace} />
       </label>
     </div>
     <p class="muted small">
-      The buffer needs about bitrate × maximum delay of memory: 6 Mbps × 120 s ≈ 90 MB. Changing the maximum
-      delay, memory cap or reconnect time takes effect after a restart.
+      The buffer needs about bitrate × maximum delay of memory: 6 Mbps × 120 s ≈ 90 MB. The slate margin is how
+      long Mask waits after putting the slate up before what OBS sends counts as covered; raise it if gameplay
+      shows through when a Mask change starts. Changing the maximum delay, memory cap, slate margin or reconnect
+      time takes effect after a restart.
     </p>
     {#if form.ram_cap_mb < memoryFor(form.max_seconds)}
       <p class="warn small" role="status">

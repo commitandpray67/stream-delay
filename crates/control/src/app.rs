@@ -498,6 +498,7 @@ pub(crate) fn engine_config(c: &Config) -> EngineConfig {
         max_delay_ms: c.delay.max_seconds * 1000,
         ram_cap_bytes: (c.delay.ram_cap_mb as usize).saturating_mul(1024 * 1024),
         keep_history: c.delay.keep_buffer,
+        mask_margin_ms: c.delay.mask_margin_ms,
         ..Default::default()
     }
 }
@@ -578,10 +579,12 @@ mod tests {
         c.delay.max_seconds = 45;
         c.delay.ram_cap_mb = 3;
         c.delay.keep_buffer = false;
+        c.delay.mask_margin_ms = 2_500;
         let e = engine_config(&c);
         assert_eq!(e.max_delay_ms, 45_000);
         assert_eq!(e.ram_cap_bytes, 3 * 1024 * 1024);
         assert!(!e.keep_history);
+        assert_eq!(e.mask_margin_ms, 2_500);
     }
 
     #[test]

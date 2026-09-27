@@ -67,7 +67,7 @@
     justify-items: center;
     text-align: center;
     gap: 1.2vw;
-    animation: fade 0.35s ease-out;
+    /* No fade-in: the slate must cover the picture from the first frame it is up. */
   }
   .mask h1 {
     font-size: 4vw;
@@ -127,11 +127,6 @@
     padding: 0.8vw 1.6vw;
     border-radius: 0.6vw;
     animation: pop 0.3s ease-out;
-  }
-  @keyframes fade {
-    from {
-      opacity: 0;
-    }
   }
   @keyframes spin {
     to {

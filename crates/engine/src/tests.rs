@@ -1131,14 +1131,15 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
     let snap = s.snapshot();
     assert!(snap.mask_visible, "the slate must go up at once");
     assert_eq!(snap.phase, Phase::Adding);
-    // Only what the slate covers airs, starting within a keyframe interval: the
-    // destination keeps getting data.
-    s.advance(3 * SEC);
+    // Only what the slate covers airs, starting within the slate margin and a
+    // keyframe interval: the destination keeps getting data.
+    let margin = config().mask_margin_ms * MS;
+    s.advance(margin + 2 * SEC);
     let first = s
         .media_sent_in(n..s.sent.len())
         .next()
         .expect("nothing aired after the dump");
-    assert!(first.1.at - dumped_at <= 3 * SEC);
+    assert!(first.1.at - dumped_at <= margin + 2 * SEC);
     assert!(first.2.keyframe);
     s.advance(20 * SEC);
     let snap = s.snapshot();
@@ -1150,7 +1151,7 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
     assert!((20_000..=22_100).contains(&snap.effective_ms), "{snap:?}");
     for (_, sent, i) in s.media_sent_in(n..s.sent.len()) {
         assert!(
-            i.arrival >= dumped_at + 500 * MS,
+            i.arrival >= dumped_at + margin,
             "content from before the dump (or before the slate was up) aired at {}",
             sent.at
         );

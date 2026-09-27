@@ -48,7 +48,8 @@ pub struct EngineConfig {
     pub headroom_ms: u64,
     /// Hard cap on buffered bytes; the oldest content is dropped beyond it.
     pub ram_cap_bytes: usize,
-    /// In mask mode, how long after the slate appears the rewind point may start.
+    /// In mask mode, how long after the slate is asked for the rewind point may
+    /// start: the slate has to show, and the encoder to send what shows it.
     pub mask_margin_ms: u64,
     /// Keep a rolling history (up to `max_delay_ms`) so delay can be added by
     /// rewinding. When false, content is dropped once it has aired and every delay
@@ -62,7 +63,7 @@ impl Default for EngineConfig {
             max_delay_ms: 120_000,
             headroom_ms: 10_000,
             ram_cap_bytes: 512 * 1024 * 1024,
-            mask_margin_ms: 500,
+            mask_margin_ms: 1_500,
             keep_history: true,
         }
     }

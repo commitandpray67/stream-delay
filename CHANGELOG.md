@@ -8,6 +8,14 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Changed
 
+- The Mask slate appears at once instead of fading in over 0.35 s, and what OBS
+  sends counts as covered by it only 1.5 s after it is asked for (was 0.5 s,
+  shorter than the fade plus an encoder's look-ahead, so the first frames after
+  the switch could show gameplay through a half-drawn slate). The margin is a
+  new setting, **Slate margin** on the Delay settings tab (`delay.mask_margin_ms`,
+  500 to 5000 ms); raise it for encoders with look-ahead. Mask changes and dumps
+  show the slate about a second longer.
+
 - Building from source needs Rust 1.89 or newer. The declared minimum was 1.88,
   but two dependencies already needed 1.89; CI now checks the minimum. Builds
   and releases use the exact Rust version in `rust-toolchain.toml`.

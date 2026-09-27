@@ -153,6 +153,9 @@ pub(crate) fn validate_limits(d: &DelayConfig, grace_seconds: u64) -> Result<(),
     if !(16..=16_384).contains(&d.ram_cap_mb) {
         return Err("memory cap must be between 16 and 16384 MiB".into());
     }
+    if !(500..=5_000).contains(&d.mask_margin_ms) {
+        return Err("the slate margin must be between 500 and 5000 ms".into());
+    }
     if grace_seconds > MAX_GRACE_SECONDS {
         return Err(format!(
             "the grace period must be at most {MAX_GRACE_SECONDS} seconds"
@@ -218,8 +221,9 @@ impl SettingsUpdate {
             c.destination = d.clone();
         }
         if let Some(d) = &self.delay {
-            applied.restart |=
-                d.max_seconds != c.delay.max_seconds || d.ram_cap_mb != c.delay.ram_cap_mb;
+            applied.restart |= d.max_seconds != c.delay.max_seconds
+                || d.ram_cap_mb != c.delay.ram_cap_mb
+                || d.mask_margin_ms != c.delay.mask_margin_ms;
             applied.keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
             c.delay = d.clone();
         }
@@ -334,6 +338,7 @@ mod tests {
         // Read when the relay starts: the buffer's size, and the grace period.
         assert_eq!(apply(delay("max_seconds", 60.into())), (true, false));
         assert_eq!(apply(delay("ram_cap_mb", 256.into())), (true, false));
+        assert_eq!(apply(delay("mask_margin_ms", 2_500.into())), (true, false));
         assert_eq!(
             apply(serde_json::json!({ "grace_seconds": 45 })),
             (true, false)
@@ -404,6 +409,14 @@ mod tests {
         assert!(check(presets(vec![0.0, max])).is_ok());
         assert!(check(presets(vec![-0.5])).is_err());
         assert!(check(presets(vec![max + 0.5])).is_err());
+        // The slate margin.
+        let margin = |ms: u64| {
+            let mut d = serde_json::to_value(&current.delay).unwrap();
+            d["mask_margin_ms"] = ms.into();
+            check(serde_json::json!({ "delay": d }))
+        };
+        assert!(margin(500).is_ok() && margin(5_000).is_ok());
+        assert!(margin(499).is_err() && margin(5_001).is_err());
         // The encoder grace period.
         assert!(check(serde_json::json!({ "grace_seconds": 600 })).is_ok());
         assert!(check(serde_json::json!({ "grace_seconds": 601 })).is_err());

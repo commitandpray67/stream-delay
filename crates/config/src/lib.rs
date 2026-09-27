@@ -241,6 +241,11 @@ pub struct DelayConfig {
     /// (Rewind). When off, only what the current delay needs is kept and every
     /// increase uses Mask.
     pub keep_buffer: bool,
+    /// In Mask mode, how long after the slate is asked for before what the
+    /// encoder sends counts as covered by it, in milliseconds: the overlay has
+    /// to show the slate, and the encoder to send the frames that show it.
+    /// Encoders with look-ahead need more.
+    pub mask_margin_ms: u64,
 }
 
 impl Default for DelayConfig {
@@ -252,6 +257,7 @@ impl Default for DelayConfig {
             presets: Preset::defaults(),
             ram_cap_mb: 512,
             keep_buffer: true,
+            mask_margin_ms: 1_500,
         }
     }
 }

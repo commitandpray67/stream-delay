@@ -38,6 +38,13 @@ for about a minute) and never see any gameplay twice. Mask mode needs the
 [overlay](dock-and-overlay.md#overlay) in your scenes; it does not need
 obs-websocket.
 
+The slate takes a moment to reach the stream: the overlay has to draw it, and
+your encoder to send the frames that show it. Only what OBS sends at least the
+**slate margin** (1.5 s by default) after you press the button counts as
+covered. Encoders with look-ahead (x264 at slower presets, NVENC with
+look-ahead) take longer; if gameplay shows through at the start of a Mask
+change, raise **Slate margin** on the **Delay settings** tab.
+
 ## Removing or lowering delay
 
 ### Remove delay now
