@@ -643,3 +643,66 @@ fn a_second_connect_is_refused() {
     );
     assert!(matches!(s.feed(&out), Err(SessionError::Protocol(_))));
 }
+
+#[test]
+fn a_stream_id_the_server_cannot_mean_ends_the_connection() {
+    let ok = reply(
+        "_result",
+        1.0,
+        crate::message::status_object("status", "NetConnection.Connect.Success", ""),
+    );
+    for (id, valid) in [
+        (1.0, true),
+        (f64::from(u32::MAX), true),
+        (0.0, false),
+        (-1.0, false),
+        (1.5, false),
+        (f64::NAN, false),
+        (f64::INFINITY, false),
+        (4_294_967_296.0, false),
+    ] {
+        let (mut c, mut script) = Script::start();
+        script.say(&mut c, &ok);
+        script.heard(&mut c);
+        let mut out = bytes::BytesMut::new();
+        write_command(
+            &script.enc,
+            &mut out,
+            CSID_COMMAND,
+            0,
+            &reply("_result", 4.0, Amf0Value::Number(id)),
+        );
+        let fed = c.feed(&out);
+        assert_eq!(fed.is_ok(), valid, "{id}: {fed:?}");
+        if valid {
+            assert!(
+                script
+                    .heard(&mut c)
+                    .iter()
+                    .any(|m| m.starts_with("publish"))
+            );
+        }
+    }
+}
+
+#[test]
+fn a_second_publish_says_so() {
+    let (mut c, mut s) = connected_pair();
+    let mut out = bytes::BytesMut::new();
+    write_command(
+        &crate::chunk::ChunkEncoder::new(),
+        &mut out,
+        CSID_STREAM_COMMAND,
+        1,
+        &[
+            Amf0Value::string("publish"),
+            Amf0Value::Number(9.0),
+            Amf0Value::Null,
+            Amf0Value::string("again"),
+            Amf0Value::string("live"),
+        ],
+    );
+    c.take_output();
+    let err = s.feed(&out).unwrap_err();
+    assert!(err.to_string().contains("publish sent twice"), "{err}");
+}

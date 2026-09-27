@@ -210,6 +210,9 @@ pub struct ChunkDecoder {
     max_media_len: usize,
     /// Largest message of any other type (commands, metadata, control).
     max_other_len: usize,
+    /// Whether the peer repeats the extended timestamp on continuation chunks,
+    /// once it is known (see [`ChunkDecoder::decode_chunk`]).
+    repeats_extended: Option<bool>,
 }
 
 impl Default for ChunkDecoder {
@@ -230,6 +233,7 @@ impl ChunkDecoder {
             retry_after: 0,
             max_media_len: usize::MAX,
             max_other_len: usize::MAX,
+            repeats_extended: None,
         }
     }
 
@@ -363,6 +367,7 @@ impl ChunkDecoder {
         }
         let mut extended = st.extended;
         let mut ext_value = st.ext_value;
+        let mut learned = None;
         if fmt <= 2 {
             extended = ts_field == EXTENDED;
             if extended {
@@ -375,12 +380,28 @@ impl ChunkDecoder {
         } else if extended {
             if continuation {
                 // Most encoders (librtmp/OBS, FFmpeg) repeat the extended timestamp on
-                // continuation chunks, some do not. Consume it only if it matches.
-                if b.len() < pos + 4 {
-                    return Ok(ChunkResult::NeedMore);
-                }
-                if be32(&b[pos..pos + 4]) == st.ext_value {
-                    pos += 4;
+                // continuation chunks, some do not. Until the peer has shown which, the
+                // field is taken to be there if it matches; a mismatch shows that it is
+                // not, a match that it is, and from then on the payload is never
+                // guessed at (it may start with the same four bytes).
+                match self.repeats_extended {
+                    Some(true) => {
+                        if b.len() < pos + 4 {
+                            return Ok(ChunkResult::NeedMore);
+                        }
+                        pos += 4;
+                    }
+                    Some(false) => {}
+                    None => {
+                        if b.len() < pos + 4 {
+                            return Ok(ChunkResult::NeedMore);
+                        }
+                        let repeated = be32(&b[pos..pos + 4]) == st.ext_value;
+                        if repeated {
+                            pos += 4;
+                        }
+                        learned = Some(repeated);
+                    }
                 }
             } else {
                 if b.len() < pos + 4 {
@@ -404,6 +425,9 @@ impl ChunkDecoder {
         }
 
         // The whole chunk is available: commit state.
+        if learned.is_some() {
+            self.repeats_extended = learned;
+        }
         let raw_ts = if extended { ext_value } else { ts_field };
         let st = self.streams.entry(csid).or_default();
         if !continuation {
@@ -602,6 +626,8 @@ fn put_u24(out: &mut BytesMut, v: u32) {
 }
 
 fn put_basic_header(out: &mut BytesMut, fmt: u8, csid: u32) {
+    // 0 and 1 only say how long the id is; 2 is for protocol control.
+    debug_assert!((2..=65599).contains(&csid), "chunk stream id {csid}");
     if (2..64).contains(&csid) {
         out.put_u8(fmt << 6 | csid as u8);
     } else if (64..320).contains(&csid) {
@@ -670,6 +696,36 @@ mod tests {
         assert_eq!(m.payload.len(), 200);
         assert_eq!(m.payload[127], 1);
         assert_eq!(m.payload[128], 2);
+    }
+
+    #[test]
+    fn a_peer_that_does_not_repeat_extended_timestamps_is_not_guessed_at_again() {
+        let message = |payload: &[u8]| {
+            let mut data = vec![0x06]; // fmt 0, csid 6, extended timestamp
+            data.extend_from_slice(&[0xff, 0xff, 0xff, 0, 0, 200, 9, 1, 0, 0, 0]);
+            data.extend_from_slice(&0x0200_0000u32.to_be_bytes());
+            data.extend_from_slice(&payload[..128]);
+            data.push(0xc6); // continuation, without the extended field
+            data.extend_from_slice(&payload[128..]);
+            data
+        };
+        // The first continuation shows it: no repeated field there.
+        let mut first = vec![1u8; 200];
+        first[128..].fill(2);
+        // The second's payload starts with the timestamp's own four bytes.
+        let mut second = vec![3u8; 200];
+        second[128..132].copy_from_slice(&0x0200_0000u32.to_be_bytes());
+        let mut dec = ChunkDecoder::new();
+        dec.push(&message(&first));
+        dec.push(&message(&second));
+        let ms = decode_all(&mut dec);
+        assert_eq!(ms.len(), 2);
+        assert_eq!(&ms[0].payload[..], &first[..]);
+        assert_eq!(
+            &ms[1].payload[..],
+            &second[..],
+            "the payload was taken for a timestamp"
+        );
     }
 
     #[test]

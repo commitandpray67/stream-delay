@@ -306,8 +306,19 @@ impl ServerSession {
                 );
             }
             "publish" => {
-                if self.state != State::Connected {
-                    return Err(SessionError::Protocol("publish before connect".into()));
+                match self.state {
+                    State::Connected => {}
+                    State::PublishPending | State::Publishing => {
+                        return Err(SessionError::Protocol("publish sent twice".into()));
+                    }
+                    State::AwaitConnect => {
+                        return Err(SessionError::Protocol("publish before connect".into()));
+                    }
+                    State::Closed => {
+                        return Err(SessionError::Protocol(
+                            "publish after the stream ended".into(),
+                        ));
+                    }
                 }
                 self.stream_key = values
                     .get(3)

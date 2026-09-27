@@ -53,6 +53,13 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- From an encoder that does not repeat the extended timestamp on the later
+  chunks of a message (timestamps past about 4.6 hours), a chunk whose data
+  happened to start with those same four bytes lost them, and the connection
+  broke. The input now learns which kind of encoder it has from the first
+  such chunk. A second `publish` on one connection, and a `createStream` answer
+  with an unusable stream id (0, a fraction, NaN), are now refused with a
+  message that says so.
 - Behind a reverse proxy that adds HTTPS, every change from the dashboard was
   refused as cross-origin (only `http://` pages counted as this server's). A
   page from the same host over HTTPS now counts, and `api.allowed_origins`

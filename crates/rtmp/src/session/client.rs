@@ -280,6 +280,16 @@ impl ClientSession {
             }
             "_result" if txid == TX_CREATE && self.state == State::CreatingStream => {
                 let id = values.get(3).and_then(Amf0Value::as_number).unwrap_or(1.0);
+                // 0 is the connection itself: a stream id of 0 (or NaN, which a
+                // cast turns into 0) would skip the clean unpublish at the end.
+                if !(id.is_finite()
+                    && id.fract() == 0.0
+                    && (1.0..=f64::from(u32::MAX)).contains(&id))
+                {
+                    return Err(SessionError::Protocol(format!(
+                        "the server gave an invalid stream id ({id})"
+                    )));
+                }
                 self.stream_id = id as u32;
                 write_command(
                     &self.link.encoder,
