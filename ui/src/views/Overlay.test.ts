@@ -128,6 +128,22 @@ describe("overlay slate", () => {
     ]);
   });
 
+  it("in OBS, never says it painted a slate it could not draw", async () => {
+    open("/overlay?token=r", true);
+    // No settings (yet): there is nothing to draw the slate with.
+    live.config = null;
+    live.state = state({ phase: "adding", mask_visible: true, slate_change: 6 });
+    await tick();
+    await painted();
+    expect(screen.queryByText("Be right back")).toBeNull();
+    expect(sent()).toEqual([]);
+    // Once they come, it is drawn, then said.
+    live.config = config;
+    await tick();
+    await painted();
+    expect(sent()).toEqual([{ type: "slate-shown", change: 6 }]);
+  });
+
   it("in OBS, says whether it is on stream once OBS says so", async () => {
     open("/overlay?token=r", true);
     // OBS does not say when the page loads: nothing to report yet.

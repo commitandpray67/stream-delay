@@ -102,6 +102,10 @@ All notable changes to stream-delay are listed here. The format follows
   does not offer it), so it could be see-through. What airs under the slate
   is nearly live, and showed through. The slate now always uses the color
   without its alpha; the badge keeps it.
+- The overlay in OBS could report the slate as painted before it had the
+  overlay settings it draws the slate with (if they had not arrived), so the
+  slate counted as covering the stream while it was not on screen. It now
+  reports only a slate it has drawn.
 - The desktop app's update question said whether installing ends the stream
   only as it was when the question came up. Left open (it appears at
   start) until after a stream started, Install ended the stream without

@@ -23,9 +23,9 @@
   if (reporter) whenConnected(() => reporter.connected());
   $effect(() => reporter?.listen(window));
   $effect(() => {
-    // Runs once the slate is in the page.
+    // Runs once the slate is in the page: it is drawn only with the settings.
     const d = live.state?.delay;
-    if (reporter && masked && d?.mask_visible) reporter.slateShown(d.slate_change);
+    if (reporter && overlay && masked && d?.mask_visible) reporter.slateShown(d.slate_change);
   });
 
   const announcer = new DelayAnnouncer();
