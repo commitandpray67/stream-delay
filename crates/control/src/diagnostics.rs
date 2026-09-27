@@ -557,6 +557,32 @@ mod tests {
     }
 
     #[test]
+    fn edges_of_what_is_redacted() {
+        // A public IPv6 address with only two colons.
+        let r = redact("peer 2a01::1 connected", &[]);
+        assert!(!r.contains("2a01") && r.contains("<public IP "), "{r}");
+        // Carrier-grade NAT is 100.64.0.0/10 only: other addresses with a second
+        // number from 64 to 127 are public.
+        for public in ["8.80.1.2", "9.127.0.1", "101.64.0.1"] {
+            assert!(!redact(public, &[]).contains(public), "{public}");
+        }
+        assert_eq!(redact("100.127.255.1", &[]), "100.127.255.1");
+        // `live_` and digits alone, or with nothing after the `_`, are no key.
+        for text in ["live_123", "live_123_", "live_"] {
+            assert_eq!(redact(text, &[]), text);
+        }
+        assert_eq!(redact("live_1_x", &[]), "live_<redacted>");
+        // The home directory names the user.
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        if let Some(home) = home.as_ref().and_then(|h| h.to_str())
+            && home.len() > 1
+        {
+            let r = redact(&format!("config at {home}/settings.toml"), &[]);
+            assert_eq!(r, "config at ~/settings.toml");
+        }
+    }
+
+    #[test]
     fn words_containing_live_are_not_keys() {
         let text = r#"{"go_live_after_air":"x","live_now":1,"key":"live_987_xYz"}"#;
         let r = redact(text, &[]);
