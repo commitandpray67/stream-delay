@@ -12,7 +12,7 @@ automatically.
 | Chaos tests | destination resets and stalls, a slow uplink, the encoder crashing inside and past the grace period | `crates/relay/tests/chaos.rs` | every push |
 | End to end | ffmpeg → streamdelayd → ffmpeg with H.264 B-frames, open-GOP HEVC and the 24-bit timestamp wrap; checks there are 0 decode errors | `tests/e2e/run.sh` | every push (Linux) |
 | Fuzzing | chunk decoder, AMF0, FLV, publish sessions, engine | `fuzz/` | nightly, and PRs touching the decoders |
-| Soak | hours of streaming with random delay changes and dumps, and the encoder crashing and coming back every few minutes; checks that memory stays flat, the destination never reconnects, every encoder session is taken up, and nothing fails to decode | `tests/soak/run.sh` | nightly (2 h); 12 h by hand before a release |
+| Soak | hours of streaming with random delay changes and dumps, the encoder crashing and coming back every few minutes, and the destination going down for 15 s every 20 minutes at the maximum delay; checks that memory stays flat, the destination reconnects once per outage and never otherwise, the delay is back at the maximum within 30 s of each, every encoder session is taken up, and nothing fails to decode | `tests/soak/run.sh` | nightly (2 h); 12 h by hand before a release |
 
 What the automated tests can't cover is how real encoders, Twitch's ingest and
 real players react. That is the manual checklist below. Please add your results,
