@@ -736,9 +736,10 @@ async fn an_outage_at_the_maximum_delay_comes_back_to_it_and_airs_every_frame() 
     // Back at the maximum (within a keyframe interval), for the last 7 s at
     // least with every frame.
     assert!(delay <= MAX_MS + 1_500, "the delay stayed at {delay} ms");
-    let unbroken = after.len() - skipped.last().map_or(0, |&(_, to)| {
-        after.iter().position(|&f| f == to).unwrap()
-    });
+    let unbroken = after.len()
+        - skipped
+            .last()
+            .map_or(0, |&(_, to)| after.iter().position(|&f| f == to).unwrap());
     assert!(unbroken >= 7 * 30, "only {unbroken} frames in a row");
 }
 
