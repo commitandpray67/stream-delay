@@ -211,13 +211,18 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
         out = result;
     }
     // Paths under the home directory reveal the user name.
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-        && let Some(home) = home.to_str()
-        && home.len() > 1
-    {
-        out = out.replace(home, "~");
-    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    out = without_home(out, home.as_ref().and_then(|h| h.to_str()));
     mask_public_ips(&out)
+}
+
+/// `text` with the home directory `home` written as `~`. A home of `/` (in a
+/// container without a user of its own) is left alone: every path would change.
+fn without_home(text: String, home: Option<&str>) -> String {
+    match home {
+        Some(home) if home.len() > 1 => text.replace(home, "~"),
+        _ => text,
+    }
 }
 
 /// Replaces public IP addresses in `text` (the streamer's home address on a
@@ -583,6 +588,32 @@ mod tests {
     }
 
     #[test]
+    fn a_home_of_slash_is_not_replaced() {
+        let text = "config at /home/ana/settings.toml".to_string();
+        assert_eq!(
+            without_home(text.clone(), Some("/home/ana")),
+            "config at ~/settings.toml"
+        );
+        assert_eq!(without_home(text.clone(), Some("/")), text);
+        assert_eq!(without_home(text.clone(), None), text);
+    }
+
+    #[test]
+    fn download_codes_work_once_each_and_only_the_latest_few() {
+        let codes = Codes::default();
+        let a = codes.issue();
+        let b = codes.issue();
+        assert!(codes.redeem(&a));
+        assert!(!codes.redeem(&a), "used twice");
+        assert!(codes.redeem(&b));
+        assert!(!codes.redeem("0123456789abcdef0123456789abcdef"));
+        let first = codes.issue();
+        let rest: Vec<_> = (0..MAX_CODES).map(|_| codes.issue()).collect();
+        assert!(!codes.redeem(&first), "more than {MAX_CODES} codes work");
+        assert!(rest.iter().all(|c| codes.redeem(c)));
+    }
+
+    #[test]
     fn words_containing_live_are_not_keys() {
         let text = r#"{"go_live_after_air":"x","live_now":1,"key":"live_987_xYz"}"#;
         let r = redact(text, &[]);
@@ -596,23 +627,25 @@ mod tests {
         use std::io::Write;
         let mut w = log_writer().make_writer_for_test();
         w.write_all(b"first line\nsecond ").unwrap();
-        w.write_all(b"line\n").unwrap();
+        w.write_all(b"line\nand the last, unfinished").unwrap();
         drop(w);
         let logs = recent_logs();
         assert!(logs.iter().any(|l| l == "first line"));
         assert!(logs.iter().any(|l| l == "second line"));
+        assert!(logs.iter().any(|l| l == "and the last, unfinished"));
     }
 
     #[test]
     fn log_lines_are_kept_short() {
         use std::io::Write;
         let mut w = log_writer().make_writer_for_test();
-        let long = format!("start {}\n", "é".repeat(100_000));
+        // Seven bytes, then two-byte characters: the limit falls inside one.
+        let long = format!("start: {}\n", "é".repeat(100_000));
         w.write_all(long.as_bytes()).unwrap();
         drop(w);
         let kept = recent_logs()
             .into_iter()
-            .find(|l| l.starts_with("start "))
+            .find(|l| l.starts_with("start: "))
             .unwrap();
         assert!(kept.len() <= MAX_LINE + '…'.len_utf8(), "{}", kept.len());
         assert!(kept.ends_with('…'));
