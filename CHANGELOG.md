@@ -6,6 +6,17 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `streamdelayd health` exits with 0 when an instance is running and answering
+  (no token needed), and the Docker image uses it as its health check, so
+  `docker ps` shows `healthy`.
+- `--token-file` (or `STREAMDELAY_TOKEN_FILE`) gives `streamdelayd run`,
+  `streamdelayd urls` and the client commands their API token from a file (a
+  Docker or systemd secret, for example). Like `STREAMDELAY_TOKEN`, it keeps the
+  token out of the command line, which other users of the computer can see;
+  `--token` still works but is not recommended.
+
 ### Changed
 
 - A dump no longer airs you live when nothing covers the stream. It now does
@@ -51,8 +62,17 @@ All notable changes to stream-delay are listed here. The format follows
   but two dependencies already needed 1.89; CI now checks the minimum. Builds
   and releases use the exact Rust version in `rust-toolchain.toml`.
 
+- The Docker images' base images are pinned by digest, so a rebuild uses the
+  same ones until an update is reviewed.
+
 ### Fixed
 
+- `streamdelayd urls` showed the token and ingest key saved in the settings
+  file even when `run` was given others: with `STREAMDELAY_INGEST_KEY` in
+  Docker it said the OBS key was "any", and with `STREAMDELAY_TOKEN` its links
+  were refused. It now reads the same variables (and takes the same options).
+  An empty `STREAMDELAY_TOKEN` counts as unset, instead of keeping the client
+  from using the settings file's token.
 - From an encoder that does not repeat the extended timestamp on the later
   chunks of a message (timestamps past about 4.6 hours), a chunk whose data
   happened to start with those same four bytes lost them, and the connection

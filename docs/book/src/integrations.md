@@ -34,7 +34,10 @@ stream-delay running; use **Quit stream-delay** in the tray to stop it.
 ## Command line
 
 `streamdelayd` controls a running instance (desktop app or headless). It reads the
-address and token from the settings file.
+address and token from the settings file. For another instance, pass `--url`,
+and the token in a file (`--token-file` or `STREAMDELAY_TOKEN_FILE`) or in
+`STREAMDELAY_TOKEN`: `--token` works too, but other users of the computer can
+see command lines.
 
 ```sh
 streamdelayd delay 30           # rewind to a 30 s delay
@@ -46,6 +49,7 @@ streamdelayd end --after-air    # end the broadcast once the buffer has aired
 streamdelayd end                # end it now; nothing buffered airs
 streamdelayd resume             # broadcast again
 streamdelayd state              # current state as JSON
+streamdelayd health             # exits with 0 if it is running and answering
 ```
 
 ## Stream Deck, Streamer.bot, Firebot, Touch Portal and scripts

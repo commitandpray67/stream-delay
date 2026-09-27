@@ -63,6 +63,14 @@ The links' access tokens and the OBS key are not written to `docker logs`, where
 anyone who can read the logs would get them; `streamdelayd urls` shows them.
 
 `docker stop` ends a running broadcast cleanly, like Ctrl+C in a terminal.
+`docker ps` shows whether stream-delay is answering (`healthy`); the image checks
+with `streamdelayd health` every 30 s.
+
+To choose the API token rather than use the generated one, give it as a file
+(`-e STREAMDELAY_TOKEN_FILE=/run/secrets/…` with a Docker secret) or in
+`STREAMDELAY_TOKEN`, rather than with `--token`: command lines are visible to
+other users of the machine. `docker exec` inherits these variables, so
+`streamdelayd urls` and the other commands use the same token.
 
 The container listens on all interfaces, so it requires an ingest key: OBS must
 stream with that key (Settings → Stream → Stream Key), and nobody else can

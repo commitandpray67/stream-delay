@@ -2,15 +2,16 @@
 //! API, and a round trip against a running instance.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use serde_json::{Value, json};
 use streamdelay_config::{Config, MemorySecrets};
-use streamdelay_control::{App, AppOptions, Overrides};
+use streamdelay_control::{App, AppOptions, Overrides, Scope, scoped_token};
 
 /// A request the stand-in API received.
 #[derive(Debug, Clone)]
@@ -73,11 +74,65 @@ impl Fake {
     }
 }
 
+/// A `streamdelayd run` process on a free port, stopped when dropped.
+struct Daemon {
+    child: std::process::Child,
+    url: String,
+}
+
+impl Daemon {
+    /// Starts it with `setup`'s arguments and environment, and waits until
+    /// `streamdelayd health` says it answers.
+    fn start(no_config: &Path, setup: impl FnOnce(&mut Command)) -> Daemon {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = free.local_addr().unwrap();
+        drop(free);
+        let mut c = cli(no_config);
+        c.args(["run", "--ingest", "127.0.0.1:0", "--api"])
+            .arg(api.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        setup(&mut c);
+        let mut daemon = Daemon {
+            child: c.spawn().unwrap(),
+            url: format!("http://{api}"),
+        };
+        let started = Instant::now();
+        loop {
+            let health = run(cli(no_config).args(["health", "--url", &daemon.url]));
+            if health.status.success() {
+                return daemon;
+            }
+            if let Some(status) = daemon.child.try_wait().unwrap() {
+                panic!("streamdelayd run exited: {status}");
+            }
+            if started.elapsed() > Duration::from_secs(30) {
+                daemon.stop();
+                panic!("streamdelayd run never answered");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// `streamdelayd` with no token or settings file from the machine running the
 /// tests.
 fn cli(no_config: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_streamdelayd"));
     c.env_remove("STREAMDELAY_TOKEN")
+        .env_remove("STREAMDELAY_TOKEN_FILE")
+        .env_remove("STREAMDELAY_INGEST_KEY")
         .env("STREAMDELAY_CONFIG", no_config.join("none.toml"));
     c
 }
@@ -161,6 +216,145 @@ fn the_token_given_wins_over_the_environment() {
         .args(["state", "--url", &api.url, "--token", "flag-token"])
         .env("STREAMDELAY_TOKEN", "env-token")));
     assert_eq!(api.only().auth.as_deref(), Some("Bearer flag-token"));
+}
+
+#[test]
+fn a_token_file_wins_over_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("token");
+    std::fs::write(&file, "file-token\n").unwrap();
+    let api = Fake::ok("{}");
+    stdout(&run(cli(dir.path())
+        .args(["state", "--url", &api.url, "--token-file"])
+        .arg(&file)
+        .env("STREAMDELAY_TOKEN", "env-token")));
+    assert_eq!(api.only().auth.as_deref(), Some("Bearer file-token"));
+    // A file that is not there is an error, not a fallback to another token.
+    let err = stderr(&run(cli(dir.path())
+        .args(["state", "--url", &api.url, "--token-file"])
+        .arg(dir.path().join("missing"))
+        .env("STREAMDELAY_TOKEN", "env-token")));
+    assert!(err.contains("reading the token file"), "{err}");
+    assert_eq!(api.seen().len(), 1);
+}
+
+#[test]
+fn health_says_whether_stream_delay_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = Fake::ok(r#"{"status":"ok","app":"stream-delay","version":"9.9.9"}"#);
+    let out = stdout(&run(cli(dir.path()).args(["health", "--url", &api.url])));
+    assert_eq!(
+        out.trim(),
+        format!("stream-delay 9.9.9 is running at {}", api.url)
+    );
+    let req = api.only();
+    assert_eq!((req.method, req.path.as_str()), (Method::GET, "/healthz"));
+    // No token is sent, even one at hand.
+    assert_eq!(req.auth, None);
+
+    // Something else on the port.
+    let other = Fake::ok(r#"{"status":"ok"}"#);
+    let err = stderr(&run(cli(dir.path()).args(["health", "--url", &other.url])));
+    assert!(err.contains("not as stream-delay"), "{err}");
+    let failing = Fake::new(StatusCode::SERVICE_UNAVAILABLE, "{}");
+    let err = stderr(&run(cli(dir.path()).args([
+        "health",
+        "--url",
+        &failing.url,
+    ])));
+    assert!(err.contains("503"), "{err}");
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let out = run(cli(dir.path()).args(["health", "--url", &url]));
+    assert_eq!(out.status.code(), Some(1));
+}
+
+/// `streamdelayd run` with its token in a file, checked the way the Docker
+/// image's health check does, then used by the client.
+#[test]
+fn run_reads_its_token_from_a_file() {
+    const TOKEN: &str = "run-token-from-a-file-0123";
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("token");
+    std::fs::write(&file, format!("{TOKEN}\n")).unwrap();
+    let mut daemon = Daemon::start(dir.path(), |c| {
+        c.arg("--ephemeral")
+            .arg("--token-file")
+            .arg(&file)
+            // Not the token: the file wins.
+            .env("STREAMDELAY_TOKEN", "not-the-token-0123456789");
+    });
+    let url = daemon.url.clone();
+    let state = run(cli(dir.path()).args(["state", "--url", &url, "--token", TOKEN]));
+    let refused = run(cli(dir.path()).args([
+        "state",
+        "--url",
+        &url,
+        "--token",
+        "not-the-token-0123456789",
+    ]));
+    daemon.stop();
+    let state: Value = serde_json::from_str(&stdout(&state)).unwrap();
+    assert_eq!(state["ended"], false);
+    assert!(stderr(&refused).contains("401"));
+}
+
+/// As in the Docker image: `run` gets its token file and ingest key from the
+/// environment, which `docker exec streamdelayd urls` inherits. The links it
+/// prints must work, and the OBS key must be the one encoders need.
+#[test]
+fn urls_show_what_run_was_given() {
+    const TOKEN: &str = "urls-token-from-a-file-0123";
+    const INGEST_KEY: &str = "ingest-key-from-the-env-4567";
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let file = dir.path().join("token");
+    std::fs::write(&file, format!("{TOKEN}\n")).unwrap();
+    let env = |c: &mut Command| {
+        c.env("STREAMDELAY_TOKEN_FILE", &file)
+            .env("STREAMDELAY_INGEST_KEY", INGEST_KEY)
+            .env("STREAMDELAY_CONFIG", &config);
+    };
+    let mut daemon = Daemon::start(dir.path(), |c| {
+        c.arg("--no-keychain");
+        env(c);
+    });
+    let mut urls = cli(dir.path());
+    urls.arg("urls");
+    env(&mut urls);
+    let shown = run(&mut urls);
+    let links = stdout(&shown);
+    let token = links
+        .lines()
+        .find_map(|l| l.strip_prefix("Dashboard:"))
+        .and_then(|l| l.split_once("token="))
+        .map(|(_, t)| t.trim().to_string())
+        .unwrap_or_else(|| panic!("no dashboard link: {links}"));
+    let state = run(cli(dir.path()).args(["state", "--url", &daemon.url, "--token", &token]));
+    daemon.stop();
+    assert_eq!(token, TOKEN);
+    assert!(
+        links.contains(&format!("OBS key:     {INGEST_KEY}")),
+        "{links}"
+    );
+    for (page, scope) in [("dock", Scope::Control), ("overlay", Scope::Read)] {
+        let link = format!("/{page}?token={}", scoped_token(TOKEN, scope));
+        assert!(links.contains(&link), "{link} not in {links}");
+    }
+    stdout(&state);
+
+    // Without them, what the settings file says: its own token, and no key for
+    // an input only this computer can reach.
+    let saved = Config::load_or_create(&config).unwrap();
+    let plain = stdout(&run(cli(dir.path())
+        .args(["urls", "--config"])
+        .arg(&config)));
+    assert!(
+        plain.contains(&format!("/?token={}", saved.api.token)),
+        "{plain}"
+    );
+    assert!(plain.contains("OBS key:     any"), "{plain}");
 }
 
 #[test]
@@ -361,6 +555,12 @@ fn round_trip_with_a_running_instance() {
         "not-the-token-at-all",
     ])));
     assert!(err.contains("401"), "{err}");
+
+    let out = stdout(&sd(&["health"]));
+    assert!(
+        out.contains(&format!("stream-delay {}", env!("CARGO_PKG_VERSION"))),
+        "{out}"
+    );
 
     rt.block_on(app.shutdown());
 }

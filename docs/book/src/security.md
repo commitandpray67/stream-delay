@@ -62,7 +62,9 @@ it is built to be safe by default:
   taken the oldest one that is not streaming is closed to make room, so strangers
   cannot exhaust memory or lock OBS out.
 - **API tokens** must be at least 16 characters; a generated one has 32. A
-  shorter one set with `--token` or `STREAMDELAY_TOKEN` is refused at startup.
+  shorter one set with `--token-file`, `STREAMDELAY_TOKEN` or `--token` is
+  refused at startup. Prefer the first two: other users of the computer can see
+  command lines.
 - **`--ephemeral` runs** keep secrets in memory only.
 - **Logs:** `streamdelayd run` prints the links' tokens and the OBS key only to
   a terminal, not to `docker logs` or a service's log; `streamdelayd urls`

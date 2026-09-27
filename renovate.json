@@ -13,6 +13,16 @@
       "groupName": "non-major dependencies"
     },
     {
+      "description": "New builds of the Docker base images (same tags), in one pull request",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "Docker base image digests"
+    },
+    {
       "matchDepNames": [
         "rust"
       ],

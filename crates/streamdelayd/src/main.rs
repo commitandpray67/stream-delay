@@ -4,10 +4,10 @@ mod client;
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use streamdelay_config::{Config, MemorySecrets, SecretStore, Secrets};
 use streamdelay_control::{
@@ -40,8 +40,15 @@ enum Cmd {
     /// Run the relay (OBS -> stream-delay -> destination) with the web UI and API.
     Run(RunArgs),
     /// Print the OBS server address and stream key, and the dock, overlay and
-    /// dashboard links.
-    Urls,
+    /// dashboard links. Give it the token and ingest key `run` was given, if not
+    /// the ones in the settings file (the environment variables are read too).
+    Urls {
+        #[command(flatten)]
+        token: TokenArgs,
+        /// The stream key encoders must use.
+        #[arg(long, env = "STREAMDELAY_INGEST_KEY", hide_env_values = true)]
+        ingest_key: Option<String>,
+    },
     /// Set the delay on a running instance.
     Delay {
         /// Delay in seconds. 0 goes live.
@@ -100,6 +107,13 @@ enum Cmd {
         #[command(flatten)]
         api: ApiArgs,
     },
+    /// Check that an instance is running and answering: exits with 0 if so, else
+    /// 1 (for container health checks). Needs no token.
+    Health {
+        /// Base URL of the running instance (default: from the config file).
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -119,9 +133,8 @@ struct RunArgs {
     /// Address of the control API and web UI.
     #[arg(long)]
     api: Option<SocketAddr>,
-    /// API token (overrides the one in the config file).
-    #[arg(long, env = "STREAMDELAY_TOKEN", hide_env_values = true)]
-    token: Option<String>,
+    #[command(flatten)]
+    token: TokenArgs,
     /// Maximum delay in seconds.
     #[arg(long)]
     max_delay: Option<u64>,
@@ -150,9 +163,22 @@ struct ApiArgs {
     /// Base URL of the running instance (default: from the config file).
     #[arg(long)]
     url: Option<String>,
-    /// API token (default: from the config file).
+    #[command(flatten)]
+    token: TokenArgs,
+}
+
+/// The API token, when not the one in the settings file.
+#[derive(Args, Clone, Default)]
+struct TokenArgs {
+    /// API token (default: from the settings file). Not recommended: other users
+    /// of this computer can see command lines. Use --token-file or
+    /// STREAMDELAY_TOKEN instead.
     #[arg(long, env = "STREAMDELAY_TOKEN", hide_env_values = true)]
     token: Option<String>,
+    /// File holding the API token (a Docker or systemd secret, for example).
+    /// Wins over --token and STREAMDELAY_TOKEN.
+    #[arg(long, env = "STREAMDELAY_TOKEN_FILE", value_name = "PATH")]
+    token_file: Option<PathBuf>,
 }
 
 fn config_path(cli: &Option<PathBuf>) -> Result<PathBuf> {
@@ -162,25 +188,64 @@ fn config_path(cli: &Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// The settings file, if there is one and it can be read.
+fn read_config(config: &Option<PathBuf>) -> Option<Config> {
+    config_path(config)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| toml::from_str::<Config>(&t).ok())
+}
+
+/// Where the running instance is: `url` if given, else the API address in the
+/// settings file.
+fn instance_url(url: Option<String>, file: Option<&Config>) -> String {
+    url.unwrap_or_else(|| {
+        let bind = file.map_or(Config::default().api.bind, |c| c.api.bind);
+        format!("http://{}", reachable(bind))
+    })
+}
+
+/// The token in `path`: its content, without surrounding whitespace (such as
+/// the line break at the end).
+fn read_token_file(path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the token file {}", path.display()))?;
+    let token = text.trim();
+    if token.is_empty() {
+        bail!("the token file {} is empty", path.display());
+    }
+    Ok(token.to_string())
+}
+
+impl TokenArgs {
+    /// The token given with --token-file (or STREAMDELAY_TOKEN_FILE), else with
+    /// --token or STREAMDELAY_TOKEN. An empty one is none: the settings file's
+    /// counts.
+    fn given(&self) -> Result<Option<String>> {
+        match self
+            .token_file
+            .as_deref()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            Some(path) => read_token_file(path).map(Some),
+            None => Ok(self.token.clone().filter(|t| !t.is_empty())),
+        }
+    }
+}
+
 impl ApiArgs {
     /// Fills in the URL and token from the config file when not given.
     fn resolve(self, config: &Option<PathBuf>) -> Result<(String, String)> {
-        let file = config_path(config)
-            .ok()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| toml::from_str::<Config>(&t).ok());
-        let url = self.url.unwrap_or_else(|| {
-            let bind = file
-                .as_ref()
-                .map_or(Config::default().api.bind, |c| c.api.bind);
-            format!("http://{}", reachable(bind))
-        });
+        let file = read_config(config);
+        let url = instance_url(self.url, file.as_ref());
         let token = self
             .token
+            .given()?
             .or_else(|| file.map(|c| c.api.token))
             .filter(|t| !t.is_empty())
             .context(
-                "no API token: pass --token or run `streamdelayd run` once to create a config",
+                "no API token: pass --token-file or set STREAMDELAY_TOKEN, or run \
+                 `streamdelayd run` once to create a config",
             )?;
         Ok((url, token))
     }
@@ -192,16 +257,19 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Run(args) => run(cli.config, args),
-        Cmd::Urls => {
+        Cmd::Urls { token, ingest_key } => {
             let path = config_path(&cli.config)?;
             let c = Config::load_or_create(&path)?;
             let host = format!("127.0.0.1:{}", c.api.bind.port());
-            let token = |s| scoped_token(&c.api.token, s);
+            // What `run` uses: what it was given over what is saved.
+            let admin = token.given()?.unwrap_or(c.api.token);
+            let token = |s| scoped_token(&admin, s);
             println!(
                 "OBS server:  rtmp://127.0.0.1:{}/live",
                 c.ingest.bind.port()
             );
-            match c.ingest.key.as_deref().filter(|k| !k.is_empty()) {
+            let ingest_key = ingest_key.filter(|k| !k.is_empty()).or(c.ingest.key);
+            match ingest_key.as_deref().filter(|k| !k.is_empty()) {
                 Some(k) => println!("OBS key:     {k}"),
                 None => println!("OBS key:     any"),
             }
@@ -270,6 +338,12 @@ fn main() -> Result<()> {
             let (url, token) = api.resolve(&cli.config)?;
             client::print(client::get(&url, &token, "/api/v1/state")?)
         }
+        Cmd::Health { url } => {
+            let url = instance_url(url, read_config(&cli.config).as_ref());
+            let version = client::health(&url)?;
+            println!("stream-delay {version} is running at {url}");
+            Ok(())
+        }
         Cmd::Diagnostics { output, api } => {
             let (url, token) = api.resolve(&cli.config)?;
             let bundle = client::get(&url, &token, "/api/v1/diagnostics")?;
@@ -316,7 +390,7 @@ fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
         destination_url: args.dest,
         destination_key: std::env::var(&args.key_env).ok().filter(|k| !k.is_empty()),
         passthrough: args.passthrough,
-        token: args.token,
+        token: args.token.given()?,
         max_delay_seconds: args.max_delay,
         start_delay_seconds: args.delay,
         grace_seconds: args.grace,
@@ -483,7 +557,7 @@ mod tests {
         assert_eq!(seconds, 12.5);
         assert!(mask);
         assert_eq!(api.url.as_deref(), Some("http://h:1"));
-        assert_eq!(api.token.as_deref(), Some("t"));
+        assert_eq!(api.token.token.as_deref(), Some("t"));
         let Cmd::Delay { seconds, mask, .. } = parse(&["delay", "0"]).command else {
             panic!("not delay");
         };
@@ -526,7 +600,7 @@ mod tests {
         ));
         assert!(matches!(parse(&["resume"]).command, Cmd::Resume { .. }));
         assert!(matches!(parse(&["state"]).command, Cmd::State { .. }));
-        assert!(matches!(parse(&["urls"]).command, Cmd::Urls));
+        assert!(matches!(parse(&["urls"]).command, Cmd::Urls { .. }));
         let Cmd::Diagnostics { output, .. } = parse(&["diagnostics", "-o", "d.json"]).command
         else {
             panic!("not diagnostics");
@@ -605,7 +679,10 @@ mod tests {
     fn api(url: Option<&str>, token: Option<&str>) -> ApiArgs {
         ApiArgs {
             url: url.map(str::to_string),
-            token: token.map(str::to_string),
+            token: TokenArgs {
+                token: token.map(str::to_string),
+                token_file: None,
+            },
         }
     }
 
@@ -640,6 +717,85 @@ mod tests {
         assert!(api(None, Some("")).resolve(&missing).is_err());
         let path = write_config(dir.path(), "127.0.0.1:7790", "");
         assert!(api(None, None).resolve(&path).is_err());
+    }
+
+    #[test]
+    fn health_and_token_files_parse() {
+        let Cmd::Health { url } = parse(&["health", "--url", "http://127.0.0.1:7788"]).command
+        else {
+            panic!("not health");
+        };
+        assert_eq!(url.as_deref(), Some("http://127.0.0.1:7788"));
+        assert!(matches!(
+            parse(&["health"]).command,
+            Cmd::Health { url: None }
+        ));
+        // Health needs no token, so takes none.
+        assert_eq!(
+            refused(&["health", "--token", "t"]),
+            ErrorKind::UnknownArgument
+        );
+        let Cmd::Run(a) = parse(&["run", "--token-file", "/run/secrets/token"]).command else {
+            panic!("not run");
+        };
+        assert_eq!(
+            a.token.token_file,
+            Some(PathBuf::from("/run/secrets/token"))
+        );
+        let Cmd::State { api } = parse(&["state", "--token-file", "t.txt"]).command else {
+            panic!("not state");
+        };
+        assert_eq!(api.token.token_file, Some(PathBuf::from("t.txt")));
+    }
+
+    #[test]
+    fn a_token_file_wins_and_must_hold_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "  from-the-file-0123\r\n").unwrap();
+        let given = |token: Option<&str>, file: Option<&Path>| {
+            TokenArgs {
+                token: token.map(str::to_string),
+                token_file: file.map(Path::to_path_buf),
+            }
+            .given()
+        };
+        let token = given(Some("given"), Some(&file)).unwrap();
+        assert_eq!(token.as_deref(), Some("from-the-file-0123"));
+        assert_eq!(
+            given(Some("given"), None).unwrap().as_deref(),
+            Some("given")
+        );
+        // The client too, over the settings file's.
+        let config = write_config(dir.path(), "127.0.0.1:7790", "in-the-settings");
+        let mut args = api(None, None);
+        args.token.token_file = Some(file.clone());
+        assert_eq!(args.resolve(&config).unwrap().1, "from-the-file-0123");
+
+        std::fs::write(&file, "\n").unwrap();
+        let err = given(None, Some(&file)).unwrap_err();
+        assert!(err.to_string().contains("is empty"), "{err}");
+        let missing = dir.path().join("missing");
+        let err = given(None, Some(&missing)).unwrap_err();
+        assert!(err.to_string().contains("reading the token file"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_token_is_none() {
+        // STREAMDELAY_TOKEN= (set, but empty) or STREAMDELAY_TOKEN_FILE=.
+        let empty = TokenArgs {
+            token: Some(String::new()),
+            token_file: Some(PathBuf::new()),
+        };
+        assert_eq!(empty.given().unwrap(), None);
+        // The settings file's counts then.
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_config(dir.path(), "127.0.0.1:7790", "in-the-settings");
+        let args = ApiArgs {
+            url: None,
+            token: empty,
+        };
+        assert_eq!(args.resolve(&config).unwrap().1, "in-the-settings");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Release image: packages the streamdelayd binaries built by the release workflow
 # (dist/<arch>/streamdelayd) instead of compiling them again. To build an image
-# from source, use Dockerfile. Keep the runtime part in sync with Dockerfile.
+# from source, use Dockerfile. Keep the runtime part in sync with Dockerfile
+# (the base image digest too; Renovate updates both).
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -12,4 +13,8 @@ USER streamdelay
 ENV STREAMDELAY_CONFIG=/data/config.toml
 VOLUME /data
 EXPOSE 1935 7788
+# `docker ps` shows whether it answers. If you change --api, change this too
+# (docker run --health-cmd).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD ["streamdelayd", "health", "--url", "http://127.0.0.1:7788"]
 ENTRYPOINT ["streamdelayd", "run", "--no-keychain", "--allow-lan", "--ingest", "0.0.0.0:1935", "--api", "0.0.0.0:7788"]
