@@ -417,6 +417,54 @@ mod tests {
     }
 
     #[test]
+    fn hevc_nal_classes() {
+        // H.265 table 7-1: TRAIL, TSA and STSA pictures; RADL, then RASL; then
+        // BLA, IDR, CRA and two reserved IRAP types.
+        let trailing = [0, 1, 2, 3, 4, 5];
+        let rasl = [8, 9];
+        let irap = [16, 17, 18, 19, 20, 21, 22, 23];
+        for t in 0..64u8 {
+            assert_eq!(hevc::is_trailing(t), trailing.contains(&t), "{t}");
+            assert_eq!(hevc::is_rasl(t), rasl.contains(&t), "{t}");
+            assert_eq!(hevc::is_irap(t), irap.contains(&t), "{t}");
+        }
+    }
+
+    #[test]
+    fn every_cra_slice_is_rewritten_and_nothing_else() {
+        let nal = |header: u8, body: &[u8]| {
+            let mut n = ((body.len() + 1) as u32).to_be_bytes().to_vec();
+            n.push(header);
+            n.extend_from_slice(body);
+            n
+        };
+        // Five bytes before the NAL units, a parameter set, then two CRA slices,
+        // the first with the high bit of its layer id set, which must stay.
+        let mut v = vec![0xaa; 5];
+        v.extend(nal(34 << 1, &[1; 20]));
+        v.extend(nal((21 << 1) | 1, &[1, 2, 3]));
+        v.extend(nal(21 << 1, &[1, 2, 3]));
+        let bla = hevc::cra_to_bla(&v, 5).unwrap();
+        let mut expected = v.clone();
+        let first = 5 + 4 + 21 + 4;
+        expected[first] = (16 << 1) | 1;
+        expected[first + 4 + 4] = 16 << 1;
+        assert_eq!(bla, expected);
+        // Without a CRA slice there is nothing to rewrite.
+        assert_eq!(hevc::cra_to_bla(&expected, 5), None);
+        // A NAL unit of length 0 ends the scan: what follows cannot be trusted.
+        let mut v = vec![0xaa; 5];
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v.extend(nal(21 << 1, &[1, 2, 3]));
+        assert_eq!(hevc::cra_to_bla(&v, 5), None);
+        // As does one longer than the data.
+        let mut v = vec![0xaa; 5];
+        v.extend(nal(21 << 1, &[1, 2, 3]));
+        v[8] = 200;
+        assert_eq!(hevc::cra_to_bla(&v, 5), None);
+    }
+
+    #[test]
     fn legacy_aac() {
         let a = inspect_audio(&[0xaf, 0x00, 0x12, 0x10]).unwrap();
         assert!(a.config && a.codec == AudioCodec::Aac);
@@ -463,6 +511,126 @@ mod tests {
         m.push(1);
         let i = inspect_video(&m).unwrap();
         assert!(i.multitrack && i.config && i.config_class == (1 << 8));
+    }
+
+    #[test]
+    fn codecs_by_fourcc_and_legacy_id() {
+        for (fourcc, codec) in [
+            (b"avc1", VideoCodec::Avc),
+            (b"hvc1", VideoCodec::Hevc),
+            (b"av01", VideoCodec::Av1),
+            (b"vp09", VideoCodec::Vp9),
+            (b"vp08", VideoCodec::Vp8),
+            (b"xxxx", VideoCodec::Other),
+        ] {
+            let mut v = vec![0x80 | 0x10 | 0x03];
+            v.extend_from_slice(fourcc);
+            assert_eq!(inspect_video(&v).unwrap().codec, codec);
+        }
+        for (fourcc, codec) in [
+            (b"mp4a", AudioCodec::Aac),
+            (b".mp3", AudioCodec::Mp3),
+            (b"Opus", AudioCodec::Opus),
+            (b"fLaC", AudioCodec::Flac),
+            (b"ac-3", AudioCodec::Ac3),
+            (b"ec-3", AudioCodec::Eac3),
+            (b"xxxx", AudioCodec::Other),
+        ] {
+            let mut a = vec![0x91];
+            a.extend_from_slice(fourcc);
+            assert_eq!(inspect_audio(&a).unwrap().codec, codec);
+        }
+        // Legacy AV1 (codec id 13) has a packet type, like AVC and HEVC.
+        let i = inspect_video(&[0x1d, 0x00, 0, 0, 0]).unwrap();
+        assert!(i.config && i.codec == VideoCodec::Av1);
+    }
+
+    #[test]
+    fn nal_types_only_for_hevc_and_composition_times_only_for_avc_and_hevc() {
+        // Legacy AVC whose data would read as an HEVC CRA slice: AVC's NAL
+        // headers are another format, and a type taken from them could have the
+        // frame dropped as a leading picture.
+        let avc = [0x17, 0x01, 0, 0, 0, 0, 0, 0, 3, 21 << 1, 1, 0xaf];
+        let i = inspect_video(&avc).unwrap();
+        assert_eq!((i.nal_offset, i.hevc_nal_type), (None, None));
+        // A legacy codec without a packet type (Sorenson H.263).
+        let h263 = inspect_video(&[0x12, 0x00, 0x00, 0x42, 0x00]).unwrap();
+        assert!(h263.keyframe);
+        assert_eq!(h263.composition_time, 0);
+        // Enhanced AV1 coded frames: no composition time, no NAL units.
+        let mut av1 = vec![0x80 | 0x10 | 0x01];
+        av1.extend_from_slice(b"av01");
+        av1.extend_from_slice(&[0, 0, 7, 0, 0, 0, 3, 21 << 1, 1, 0xaf]);
+        let i = inspect_video(&av1).unwrap();
+        assert_eq!(
+            (i.composition_time, i.nal_offset, i.hevc_nal_type),
+            (0, None, None)
+        );
+        // An AVC sequence start has no composition time either.
+        let mut seq = vec![0x80 | 0x10];
+        seq.extend_from_slice(b"avc1");
+        seq.extend_from_slice(&[0, 0, 7]);
+        assert_eq!(inspect_video(&seq).unwrap().composition_time, 0);
+        // Multitrack HEVC: what follows the FourCC is the track's framing.
+        let mut m = vec![0x80 | 0x10 | 0x06, 0x01];
+        m.extend_from_slice(b"hvc1");
+        m.push(0);
+        m.extend_from_slice(&[0, 0, 0, 0, 0, 0, 3, 21 << 1, 1, 0xaf]);
+        assert_eq!(inspect_video(&m).unwrap().nal_offset, None);
+    }
+
+    #[test]
+    fn parameter_sets_before_the_slice_are_skipped() {
+        // In-band VPS (type 32) and SPS (33) ahead of a CRA slice.
+        let mut v = vec![0x80 | 0x10 | 0x01];
+        v.extend_from_slice(b"hvc1");
+        v.extend_from_slice(&[0, 0, 0]);
+        v.extend_from_slice(&[0, 0, 0, 3, 32 << 1, 1, 0x0c]);
+        v.extend_from_slice(&[0, 0, 0, 3, 33 << 1, 1, 0x01]);
+        v.extend_from_slice(&[0, 0, 0, 3, 21 << 1, 1, 0xaf]);
+        assert_eq!(inspect_video(&v).unwrap().hevc_nal_type, Some(hevc::CRA));
+    }
+
+    #[test]
+    fn mod_ex_sizes_and_limit() {
+        // 300 bytes of ModEx data: the size takes 16 bits (255, then 299).
+        let mut v = vec![0x80 | 0x10 | 0x07, 255, 0x01, 0x2b];
+        v.extend([9; 300]);
+        v.push(0x01);
+        v.extend_from_slice(b"avc1");
+        v.extend_from_slice(&[0, 0, 0]);
+        let i = inspect_video(&v).unwrap();
+        assert!(i.keyframe && i.codec == VideoCodec::Avc);
+        // At most 16 ModEx blocks in a row.
+        let blocks = |n: usize| {
+            let mut v = vec![0x80 | 0x10 | 0x07];
+            for i in 0..n {
+                v.extend_from_slice(&[0, 9, if i + 1 < n { 0x07 } else { 0x01 }]);
+            }
+            v.extend_from_slice(b"avc1");
+            v.extend_from_slice(&[0, 0, 0]);
+            v
+        };
+        assert!(inspect_video(&blocks(16)).unwrap().keyframe);
+        assert_eq!(inspect_video(&blocks(17)), None);
+    }
+
+    #[test]
+    fn multitrack_audio() {
+        // OneTrack (0 in the high nibble), SequenceStart, track 1.
+        let mut a = vec![0x90 | 0x05, 0x00];
+        a.extend_from_slice(b"mp4a");
+        a.push(1);
+        let i = inspect_audio(&a).unwrap();
+        assert!(i.multitrack && i.config && i.codec == AudioCodec::Aac);
+        assert_eq!(i.config_class, 1 << 8);
+        // ManyTracks (1), CodedFrames, track 2.
+        let mut a = vec![0x90 | 0x05, 0x11];
+        a.extend_from_slice(b"Opus");
+        a.push(2);
+        let i = inspect_audio(&a).unwrap();
+        assert!(i.multitrack && !i.config);
+        assert_eq!(i.config_class, (2 << 8) | 1);
     }
 
     #[test]
