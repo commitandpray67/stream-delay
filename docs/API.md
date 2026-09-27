@@ -30,10 +30,10 @@ Run `streamdelayd urls` to print links that already contain their tokens.
 
 | Method and path | Body | Effect |
 |---|---|---|
-| `PUT /api/v1/delay` | `{"seconds": 30, "mode": "rewind" \| "mask"}` | Set the delay. `mode` defaults to the configured default. `0` removes the delay. |
+| `PUT /api/v1/delay` | `{"seconds": 30, "mode": "rewind" \| "mask"}` | Set the delay. `mode` defaults to the configured default. `0` removes the delay. While a dump builds the delay back up (its replay, slate or hold), it sets the delay that dump builds, whatever the mode: nothing recorded after the dump airs sooner. The same Mask change again while one is under way changes nothing. |
 | `POST /api/v1/live` | `{"when": "now" \| "after-air"}` | Remove the delay at the next keyframe, or after everything buffered so far has aired. No body means `now`. A body is read as JSON whatever its `Content-Type`, and an invalid one is refused with `400`. |
 | `POST /api/v1/presets/{index}` | none | Apply a configured preset (0-based). |
-| `POST /api/v1/cancel` | none | Cancel a pending change (for example a mask in progress). |
+| `POST /api/v1/cancel` | none | Cancel a pending change (for example a mask in progress), keeping the delay in effect. The state's `cancellable` says whether one is under way; a dump building the delay back up (its replay, slate or hold) is not, and is left as it is. |
 | `POST /api/v1/stream/dump` | `{"mode": "rewind" \| "mask", "allow_uncovered": false}` (both optional) | Throw away everything that has not aired yet, so it never does, and keep broadcasting with the same delay. The answer's `dump` says what viewers see, the first that can happen: `replay` (only in `rewind` mode, the default, with the buffer reaching back about twice the delay and the destination connected, its answer to the dump in time): the last stretch again, then what was recorded after the dump; `cover` (only while an overlay page is connected, or with `allow_uncovered: true` for a caller that shows the slate some other way): the overlay slate while the delay builds back up, what it covers airing almost live (its sound left out unless `delay.mute_under_slate` is off); `hold`: the last frame that aired, sent again about once a second, until what was recorded after the dump has the full delay. Before anything has aired, or while an `after-air` end is airing (the broadcast then ends at once), `dump` is `hold` and `pending` is `false`: nothing more airs from before. `400` when there is no delay. Media already on its way to the destination is thrown away too: what is queued in stream-delay, and, if the OS has not sent all that was written (a write under way, or data waiting in its send buffer), the connection is reset, dropping it, and made again at once. A replay then repeats only what the destination acknowledged. The response comes once this is done. |
 | `POST /api/v1/stream/end` | `{"when": "now" \| "after-air"}` | End the broadcast. `now` (also with no body): at once, and everything still in the delay buffer is thrown away and never airs. `after-air`: once what stream-delay has received so far has aired; nothing received after the request airs (`ending` is `true` until then). Either way nothing more is sent until `resume` or a new encoder stream. A body is read as JSON whatever its `Content-Type`; an invalid one is refused with `400`. Returns the state, as `GET /api/v1/state` shows it with the same token. |
 | `POST /api/v1/stream/resume` | none | Broadcast again after `end`, from content received from now on, with the current delay. While an `after-air` end is still airing, cancel it instead: the broadcast carries on. Returns the state, as `GET /api/v1/state` shows it with the same token. |
@@ -61,7 +61,7 @@ Commands return an acknowledgement:
     "phase": "delayed",
     "target_ms": 30000, "effective_ms": 31200, "max_delay_ms": 120000,
     "history_ms": 64000, "buffered_bytes": 48000000,
-    "mask_visible": false, "slate_change": 0, "history_short": false,
+    "mask_visible": false, "cancellable": false, "slate_change": 0, "history_short": false,
     "memory_short": false, "excess_ms": 0, "full_delay_ready": false,
     "ingest": { "active": true, "video_codec": "avc", "audio_codec": "aac",
                 "bitrate_kbps": 6100, "fps": 60.0, "gop_ms": 2000,

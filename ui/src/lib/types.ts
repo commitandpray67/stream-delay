@@ -25,6 +25,8 @@ export interface Snapshot {
   history_ms: number;
   buffered_bytes: number;
   mask_visible: boolean;
+  /** A change is under way that Cancel stops (a dump building the delay back up is not). */
+  cancellable: boolean;
   /** Numbers the changes the slate covers; the overlay confirms it painted this one. */
   slate_change: number;
   history_short: boolean;

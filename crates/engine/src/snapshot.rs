@@ -63,6 +63,9 @@ pub struct Snapshot {
     pub buffered_bytes: u64,
     /// The overlay should show the mask slate.
     pub mask_visible: bool,
+    /// A change is under way that Cancel stops. Not a dump building the delay
+    /// back up: that cannot be cancelled.
+    pub cancellable: bool,
     /// Numbers the changes the slate covers: an overlay page confirms that it
     /// painted the slate for this one (see [`crate::Command::SlateShown`]).
     pub slate_change: u64,
@@ -280,6 +283,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         history_ms,
         buffered_bytes: (e.bytes + e.session_bytes) as u64,
         mask_visible: o.mask_visible,
+        cancellable: o.pending.cancellable(),
         slate_change: o.slate_change,
         history_short: o.history_short,
         memory_short: o.memory_short,

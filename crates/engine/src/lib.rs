@@ -289,6 +289,8 @@ enum Pending {
         mute: bool,
         /// When an overlay confirmed the slate (see [`Command::SlateShown`]).
         shown: Option<Time>,
+        /// The slate covers a dump (see [`Pending::Dump`]), not a delay change.
+        dump: bool,
     },
     /// Everything recorded before `started` (from `from` on) was thrown away;
     /// the output waits for a keyframe recorded under the slate, then builds
@@ -321,6 +323,36 @@ impl Pending {
     /// The overlay slate is up for this change.
     fn covers(&self) -> bool {
         matches!(self, Pending::Mask { .. } | Pending::Dump { .. })
+    }
+
+    /// A dump building the delay back up (a replay, the slate, or a hold): what
+    /// it holds back must not air sooner, so it cannot be cancelled.
+    fn after_dump(&self) -> bool {
+        matches!(
+            self,
+            Pending::Replay { .. }
+                | Pending::Hold { .. }
+                | Pending::Dump { .. }
+                | Pending::Mask { dump: true, .. }
+        )
+    }
+
+    /// For a dump building the delay back up: the delay it builds.
+    fn dump_delay_mut(&mut self) -> Option<&mut u64> {
+        match self {
+            Pending::Replay { delay, .. }
+            | Pending::Hold { delay, .. }
+            | Pending::Dump { delay, .. }
+            | Pending::Mask {
+                delay, dump: true, ..
+            } => Some(delay),
+            _ => None,
+        }
+    }
+
+    /// Cancel stops it, keeping the delay in effect.
+    pub(crate) fn cancellable(&self) -> bool {
+        *self != Pending::None && !self.after_dump()
     }
 }
 
@@ -888,13 +920,10 @@ impl Engine {
                     }
                 }
             }
-            // A dump's replay or hold is not a change to cancel: its delay is the
-            // target, and cancelling a hold would air what it holds back.
-            Command::Cancel
-                if matches!(
-                    self.out.pending,
-                    Pending::Replay { .. } | Pending::Hold { .. }
-                ) => {}
+            // A dump's replay, slate or hold is not a change to cancel: its delay
+            // is the target, and cancelling would air what it holds back, or
+            // what the slate covers without it.
+            Command::Cancel if self.out.pending.after_dump() => {}
             Command::Cancel => {
                 self.set_pending(Pending::None);
                 // An outage during the change can have taken the delay past the
@@ -936,6 +965,31 @@ impl Engine {
                     });
                 }
                 let d = ms * MS;
+                if ms > 0
+                    && let Some(delay) = self.out.pending.dump_delay_mut()
+                {
+                    // A dump is building the delay back up from what is recorded
+                    // after it: the new delay says how far. A rewind would go
+                    // back into that, and air it sooner than either.
+                    *delay = d;
+                    self.out.target = d;
+                    self.out.history_short = false;
+                    self.run_pending(now);
+                    return Ok(self.ack());
+                }
+                let mode = if self.config.keep_history {
+                    mode
+                } else {
+                    DelayMode::Mask
+                };
+                if d == self.out.target
+                    && mode == DelayMode::Mask
+                    && matches!(self.out.pending, Pending::Mask { .. })
+                {
+                    // The same change again: it is under way (the slate needs
+                    // no new confirmation).
+                    return Ok(self.ack());
+                }
                 self.out.target = d;
                 self.out.history_short = false;
                 self.set_pending(Pending::None);
@@ -945,12 +999,8 @@ impl Engine {
                 } else if ms == 0 {
                     return self.command(now, Command::GoLive(GoLiveWhen::Now));
                 } else if d > self.out.delay {
-                    // Without history there is nothing to rewind into.
-                    let mode = if self.config.keep_history {
-                        mode
-                    } else {
-                        DelayMode::Mask
-                    };
+                    // (Without history there is nothing to rewind into: `mode`
+                    // is Mask then.)
                     match mode {
                         DelayMode::Rewind => self.rewind(now, d),
                         DelayMode::Mask => {
@@ -960,6 +1010,7 @@ impl Engine {
                                 anchor: None,
                                 mute: false,
                                 shown: None,
+                                dump: false,
                             });
                             self.out.slate_change += 1;
                             self.out.mask_visible = true;
@@ -1125,11 +1176,6 @@ impl Engine {
             .map_or(2 * SEC, |ms| ms.clamp(1, 60_000) * MS)
     }
 
-    /// After a splice that took the delay past the maximum (a reconnect after an
-    /// outage, or a resync): come back down to the maximum at the next keyframe
-    /// old enough. The buffer only keeps what the maximum needs, so a delay
-    /// above it would outrun it. Within a keyframe interval of the maximum is
-    /// just rounding back to a keyframe.
     /// With [`EngineConfig::restore_after_reconnect`]: a delay the outage made
     /// longer goes back to the one set, at the first keyframe old enough (to live
     /// at the next keyframe, without one). A change under way decides instead;
@@ -1154,6 +1200,11 @@ impl Engine {
         self.set_pending(pending);
     }
 
+    /// After a splice that took the delay past the maximum (a reconnect after an
+    /// outage, or a resync): come back down to the maximum at the next keyframe
+    /// old enough. The buffer only keeps what the maximum needs, so a delay
+    /// above it would outrun it. Within a keyframe interval of the maximum is
+    /// just rounding back to a keyframe.
     fn back_under_max(&mut self) {
         let max = self.config.max_delay_ms * MS;
         if self.out.pending == Pending::None && self.out.delay > max + self.keyframe_interval() {
@@ -1364,6 +1415,7 @@ impl Engine {
                     anchor,
                     mute,
                     shown,
+                    dump,
                 } => {
                     let anchor = match anchor {
                         Some(a) => a,
@@ -1392,6 +1444,7 @@ impl Engine {
                                         anchor: Some(a),
                                         mute,
                                         shown,
+                                        dump,
                                     };
                                     a
                                 }
@@ -1447,6 +1500,7 @@ impl Engine {
                         anchor: Some(anchor),
                         mute: self.config.mute_under_slate,
                         shown,
+                        dump: true,
                     };
                 }
                 Pending::Hold { from, delay } => {
@@ -1522,11 +1576,16 @@ impl Engine {
                 wake = self.emit_hold_frame(now, out);
                 break;
             }
-            // Nor, after a replay, until the keyframe it continues from is due.
-            if let Pending::Replay { from, .. } = self.out.pending
+            // Nor, after a replay, until the keyframe it continues from is due:
+            // if the replay has run out before then (the delay was raised), its
+            // last frame holds.
+            if let Pending::Replay { from, delay } = self.out.pending
                 && self.out.next_seq >= from
             {
-                break;
+                let frame = self.aired_keyframe(now);
+                self.set_pending(Pending::Hold { from, delay });
+                self.out.hold = frame;
+                continue;
             }
             if self.out.next_seq < self.base_seq {
                 self.out.next_seq = self.base_seq;

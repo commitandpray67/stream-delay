@@ -73,6 +73,19 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- Cancel, while the slate covered a dump, took the slate down and aired what
+  was recorded after the dump almost live, uncovered (or, before an overlay
+  confirmed the slate, sent nothing at all until the delay was back). A dump
+  building the delay back up (its replay, slate or hold) can no longer be
+  cancelled, and the dock offers Cancel only for a change it stops; the state
+  gains `cancellable`.
+- Setting a delay during a dump rewound into what had been recorded since the
+  dump and aired it sooner than either delay: pressing a longer preset while
+  the last frame held aired the stream about 10 s behind live. It now sets
+  how long the dump waits. Pressing the same preset during a hold no longer
+  ends the still frame (the stream had no video until the delay was back), a
+  replay that runs out before what comes next is due holds its last frame, and
+  the same Mask change pressed twice no longer puts the slate up anew.
 - `streamdelayd urls` showed the token and ingest key saved in the settings
   file even when `run` was given others: with `STREAMDELAY_INGEST_KEY` in
   Docker it said the OBS key was "any", and with `STREAMDELAY_TOKEN` its links

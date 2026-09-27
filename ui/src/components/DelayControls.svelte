@@ -72,7 +72,8 @@
   let notice = $state("");
   let busy = $state(false);
 
-  const pending = $derived(snap ? ["adding", "going-live", "reducing"].includes(snap.phase) : false);
+  // A change Cancel stops (not a dump building the delay back up: that cannot be).
+  const pending = $derived(snap?.cancellable ?? false);
 
   function dumped(ack: Partial<Ack>): string {
     switch (ack.dump) {

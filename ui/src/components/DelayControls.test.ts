@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, within } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
 import { t } from "../lib/i18n";
@@ -28,6 +28,7 @@ function state(target_s: number, history_s: number, delay: Partial<Snapshot> = {
       history_ms: history_s * 1000,
       buffered_bytes: 0,
       mask_visible: false,
+      cancellable: false,
       slate_change: 0,
       history_short: false,
       memory_short: false,
@@ -302,6 +303,19 @@ describe("end stream", () => {
     expect(popup().textContent).toContain(t("action.endNow.warning", { delay: "30 s" }));
     await fireEvent.click(within(popup()).getByRole("button", { name: "End stream now" }));
     expect(api.endStream).toHaveBeenCalledWith("now");
+  });
+});
+
+describe("cancel", () => {
+  it("is offered while a change can be stopped, and not while a dump builds the delay back", async () => {
+    vi.mocked(api.cancel).mockResolvedValue(ack());
+    dock(state(30, 120, { phase: "adding", mask_visible: true, cancellable: true }));
+    await fireEvent.click(button("Cancel"));
+    expect(api.cancel).toHaveBeenCalledOnce();
+    cleanup();
+    // The slate covering a dump: the same phase, but nothing to cancel.
+    dock(state(30, 40, { phase: "adding", mask_visible: true, cancellable: false }));
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 });
 

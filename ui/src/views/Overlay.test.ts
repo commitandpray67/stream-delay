@@ -23,6 +23,7 @@ function state(delay: Partial<Snapshot>): RelayState {
       history_ms: 120_000,
       buffered_bytes: 0,
       mask_visible: false,
+      cancellable: false,
       slate_change: 0,
       history_short: false,
       memory_short: false,

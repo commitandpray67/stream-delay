@@ -1200,6 +1200,168 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
 
 /// Live at a 20 s delay rewound into, 30 s in: too little history for a
 /// replay, so a dump either covers or holds.
+/// While the slate covers a dump, what it covers airs almost live (or, before
+/// an overlay confirms it, the last frame holds): cancelling then would show
+/// that uncovered, or nothing at all. Like a replay or a hold, it cannot be
+/// cancelled.
+#[test]
+fn cancel_leaves_a_dumps_slate_alone() {
+    for confirmed in [false, true] {
+        let mut s = dump_sim(config());
+        let ack = s.cmd(Command::Dump {
+            mode: DelayMode::Mask,
+            cover: true,
+        });
+        assert_eq!(ack.dump, Some(DumpOutcome::Cover));
+        if confirmed {
+            // Up, and what it covers airing under it.
+            s.confirm_slate();
+            s.advance(5 * SEC);
+        } else {
+            s.advance(500 * MS);
+        }
+        let n = s.sent.len();
+        s.cmd(Command::Cancel);
+        let snap = s.snapshot();
+        assert!(snap.mask_visible, "confirmed {confirmed}: {snap:?}");
+        s.advance(10 * SEC);
+        if !confirmed {
+            // No overlay said so: it holds the last frame instead, still sent.
+            let held = s.sent[n..].iter().filter(|x| x.msg.seq.is_none()).count();
+            assert!(held >= 8, "{held} frames held");
+        }
+        s.advance(30 * SEC);
+        let snap = s.snapshot();
+        assert_eq!(
+            snap.phase,
+            Phase::Delayed,
+            "confirmed {confirmed}: {snap:?}"
+        );
+        assert!(
+            snap.effective_ms >= 19_000,
+            "confirmed {confirmed}: {snap:?}"
+        );
+    }
+}
+
+/// Setting the delay a change under way is already bringing about changes
+/// nothing: a dump's hold keeps sending the last frame (no dead air), and a
+/// slate is not put up again for an overlay to confirm.
+#[test]
+fn setting_the_delay_a_change_is_bringing_about_changes_nothing() {
+    // A dump nothing covers, holding the last frame.
+    let mut s = dump_sim(config());
+    s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: false,
+    });
+    s.advance(2 * SEC);
+    let n = s.sent.len();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(10 * SEC);
+    assert_eq!(s.snapshot().phase, Phase::Holding, "{:?}", s.snapshot());
+    let held = s.sent[n..].iter().filter(|x| x.msg.seq.is_none()).count();
+    assert!(held >= 8, "{held} frames held");
+    s.advance(30 * SEC);
+    assert!(s.snapshot().effective_ms >= 19_000, "{:?}", s.snapshot());
+
+    // A longer delay asked for during the hold: the hold lasts until what is
+    // recorded after the dump has it. (A rewind would reach back only into
+    // that, and air it sooner than either delay.)
+    let mut s = dump_sim(config());
+    s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: false,
+    });
+    let dumped_at = s.now;
+    s.advance(2 * SEC);
+    let n = s.sent.len();
+    s.cmd(Command::SetDelay {
+        ms: 30_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(40 * SEC);
+    for (_, sent, info) in s.media_sent_in(n..s.sent.len()) {
+        if info.arrival >= dumped_at {
+            assert!(
+                sent.at - info.arrival >= 30 * SEC,
+                "recorded after the dump, aired after {} ms",
+                (sent.at - info.arrival) / MS
+            );
+        }
+    }
+    assert!(s.snapshot().effective_ms >= 29_000, "{:?}", s.snapshot());
+
+    // A Mask change, and the same one again before it is done.
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Mask,
+    });
+    s.advance(SEC);
+    let change = s.snapshot().slate_change;
+    s.confirm_slate();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Mask,
+    });
+    assert_eq!(s.snapshot().slate_change, change);
+    s.advance(25 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert!(!s.e.out.slate_unconfirmed, "{snap:?}");
+}
+
+/// Raising the delay during a dump's replay: what is recorded after the dump
+/// waits for the new delay, and once the replay has run out its last frame
+/// holds (no dead air) until then.
+#[test]
+fn raising_the_delay_during_a_dumps_replay_holds_back_what_comes_next_longer() {
+    let mut s = live_sim();
+    s.advance(60 * SEC);
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(20 * SEC);
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Rewind,
+        cover: false,
+    });
+    assert_eq!(ack.dump, Some(DumpOutcome::Replay));
+    let dumped_at = s.now;
+    s.advance(SEC);
+    let ack = s.cmd(Command::SetDelay {
+        ms: 30_000,
+        mode: DelayMode::Rewind,
+    });
+    assert_eq!(ack.target_ms, 30_000);
+    let n = s.sent.len();
+    s.advance(45 * SEC);
+    for (_, sent, info) in s.media_sent_in(n..s.sent.len()) {
+        if info.arrival >= dumped_at {
+            assert!(
+                sent.at - info.arrival >= 30 * SEC,
+                "recorded after the dump, aired after {} ms",
+                (sent.at - info.arrival) / MS
+            );
+        }
+    }
+    let video: Vec<Time> = s.sent[n..]
+        .iter()
+        .filter(|x| x.msg.kind == Kind::Video)
+        .map(|x| x.at)
+        .collect();
+    let gap = video.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0);
+    assert!(gap <= 1_100 * MS, "{} ms without video", gap / MS);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert!((30_000..=32_100).contains(&snap.effective_ms), "{snap:?}");
+}
+
 fn dump_sim(config: EngineConfig) -> Sim {
     let mut s = Sim::new(config);
     s.connect();
@@ -1981,9 +2143,12 @@ proptest! {
                     s.start_encoder(0);
                 }
             }
-            // The mask splice raises the floor once it happens.
+            // The mask splice raises the floor once it happens. A dump's replay
+            // shows what already aired again (the snapshot gives the delay it
+            // continues with): what it holds back is checked once it continues.
             let snap = s.snapshot();
-            if snap.phase == Phase::Delayed && snap.effective_ms * MS > s.floor && snap.target_ms * MS <= snap.effective_ms * MS {
+            let replaying = matches!(s.e.out.pending, Pending::Replay { .. });
+            if !replaying && snap.phase == Phase::Delayed && snap.effective_ms * MS > s.floor && snap.target_ms * MS <= snap.effective_ms * MS {
                 s.floor = snap.target_ms * MS;
                 s.floor_log.push((s.sent.len(), s.floor));
             }
