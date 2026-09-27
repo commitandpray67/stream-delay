@@ -2,7 +2,8 @@
 # End-to-end check: ffmpeg (encoder) -> streamdelayd -> ffmpeg (RTMP server, recording).
 #
 # While the stream runs, the script adds, removes and changes the delay and dumps
-# the buffer through the API. Then it verifies the recording: timestamps always increase, the video decodes
+# the buffer through the API (a replay, and a hold: no overlay covers a mask
+# dump). Then it verifies the recording: timestamps always increase, the video decodes
 # without errors across every splice, and the delay changes are visible in the timing.
 #
 # Requires: ffmpeg, ffprobe, curl, python3, and a built streamdelayd
@@ -16,7 +17,7 @@ INGEST=127.0.0.1:19350
 SINK_PORT=19360
 API=127.0.0.1:17788
 TOKEN=e2e-test-token-0123456789
-DURATION=${DURATION:-44}
+DURATION=${DURATION:-52}
 pids=()
 cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
@@ -54,7 +55,15 @@ sleep 6;  echo "t=14  dump (replay):";        api POST /api/v1/stream/dump '{"mo
 sleep 6;  echo "t=20  go live now:";          api POST /api/v1/live '{"when":"now"}'
 sleep 4;  echo "t=24  mask to 4 s:";          api PUT /api/v1/delay '{"seconds":4,"mode":"mask"}'
 sleep 8;  echo "t=32  state:";                api GET /api/v1/state | python3 -c 'import json,sys; s=json.load(sys.stdin)["delay"]; print(" phase", s["phase"], "effective", s["effective_ms"], "ms, splices", s["output"]["splices"])'
-echo "t=32  go live after it airs:"; api POST /api/v1/live '{"when":"after-air"}'
+if (( DURATION >= 44 )); then
+  # The last frame shows again while the delay builds back (for HEVC, marked
+  # as a new start), then the stream continues: all of it has to decode.
+  echo "t=32  dump (hold: no overlay):"
+  api POST /api/v1/stream/dump '{"mode":"mask"}' | tee "$WORK/hold.json"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["dump"]; assert d == "hold", d' "$WORK/hold.json"
+  sleep 8
+fi
+echo "go live after it airs:"; api POST /api/v1/live '{"when":"after-air"}'
 wait $enc || true
 sleep 4
 

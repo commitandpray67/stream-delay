@@ -66,13 +66,18 @@ fn run(app: &AppHandle, action: Action) {
     let Some(core) = app.try_state::<Core>().map(|c| c.0.clone()) else {
         return;
     };
+    let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = match action {
             Action::GoLive => core.relay().go_live(GoLiveWhen::Now).await.map(|_| ()),
             Action::GoLiveAfterAir => core.relay().go_live(GoLiveWhen::AfterAir).await.map(|_| ()),
             Action::EndStream => core.relay().end_stream().await,
             Action::EndStreamAfterAir => core.relay().end_stream_after_air().await,
-            Action::Dump => core.dump().await.map(|_| ()),
+            Action::Dump => {
+                let r = core.dump().await;
+                crate::dump_notice(&app, &r);
+                r.map(|_| ())
+            }
             Action::Preset(i) => core.apply_preset(i).await,
         };
         if let Err(e) = result {

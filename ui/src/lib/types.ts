@@ -1,15 +1,20 @@
 // Mirrors the JSON produced by the Rust API (crates/control, crates/relay, crates/engine).
 
-export type Phase = "offline" | "live" | "delayed" | "adding" | "going-live" | "reducing";
+export type Phase = "offline" | "live" | "delayed" | "adding" | "going-live" | "reducing" | "holding";
 export type DelayMode = "rewind" | "mask";
 export type GoLiveWhen = "now" | "after-air";
 export type EgressStatus = "disabled" | "idle" | "connecting" | "live" | "retrying";
+
+/** What a dump did: replayed the last stretch, covered with the slate, or held the last frame. */
+export type DumpOutcome = "replay" | "cover" | "hold";
 
 export interface Ack {
   target_ms: number;
   effective_ms: number;
   pending: boolean;
   history_short: boolean;
+  /** Only for a dump. */
+  dump?: DumpOutcome;
 }
 
 export interface Snapshot {
@@ -83,6 +88,7 @@ export interface DelayConfig {
   presets: Preset[];
   ram_cap_mb: number;
   mask_margin_ms: number;
+  mute_under_slate: boolean;
   /** Keep a rolling buffer so Rewind can add delay instantly. */
   keep_buffer: boolean;
 }

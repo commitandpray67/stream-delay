@@ -8,6 +8,26 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Changed
 
+- A dump no longer airs you live when nothing covers the stream. It now does
+  the first of three things that can happen: a **replay** of the last stretch
+  (Rewind, with enough buffer), the overlay slate covering the stream while the
+  delay builds back up (**cover**, only while an overlay page is connected), or
+  else a **hold**: viewers see the last frame they saw, still, until what you
+  do after the dump has the full delay. Before, a Mask dump, or a Rewind dump
+  without enough buffer, with the rolling buffer off, while the destination was
+  briefly disconnected, or when the connection did not answer the dump within
+  2 s, showed the slate whether or not an overlay was there to show it, and
+  aired the stream almost live under it. The dock says which one a dump will
+  do before you confirm, and which one it did; the tray and hotkeys show it as
+  a notification, and `streamdelayd dump` prints it. The API answers with
+  `"dump": "replay" | "cover" | "hold"`; `"allow_uncovered": true` asks for the
+  slate with no overlay connected. A new phase, `holding`, shows while a hold
+  lasts.
+- While the slate covers a dump, the sound of what it covers (which airs almost
+  live) is left out until the delay is back. **Leave out the sound while the
+  slate covers a dump** on the Delay settings tab (`delay.mute_under_slate`)
+  turns this off.
+
 - The Mask slate appears at once instead of fading in over 0.35 s, and what OBS
   sends counts as covered by it only 1.5 s after it is asked for (was 0.5 s,
   shorter than the fade plus an encoder's look-ahead, so the first frames after

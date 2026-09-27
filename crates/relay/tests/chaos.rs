@@ -751,7 +751,7 @@ async fn dump_on_a_stalled_upload(mode: DelayMode, stall: Stall) {
         .map(|(_, f, _)| f)
         .collect();
     let last_before_dump = p.frame - 1;
-    relay.dump(mode).await.unwrap();
+    relay.dump(mode, true).await.unwrap();
     let dumped = Instant::now();
     // What had reached the destination when the dump was answered, forwarded or
     // waiting in the proxy's receive buffer (as its next peeks see it). Some may

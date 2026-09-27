@@ -53,6 +53,9 @@ pub struct SinkOptions {
     pub reject: bool,
     /// When refusing, quote the stream key in the reply, as some servers do.
     pub echo_key: bool,
+    /// Take one connection only: once it is dropped, connecting is refused, as
+    /// with a destination that went away.
+    pub single_connection: bool,
 }
 
 /// A minimal RTMP server standing in for Twitch.
@@ -186,6 +189,9 @@ pub async fn start_sink_with(
                     }
                 }
             });
+            if opts.single_connection {
+                return;
+            }
         }
     });
     (addr, log, kill_tx)

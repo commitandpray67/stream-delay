@@ -58,9 +58,18 @@ impl Rejection {
     }
 }
 
+/// The mode for a dump that must not replay: what the destination has of what
+/// was written is unknown (the connection dropped, or did not answer the
+/// dump), so a replay could air frames that never did. The engine then covers
+/// the stream with the slate if one shows, or holds the last frame.
+fn no_replay() -> DelayMode {
+    DelayMode::Mask
+}
+
 /// See [`Core::start_dump`].
 struct PendingDump {
     mode: DelayMode,
+    cover: bool,
     /// Everyone who asked for a dump meanwhile.
     replies: Vec<oneshot::Sender<Result<Ack, EngineError>>>,
     since: Instant,
@@ -364,16 +373,18 @@ impl Core {
     fn control(&mut self, c: Control) {
         let now = self.now();
         match c {
-            Control::Command(Command::Dump(mode), reply)
+            Control::Command(Command::Dump { mode, cover }, reply)
                 if self.engine.can_dump() && self.life.egress_on() =>
             {
-                self.start_dump(mode, reply);
+                self.start_dump(mode, cover, reply);
             }
             Control::Command(cmd, reply) => {
                 let cmd = match cmd {
-                    // Nothing is being sent: what viewers saw is what was sent.
-                    Command::Dump(DelayMode::Rewind) if !self.engine.output_is_connected() => {
-                        Command::Dump(DelayMode::Mask)
+                    Command::Dump { cover, .. } if !self.engine.output_is_connected() => {
+                        Command::Dump {
+                            mode: no_replay(),
+                            cover,
+                        }
                     }
                     cmd => cmd,
                 };
@@ -664,7 +675,12 @@ impl Core {
     /// the destination has, resetting the connection if media from before the
     /// dump may be waiting in the OS ([`EgressCtl::Cut`]). Until it answers,
     /// nothing more is queued, and the engine dumps only then.
-    fn start_dump(&mut self, mode: DelayMode, reply: oneshot::Sender<Result<Ack, EngineError>>) {
+    fn start_dump(
+        &mut self,
+        mode: DelayMode,
+        cover: bool,
+        reply: oneshot::Sender<Result<Ack, EngineError>>,
+    ) {
         if let Some(pending) = &mut self.dump {
             pending.replies.push(reply);
             return;
@@ -674,6 +690,7 @@ impl Core {
         let _ = self.egress_ctl.send(EgressCtl::Cut(self.cut));
         self.dump = Some(PendingDump {
             mode,
+            cover,
             replies: vec![reply],
             since: Instant::now(),
         });
@@ -687,16 +704,20 @@ impl Core {
         let now = self.now();
         // What was emitted after `delivered` has not aired, and never will.
         self.engine.unsend(delivered);
-        let mode = match pending.mode {
-            DelayMode::Rewind if !self.engine.output_is_connected() => DelayMode::Mask,
-            mode => mode,
+        let mode = if self.engine.output_is_connected() {
+            pending.mode
+        } else {
+            no_replay()
         };
         if reset {
             info!(
                 "the destination connection was reset for the dump: some of what was sent had not left yet"
             );
         }
-        let cmd = Command::Dump(mode);
+        let cmd = Command::Dump {
+            mode,
+            cover: pending.cover,
+        };
         let r = self.engine.command(now, cmd);
         if let Ok(ack) = &r {
             info!(?cmd, ?ack, "delay command");
@@ -708,13 +729,13 @@ impl Core {
     }
 
     /// A dump the egress has not answered in time: nothing it wrote counts as
-    /// aired, and the dump masks.
+    /// aired, and it does not replay.
     fn check_dump(&mut self) {
         if let Some(pending) = &mut self.dump
             && pending.since.elapsed() >= CUT_ANSWER_WAIT
         {
             warn!("the destination connection did not answer the dump in time");
-            pending.mode = DelayMode::Mask;
+            pending.mode = no_replay();
             self.finish_dump(true, None);
         }
     }

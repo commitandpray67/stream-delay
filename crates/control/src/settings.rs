@@ -223,7 +223,8 @@ impl SettingsUpdate {
         if let Some(d) = &self.delay {
             applied.restart |= d.max_seconds != c.delay.max_seconds
                 || d.ram_cap_mb != c.delay.ram_cap_mb
-                || d.mask_margin_ms != c.delay.mask_margin_ms;
+                || d.mask_margin_ms != c.delay.mask_margin_ms
+                || d.mute_under_slate != c.delay.mute_under_slate;
             applied.keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
             c.delay = d.clone();
         }
@@ -339,6 +340,10 @@ mod tests {
         assert_eq!(apply(delay("max_seconds", 60.into())), (true, false));
         assert_eq!(apply(delay("ram_cap_mb", 256.into())), (true, false));
         assert_eq!(apply(delay("mask_margin_ms", 2_500.into())), (true, false));
+        assert_eq!(
+            apply(delay("mute_under_slate", false.into())),
+            (true, false)
+        );
         assert_eq!(
             apply(serde_json::json!({ "grace_seconds": 45 })),
             (true, false)

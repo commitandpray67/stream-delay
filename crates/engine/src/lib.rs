@@ -51,6 +51,9 @@ pub struct EngineConfig {
     /// In mask mode, how long after the slate is asked for the rewind point may
     /// start: the slate has to show, and the encoder to send what shows it.
     pub mask_margin_ms: u64,
+    /// While a dump covered by the slate airs what is recorded under it, almost
+    /// live, leave out the audio: the slate covers the picture, not the sound.
+    pub mute_under_slate: bool,
     /// Keep a rolling history (up to `max_delay_ms`) so delay can be added by
     /// rewinding. When false, content is dropped once it has aired and every delay
     /// increase uses mask mode, which builds the delay from new content.
@@ -64,6 +67,7 @@ impl Default for EngineConfig {
             headroom_ms: 10_000,
             ram_cap_bytes: 512 * 1024 * 1024,
             mask_margin_ms: 1_500,
+            mute_under_slate: true,
             keep_history: true,
         }
     }
@@ -131,15 +135,34 @@ pub enum Command {
     /// Cancels a pending change.
     Cancel,
     /// Throws away everything that has not aired yet, keeping the broadcast going
-    /// with the same delay. Rewind: viewers see the last stretch of the stream
-    /// again (as when adding delay), then it continues with what was recorded
-    /// after the dump. Mask, or not enough history for that: the overlay slate
-    /// covers the stream while the delay builds back up.
-    Dump(DelayMode),
+    /// with the same delay, in the first way that applies (see [`DumpOutcome`]):
+    /// a replay (Rewind only, with enough history), the slate covering what is
+    /// recorded next (only when `cover` says an overlay shows it), or a hold.
+    /// Nothing recorded after the dump ever airs sooner than the delay unless
+    /// the slate covers it.
+    Dump {
+        mode: DelayMode,
+        cover: bool,
+    },
+}
+
+/// What a dump did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DumpOutcome {
+    /// Viewers see the last stretch that aired again, then what is recorded from
+    /// now on, with the delay.
+    Replay,
+    /// The slate covers the stream while the delay builds back up.
+    Cover,
+    /// Viewers see the last frame that aired, still, until what is recorded from
+    /// now on can air with the delay; or, before or at the end of a broadcast,
+    /// nothing more airs.
+    Hold,
 }
 
 /// Outcome of a command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ack {
     pub target_ms: u64,
     pub effective_ms: u64,
@@ -147,6 +170,9 @@ pub struct Ack {
     pub pending: bool,
     /// Less history was available than requested; the delay is shorter than asked.
     pub history_short: bool,
+    /// For a dump, what it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dump: Option<DumpOutcome>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -245,12 +271,23 @@ enum Pending {
         delay: u64,
         started: Time,
         anchor: Option<u64>,
+        /// Audio is left out until the change is done (see
+        /// [`EngineConfig::mute_under_slate`]).
+        mute: bool,
     },
     /// Everything recorded before `started` was thrown away; the output waits for
     /// a keyframe recorded under the slate, then builds `delay` back up behind it.
     Dump {
         delay: u64,
         started: Time,
+    },
+    /// What had not aired was thrown away, and nothing covers what is recorded
+    /// next: nothing from `from` on airs until the first keyframe there is
+    /// `delay` old. Meanwhile the last keyframe that aired is sent again, still
+    /// (see [`HoldFrame`]).
+    Hold {
+        from: u64,
+        delay: u64,
     },
     /// What had not aired was thrown away and the output replays what aired
     /// before it. Nothing from `from` on airs until the first keyframe there is
@@ -266,6 +303,16 @@ impl Pending {
     fn covers(&self) -> bool {
         matches!(self, Pending::Mask { .. } | Pending::Dump { .. })
     }
+}
+
+/// The last keyframe that aired before a hold, sent again about once a second
+/// so viewers see it still and the destination keeps getting data.
+struct HoldFrame {
+    payload: Bytes,
+    cts: i32,
+    /// When it was last sent (or the hold began), and when it is due next.
+    last: Time,
+    next: Time,
 }
 
 struct Output {
@@ -299,6 +346,8 @@ struct Output {
     history_short: bool,
     /// The memory limit made the delay shorter than the one asked for.
     memory_short: bool,
+    /// During a hold, the frame sent again.
+    hold: Option<HoldFrame>,
     /// Nothing after this sequence number is sent (see [`Engine::end_after`]).
     end_mark: Option<u64>,
     splices: u64,
@@ -362,6 +411,7 @@ impl Engine {
                 mask_visible: false,
                 history_short: false,
                 memory_short: false,
+                hold: None,
                 end_mark: None,
                 splices: 0,
                 dropped: 0,
@@ -550,6 +600,9 @@ impl Engine {
     pub fn output_connected(&mut self, now: Time) -> u64 {
         let o = &mut self.out;
         o.connected = true;
+        // A new connection has not had the decoder configuration a hold frame
+        // needs: it waits for the end of the hold with nothing.
+        o.hold = None;
         o.generation += 1;
         o.fresh = true;
         o.last_out_ts = 0;
@@ -618,6 +671,7 @@ impl Engine {
         o.delay = o.target;
         o.history_short = false;
         o.memory_short = false;
+        o.hold = None;
         o.gate = None;
         o.end_mark = None;
         if o.pending.covers() {
@@ -761,41 +815,27 @@ impl Engine {
             self.out.memory_short = false;
         }
         match cmd {
-            // A dump's replay is not a change to cancel: its delay is the target.
-            Command::Cancel if matches!(self.out.pending, Pending::Replay { .. }) => {}
+            // A dump's replay or hold is not a change to cancel: its delay is the
+            // target, and cancelling a hold would air what it holds back.
+            Command::Cancel
+                if matches!(
+                    self.out.pending,
+                    Pending::Replay { .. } | Pending::Hold { .. }
+                ) => {}
             Command::Cancel => {
                 self.set_pending(Pending::None);
                 // An outage can have taken the delay past the maximum; the
                 // output comes back down to it (see `back_under_max`).
                 self.out.target = self.out.delay.min(self.config.max_delay_ms * MS);
             }
-            Command::Dump(_) if !self.can_dump() => return Err(EngineError::NothingToDump),
-            Command::Dump(mode) => {
-                if !self.out.started {
-                    // Nothing has aired yet: throwing the buffer away is enough.
-                    self.drop_buffer();
-                    return Ok(self.ack());
-                }
-                if self.out.end_mark.is_some() || !self.ingest_active {
-                    // The broadcast is ending (or the encoder has stopped, so
-                    // nothing follows): it ends now, without the rest.
-                    self.drop_buffer();
-                    self.set_pending(Pending::None);
-                    return Ok(self.ack());
-                }
-                let delay = self.dump_delay();
-                self.out.history_short = false;
-                self.out.target = delay;
-                if mode == DelayMode::Rewind && self.replay_instead(now, delay) {
-                    return Ok(self.ack());
-                }
-                // Gone for good, including what a rewind could reach.
-                self.drop_buffer();
-                self.set_pending(Pending::Dump {
-                    delay,
-                    started: now,
+            Command::Dump { .. } if !self.can_dump() => return Err(EngineError::NothingToDump),
+            Command::Dump { mode, cover } => {
+                let outcome = self.dump(now, mode, cover);
+                self.run_pending(now);
+                return Ok(Ack {
+                    dump: Some(outcome),
+                    ..self.ack()
                 });
-                self.out.mask_visible = true;
             }
             Command::GoLive(when) => {
                 self.out.target = 0;
@@ -841,6 +881,7 @@ impl Engine {
                                 delay: d,
                                 started: now,
                                 anchor: None,
+                                mute: false,
                             });
                             self.out.mask_visible = true;
                         }
@@ -865,6 +906,95 @@ impl Engine {
         delay.min(self.config.max_delay_ms * MS)
     }
 
+    /// See [`Command::Dump`].
+    fn dump(&mut self, now: Time, mode: DelayMode, cover: bool) -> DumpOutcome {
+        if !self.out.started {
+            // Nothing has aired yet: throwing the buffer away is enough.
+            self.drop_buffer();
+            return DumpOutcome::Hold;
+        }
+        if self.out.end_mark.is_some() || !self.ingest_active {
+            // The broadcast is ending (or the encoder has stopped, so nothing
+            // follows): it ends now, without the rest.
+            self.drop_buffer();
+            self.set_pending(Pending::None);
+            return DumpOutcome::Hold;
+        }
+        let delay = self.dump_delay();
+        self.out.history_short = false;
+        self.out.target = delay;
+        if mode == DelayMode::Rewind && self.replay_instead(now, delay) {
+            return DumpOutcome::Replay;
+        }
+        let frame = self.aired_keyframe(now);
+        // Gone for good, including what a rewind could reach.
+        self.drop_buffer();
+        if cover {
+            self.set_pending(Pending::Dump {
+                delay,
+                started: now,
+            });
+            self.out.mask_visible = true;
+            DumpOutcome::Cover
+        } else {
+            self.set_pending(Pending::Hold {
+                from: self.next_seq,
+                delay,
+            });
+            self.out.hold = frame;
+            DumpOutcome::Hold
+        }
+    }
+
+    /// The last video keyframe that aired, ready to send again during a hold.
+    fn aired_keyframe(&self, now: Time) -> Option<HoldFrame> {
+        let k = self
+            .syncs
+            .iter()
+            .rev()
+            .find(|&&s| s < self.out.next_seq)
+            .copied()?;
+        let e = self.entry(k).filter(|e| e.kind == Kind::Video)?;
+        let payload = match (e.hevc_nal, e.nal_offset) {
+            // Sent again after other frames: mark it as a new start.
+            (Some(flv::hevc::CRA), Some(offset)) => flv::hevc::cra_to_bla(&e.payload, offset)
+                .map_or_else(|| e.payload.clone(), Bytes::from),
+            _ => e.payload.clone(),
+        };
+        Some(HoldFrame {
+            payload,
+            cts: e.cts,
+            last: now,
+            next: now,
+        })
+    }
+
+    /// During a hold, sends the held frame again when it is due, carrying on
+    /// the output's timestamps at the pace of the clock.
+    fn emit_hold_frame(&mut self, now: Time, out: &mut Vec<OutMsg>) -> Option<Time> {
+        let o = &mut self.out;
+        let h = o.hold.as_mut()?;
+        if now < h.next {
+            return Some(h.next);
+        }
+        let last_video = o.last_kind_ts[Kind::Video.index()].unwrap_or(0);
+        let t = o.last_out_ts.max(last_video) + ((now - h.last) / MS).max(1);
+        h.last = now;
+        h.next = now + SEC;
+        let (payload, cts, next) = (h.payload.clone(), h.cts, h.next);
+        o.last_kind_ts[Kind::Video.index()] = Some(t);
+        o.last_out_ts = o.last_out_ts.max(t);
+        o.last_pts = o.last_pts.max(t as i64 + cts as i64);
+        o.sent_bytes += payload.len() as u64;
+        out.push(OutMsg {
+            kind: Kind::Video,
+            timestamp: t as u32,
+            payload,
+            seq: None,
+        });
+        Some(next)
+    }
+
     /// False when a dump would be refused: live (as the snapshot counts it), what
     /// is in flight airs before anyone could react.
     pub fn can_dump(&self) -> bool {
@@ -884,12 +1014,16 @@ impl Engine {
             effective_ms: effective / MS,
             pending: self.out.pending != Pending::None,
             history_short: self.out.history_short,
+            dump: None,
         }
     }
 
     fn set_pending(&mut self, p: Pending) {
         if self.out.pending.covers() {
             self.out.mask_visible = false;
+        }
+        if !matches!(p, Pending::Hold { .. }) {
+            self.out.hold = None;
         }
         self.out.pending = p;
     }
@@ -1110,6 +1244,7 @@ impl Engine {
                     delay,
                     started,
                     anchor,
+                    mute,
                 } => {
                     let anchor = match anchor {
                         Some(a) => a,
@@ -1126,6 +1261,7 @@ impl Engine {
                                         delay,
                                         started,
                                         anchor: Some(a),
+                                        mute,
                                     };
                                     a
                                 }
@@ -1163,7 +1299,33 @@ impl Engine {
                         delay,
                         started,
                         anchor: Some(anchor),
+                        mute: self.config.mute_under_slate,
                     };
+                }
+                Pending::Hold { from, delay } => {
+                    let end = self.out.end_mark.unwrap_or(u64::MAX);
+                    let Some(k) = self.syncs.iter().copied().find(|&s| s >= from && s <= end)
+                    else {
+                        if let Some(m) = self.out.end_mark {
+                            // The broadcast ends before anything recorded after
+                            // the dump can be decoded: nothing more airs.
+                            self.out.next_seq = self.out.next_seq.max(m + 1);
+                            self.out.pending = Pending::None;
+                            self.out.hold = None;
+                        }
+                        return;
+                    };
+                    let arrival = self.entry(k).map_or(now, |e| e.arrival);
+                    if now >= arrival + delay {
+                        // The held frame showed until now: carry the timestamps
+                        // on from then, so the output keeps the clock's pace.
+                        if let Some(h) = self.out.hold.take() {
+                            self.out.last_out_ts += (now - h.last) / MS;
+                        }
+                        self.splice_to(k, now - arrival);
+                        self.out.pending = Pending::None;
+                    }
+                    return;
                 }
                 Pending::Replay { from, delay } => {
                     let Some(k) = self.syncs.iter().copied().find(|&s| s >= from) else {
@@ -1208,6 +1370,11 @@ impl Engine {
         loop {
             // After a dump, nothing airs until a keyframe recorded under the slate.
             if matches!(self.out.pending, Pending::Dump { .. }) {
+                break;
+            }
+            // Nor during a hold, but the frame it shows.
+            if matches!(self.out.pending, Pending::Hold { .. }) {
+                wake = self.emit_hold_frame(now, out);
                 break;
             }
             // Nor, after a replay, until the keyframe it continues from is due.
@@ -1306,6 +1473,16 @@ impl Engine {
                 // Look again soon; the caller passes a new budget once it has room.
                 wake = Some(now + 50 * MS);
                 break;
+            }
+            // What the slate covers after a dump airs almost live: not its sound.
+            if matches!(self.out.pending, Pending::Mask { mute: true, .. })
+                && e.kind == Kind::Audio
+                && e.config.is_none()
+            {
+                self.out.dropped += 1;
+                self.out.next_seq += 1;
+                self.run_pending(now);
+                continue;
             }
             let before = out.len();
             if self.out.pending_headers {

@@ -29,8 +29,8 @@ enum Op {
     KeepHistory(bool),
     /// A poll with little room in the queue to the destination.
     PollBudget(u16),
-    /// Throw away what has not aired (replaying, or under the slate).
-    Dump { mask: bool },
+    /// Throw away what has not aired (replaying, under the slate, or holding).
+    Dump { mask: bool, cover: bool },
     /// End the broadcast after what has arrived so far.
     EndAfter,
     /// Start a new broadcast after the end mark.
@@ -40,16 +40,22 @@ enum Op {
 #[derive(Arbitrary, Debug)]
 struct Input {
     keep_history: bool,
+    mute_under_slate: bool,
     ops: Vec<Op>,
 }
 
 fuzz_target!(|input: Input| {
-    let Input { keep_history, ops } = input;
+    let Input {
+        keep_history,
+        mute_under_slate,
+        ops,
+    } = input;
     let mut e = Engine::new(EngineConfig {
         max_delay_ms: 30_000,
         headroom_ms: 2_000,
         ram_cap_bytes: 256 * 1024,
         mask_margin_ms: 500,
+        mute_under_slate,
         keep_history,
     });
     let mut connected = true;
@@ -131,9 +137,9 @@ fuzz_target!(|input: Input| {
             Op::PollBudget(bytes) => {
                 let _ = e.poll_budget(now, &mut out, usize::from(bytes));
             }
-            Op::Dump { mask } => {
+            Op::Dump { mask, cover } => {
                 let mode = if mask { DelayMode::Mask } else { DelayMode::Rewind };
-                let _ = e.command(now, Command::Dump(mode));
+                let _ = e.command(now, Command::Dump { mode, cover });
             }
             Op::EndAfter => {
                 if let Some(seq) = e.last_seq() {

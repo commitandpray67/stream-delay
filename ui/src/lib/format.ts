@@ -45,6 +45,7 @@ export function phaseTone(phase: Phase | "ending" | "ended"): "live" | "delayed"
     case "adding":
     case "going-live":
     case "reducing":
+    case "holding":
       return "busy";
     default:
       return "off";

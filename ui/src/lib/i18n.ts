@@ -7,6 +7,7 @@ const en = {
   "phase.adding": "Adding delay…",
   "phase.going-live": "Removing delay…",
   "phase.reducing": "Changing delay…",
+  "phase.holding": "Holding the picture…",
   "phase.ending": "Ending stream…",
   "phase.ended": "Stream ended",
   "hint.offline": "Start streaming in OBS to begin.",
@@ -15,6 +16,7 @@ const en = {
   "hint.adding": "The overlay slate is covering the stream while the delay builds.",
   "hint.going-live": "Waiting for the next keyframe, or for what is buffered to air.",
   "hint.reducing": "Waiting for a keyframe to shorten the delay.",
+  "hint.holding": "What viewers hadn't seen was thrown away. They see the last frame, still, until the delay is back.",
   "hint.ending": "What viewers haven't seen yet airs, then the broadcast ends. Nothing after your click airs.",
   "hint.ended": "Nothing is being sent. To go live again, stop and start streaming in OBS.",
   "mode.rewind": "Rewind",
@@ -30,10 +32,15 @@ const en = {
   "action.dump.help":
     "Throws away what viewers haven't seen yet, so it never airs, and keeps streaming with the same delay. For the moment something happens that must not go out.",
   "action.dump.replay": "Viewers see the last {delay} again, then the stream continues from after the dump.",
-  "action.dump.slate":
-    "The overlay slate covers the stream for about {delay} while the delay builds back up. Your sound still airs under it.",
-  "action.dump.noOverlay":
-    "No overlay is connected, so nothing would cover the stream while the delay builds back up: viewers would see you live for about {delay}.",
+  "action.dump.slate": "The overlay slate covers the stream for about {delay} while the delay builds back up.",
+  "action.dump.slate.muted": "Your sound is left out until then.",
+  "action.dump.slate.sound": "Your sound still airs under it.",
+  "action.dump.hold":
+    "No overlay is connected to cover the stream, so viewers see the last frame they saw, still and silent, for about {delay}. Then the stream continues with the delay.",
+  "dumped.replay": "Dumped. Viewers see the last {delay} again.",
+  "dumped.cover": "Dumped. The slate covers the stream while the delay builds back up.",
+  "dumped.hold": "Dumped. Viewers see a still frame until the delay is back.",
+  "dumped.gone": "Dumped. Nothing that was waiting will air.",
   "action.dump.noDelay": "There is no delay, so nothing is waiting to air.",
   "action.endStream": "End stream",
   "action.endStream.confirm": "Click again to end",

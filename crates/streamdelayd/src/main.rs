@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use streamdelay_config::{Config, MemorySecrets, SecretStore, Secrets};
 use streamdelay_control::{
-    App, AppError, AppOptions, Overrides, Scope, diagnostics, reachable, scoped_token,
+    App, AppError, AppOptions, Overrides, Scope, diagnostics, dump_summary, reachable, scoped_token,
 };
 use streamdelay_relay::RelayError;
 use tracing::info;
@@ -71,9 +71,11 @@ enum Cmd {
         api: ApiArgs,
     },
     /// Throw away what has not aired yet and keep broadcasting with the same
-    /// delay: viewers see the last stretch again, or the overlay slate.
+    /// delay: viewers see the last stretch again, the overlay slate (if an
+    /// overlay is connected), or the last frame, still. Says which.
     Dump {
-        /// Cover it with the overlay slate instead of replaying.
+        /// Don't replay: cover it with the overlay slate (if an overlay is
+        /// connected), else hold the last frame.
         #[arg(long)]
         mask: bool,
         #[command(flatten)]
@@ -254,7 +256,9 @@ fn main() -> Result<()> {
             if mask {
                 body["mode"] = "mask".into();
             }
-            client::print(client::post(&url, &token, "/api/v1/stream/dump", body)?)
+            let ack = client::post(&url, &token, "/api/v1/stream/dump", body)?;
+            println!("{}", dump_summary(&serde_json::from_value(ack)?));
+            Ok(())
         }
         Cmd::Resume { api } => {
             let (url, token) = api.resolve(&cli.config)?;

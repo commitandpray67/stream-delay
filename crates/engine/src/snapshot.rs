@@ -23,6 +23,9 @@ pub enum Phase {
     GoingLive,
     /// Waiting for a keyframe to reduce the delay.
     Reducing,
+    /// After a dump nothing covers: the last frame that aired shows, still,
+    /// until the delay is back.
+    Holding,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
@@ -172,6 +175,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         Pending::Mask { .. } | Pending::Dump { .. } => Phase::Adding,
         Pending::GoLiveNow { .. } | Pending::AfterAir { .. } => Phase::GoingLive,
         Pending::Reduce { .. } => Phase::Reducing,
+        Pending::Hold { .. } => Phase::Holding,
         Pending::Replay { .. } => Phase::Delayed,
         Pending::None if offline => Phase::Offline,
         Pending::None if effective < 500 * MS => Phase::Live,

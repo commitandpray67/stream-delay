@@ -70,18 +70,26 @@ The stream skips forward to a keyframe so that the delay becomes 20 s. The skipp
 Something happened on stream that must not go out: a wardrobe malfunction, a
 doxxing slip, anything against the rules. **Dump buffer** throws away everything
 viewers haven't seen yet, so it never airs, and the stream carries on with the
-same delay.
+same delay. What viewers see meanwhile is the first of these that can happen:
 
-- **Rewind** (the default mode): viewers see the last stretch of the stream again,
-  as when adding delay, and then it continues from what you do after the dump. The
-  delay never drops, so the dump needs no overlay. It needs the buffer to reach
-  back about twice the delay (a minute for a 30 s delay).
-- **Mask**, or when the buffer doesn't reach back that far, or with the rolling
-  buffer off: the overlay slate goes up at once and covers the stream while the
-  delay builds back up (about as long as the delay). Only the picture is
-  covered: what you say meanwhile airs under the slate, as with any Mask change.
-  Without the overlay in your scenes, viewers would see you live meanwhile; the
-  dock says so before you confirm.
+- **Replay** (Rewind mode, the default): viewers see the last stretch of the
+  stream again, as when adding delay, and then it continues from what you do
+  after the dump. The delay never drops, so the dump needs no overlay. It needs
+  the buffer to reach back about twice the delay (a minute for a 30 s delay),
+  and the connection to Twitch to be up: of what was sent over a connection
+  that dropped, stream-delay can't tell what arrived, so it won't replay it.
+- **Cover** (Mask mode, or no replay possible), only while an overlay page is
+  connected: the overlay slate goes up at once and covers the stream while the
+  delay builds back up (about as long as the delay). What it covers airs almost
+  live; its sound is left out until the delay is back (**Leave out the sound
+  while the slate covers a dump**, on the **Delay settings** tab).
+- **Hold**, otherwise: viewers see the last frame they saw, still and silent,
+  until what you do after the dump has the full delay (about as long as the
+  delay, a second or two more to reach a keyframe). The connection to Twitch
+  stays up meanwhile. A dump never airs you live unless the slate covers it.
+
+Before you confirm, the dock says which of these the dump will do; after it, the
+dock (or, from the tray or a hotkey, a notification) says which it did.
 
 Part of what viewers haven't seen may already be on its way to Twitch rather than
 in the buffer: queued for the connection, or handed to your computer's network

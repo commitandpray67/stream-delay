@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub use streamdelay_engine::{
-    Ack, Command, DelayMode, EngineConfig, EngineError, GoLiveWhen, Phase, Snapshot,
+    Ack, Command, DelayMode, DumpOutcome, EngineConfig, EngineError, GoLiveWhen, Phase, Snapshot,
 };
 pub use streamdelay_rtmp::RtmpUrl;
 
@@ -247,10 +247,11 @@ impl RelayHandle {
     }
 
     /// Throws away what has not aired yet and keeps the broadcast going with the
-    /// same delay (see [`Command::Dump`]). While a broadcast is ending, it ends
-    /// at once instead.
-    pub async fn dump(&self, mode: DelayMode) -> Result<Ack, RelayError> {
-        self.command(Command::Dump(mode)).await
+    /// same delay (see [`Command::Dump`]); `cover`: an overlay shows the slate.
+    /// While a broadcast is ending, it ends at once instead. [`Ack::dump`] says
+    /// what viewers see.
+    pub async fn dump(&self, mode: DelayMode, cover: bool) -> Result<Ack, RelayError> {
+        self.command(Command::Dump { mode, cover }).await
     }
 
     /// Starts broadcasting again after [`RelayHandle::end_stream`], from content

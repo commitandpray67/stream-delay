@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use streamdelay_relay::{
-    DelayMode, Destination, DestinationKey, EgressStatus, GoLiveWhen, RelayConfig,
+    DelayMode, Destination, DestinationKey, DumpOutcome, EgressStatus, GoLiveWhen, RelayConfig,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -183,13 +183,15 @@ async fn a_rewind_dump_replays_and_a_mask_dump_shows_the_slate() {
     relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
     let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
     p.stream_for(Duration::from_secs(8)).await;
-    relay.dump(DelayMode::Rewind).await.unwrap();
+    let ack = relay.dump(DelayMode::Rewind, true).await.unwrap();
+    assert_eq!(ack.dump, Some(DumpOutcome::Replay));
     assert!(
         !relay.state().delay.mask_visible,
         "a rewind dump showed the slate instead of replaying"
     );
     p.stream_for(Duration::from_secs(1)).await;
-    relay.dump(DelayMode::Mask).await.unwrap();
+    let ack = relay.dump(DelayMode::Mask, true).await.unwrap();
+    assert_eq!(ack.dump, Some(DumpOutcome::Cover));
     assert!(
         relay.state().delay.mask_visible,
         "a mask dump showed no slate"

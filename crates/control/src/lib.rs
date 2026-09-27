@@ -26,7 +26,7 @@ use axum::Router;
 use streamdelay_config::{Config, SecretStore};
 use tokio::sync::watch;
 
-pub use app::{App, AppError, AppOptions, MIN_TOKEN_LEN, Overrides, Urls, reachable};
+pub use app::{App, AppError, AppOptions, MIN_TOKEN_LEN, Overrides, Urls, dump_summary, reachable};
 pub use auth::{Scope, scoped_token};
 pub use routes::ApiError;
 pub use streamdelay_config::Preset;
@@ -69,7 +69,7 @@ pub(crate) struct Shared {
     pub port: u16,
     pub restart_required: AtomicBool,
     /// Overlay pages connected (see the events route): how many there are tells
-    /// the dock whether the Mask slate can cover the stream.
+    /// the dock, and a dump, whether the slate can cover the stream.
     pub overlays: watch::Sender<usize>,
     /// Set by the desktop app: checks for an update and offers to install it.
     pub update_check: RwLock<Option<UpdateCheck>>,
@@ -111,6 +111,21 @@ impl AppState {
             .map(str::to_string)
             .or_else(|| self.stored_key(url));
         app::destination(c, key)
+    }
+
+    /// Throws away what has not aired yet (see [`RelayHandle::dump`]): `asked`,
+    /// else the default mode. The slate counts as covering the stream only while
+    /// an overlay page is connected, unless the caller takes that on
+    /// (`allow_uncovered`); without it a dump replays or holds, and never airs
+    /// the stream uncovered.
+    pub(crate) async fn dump(
+        &self,
+        asked: Option<streamdelay_relay::DelayMode>,
+        allow_uncovered: bool,
+    ) -> Result<streamdelay_relay::Ack, streamdelay_relay::RelayError> {
+        let mode = asked.unwrap_or(self.config().delay.default_mode);
+        let cover = allow_uncovered || *self.shared.overlays.borrow() > 0;
+        self.relay().dump(mode, cover).await
     }
 
     /// The command-line destination key, unless the destination has since been

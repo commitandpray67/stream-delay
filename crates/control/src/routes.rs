@@ -187,11 +187,16 @@ async fn end_stream(
 struct DumpBody {
     /// Defaults to the configured default mode.
     mode: Option<DelayMode>,
+    /// The slate covers the stream even with no overlay page connected (the
+    /// caller shows it some other way).
+    #[serde(default)]
+    allow_uncovered: bool,
 }
 
-/// Throws away what has not aired yet and keeps broadcasting with the same delay:
-/// viewers see the last stretch again (Rewind), or the slate while the delay
-/// builds back up (Mask, or when there is not enough history to replay).
+/// Throws away what has not aired yet and keeps broadcasting with the same delay.
+/// The answer's `dump` says what viewers see: the last stretch again
+/// (`replay`, Rewind only), the slate while the delay builds back up (`cover`,
+/// only with an overlay connected), or the last frame, still (`hold`).
 async fn dump(State(st): State<AppState>, body: Bytes) -> Result<Json<Ack>, ApiError> {
     let body = if body.trim_ascii().is_empty() {
         DumpBody::default()
@@ -199,8 +204,7 @@ async fn dump(State(st): State<AppState>, body: Bytes) -> Result<Json<Ack>, ApiE
         serde_json::from_slice::<DumpBody>(&body)
             .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?
     };
-    let mode = crate::app::dump_mode(&st.config().delay, body.mode);
-    Ok(Json(st.relay().dump(mode).await?))
+    Ok(Json(st.dump(body.mode, body.allow_uncovered).await?))
 }
 
 /// Where releases are published.

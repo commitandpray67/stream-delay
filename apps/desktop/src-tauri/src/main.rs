@@ -26,6 +26,25 @@ use tracing_subscriber::prelude::*;
 /// The running core, shared with tray and hotkey handlers.
 pub struct Core(pub Arc<App>);
 
+/// Tells the streamer what a dump from the tray or a hotkey did, without taking
+/// focus from the game.
+fn dump_notice(app: &AppHandle, result: &Result<streamdelay_relay::Ack, RelayError>) {
+    use tauri_plugin_notification::NotificationExt;
+    let body = match result {
+        Ok(ack) => streamdelay_control::dump_summary(ack),
+        Err(e) => format!("Dump failed: {e}"),
+    };
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("stream-delay")
+        .body(body)
+        .show()
+    {
+        warn!("could not show a notification: {e}");
+    }
+}
+
 /// Ports tried in order when the configured ones are taken (another RTMP server,
 /// or a second copy of stream-delay).
 const INGEST_FALLBACKS: [u16; 3] = [1935, 19350, 29350];
@@ -48,6 +67,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let handle = app.handle().clone();
             let core = match tauri::async_runtime::block_on(start_core()) {

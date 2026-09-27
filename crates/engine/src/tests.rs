@@ -218,8 +218,8 @@ impl Sim {
             Command::SetDelay { ms, .. } if ms * MS < self.floor => self.floor = ms * MS,
             Command::GoLive(_) | Command::Cancel => self.floor = 0,
             // Under the slate, what it covers airs at once while the delay builds
-            // back up; a replay keeps the delay.
-            Command::Dump(_) if self.e.snapshot(self.now).mask_visible => self.floor = 0,
+            // back up; a replay or a hold keeps the delay.
+            Command::Dump { .. } if ack.dump == Some(DumpOutcome::Cover) => self.floor = 0,
             _ => {}
         }
         self.floor_log.push((self.sent.len(), self.floor));
@@ -539,8 +539,14 @@ fn lowering_the_delay_after_a_dump_skips_to_after_the_gap() {
         ms: 6_000,
         mode: DelayMode::Mask,
     });
-    s.e.command(s.now, Command::Dump(DelayMode::Rewind))
-        .unwrap();
+    s.e.command(
+        s.now,
+        Command::Dump {
+            mode: DelayMode::Rewind,
+            cover: true,
+        },
+    )
+    .unwrap();
     s.poll();
     s.advance(11_342 * MS);
     restart_encoder(&mut s);
@@ -576,8 +582,14 @@ fn a_rewind_to_just_before_a_dump_gap_comes_down_after_it() {
         ms: 4_000,
         mode: DelayMode::Mask,
     });
-    s.e.command(s.now, Command::Dump(DelayMode::Rewind))
-        .unwrap();
+    s.e.command(
+        s.now,
+        Command::Dump {
+            mode: DelayMode::Rewind,
+            cover: true,
+        },
+    )
+    .unwrap();
     s.poll();
     restart_encoder(&mut s);
     s.advance(11_256 * MS);
@@ -1125,7 +1137,10 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
     s.advance(30 * SEC);
     let dumped_at = s.now;
     let n = s.sent.len();
-    let ack = s.cmd(Command::Dump(DelayMode::Mask));
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: true,
+    });
     assert!(ack.pending);
     assert_eq!(ack.target_ms, 20_000);
     let snap = s.snapshot();
@@ -1170,11 +1185,241 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
     s.check_invariants_in(n..s.sent.len());
 }
 
+/// Live at a 20 s delay rewound into, 30 s in: too little history for a
+/// replay, so a dump either covers or holds.
+fn dump_sim(config: EngineConfig) -> Sim {
+    let mut s = Sim::new(config);
+    s.connect();
+    s.advance(10 * SEC);
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(30 * SEC);
+    s
+}
+
+#[test]
+fn a_dump_nothing_covers_holds_the_last_frame_until_the_delay_is_back() {
+    let mut s = dump_sim(config());
+    let dumped = unaired(&s);
+    let (last_key, _) = s
+        .sent
+        .iter()
+        .rev()
+        .find_map(|x| {
+            let i = s.inputs.get(&id_of(&x.msg.payload)?)?;
+            i.keyframe
+                .then_some((id_of(&x.msg.payload)?, x.msg.timestamp))
+        })
+        .expect("a keyframe aired");
+    let last_ts = s.sent.iter().map(|x| x.msg.timestamp).max().unwrap();
+    let dumped_at = s.now;
+    let n = s.sent.len();
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: false,
+    });
+    assert_eq!(ack.dump, Some(DumpOutcome::Hold));
+    assert!(ack.pending);
+    assert_eq!(ack.target_ms, 20_000);
+    let snap = s.snapshot();
+    assert!(!snap.mask_visible, "nothing asked for the slate");
+    assert_eq!(snap.phase, Phase::Holding);
+    // Cancelling would air what the hold keeps back: it does nothing.
+    assert!(s.cmd(Command::Cancel).pending);
+
+    s.advance(15 * SEC);
+    // Meanwhile only the last keyframe that aired, again, about once a second,
+    // its timestamps keeping the clock's pace.
+    let held = s.sent.len() - n;
+    assert!((14..=16).contains(&held), "{held} frames held");
+    let mut prev = (dumped_at, last_ts);
+    for x in &s.sent[n..] {
+        assert_eq!(x.msg.kind, Kind::Video);
+        assert_eq!(x.msg.seq, None);
+        assert_eq!(id_of(&x.msg.payload), Some(last_key));
+        let (wall, ts) = (x.at - prev.0, x.msg.timestamp - prev.1);
+        assert!(
+            ts >= 1 && (wall / MS).abs_diff(u64::from(ts)) <= 40,
+            "{wall} us, {ts} ms"
+        );
+        prev = (x.at, x.msg.timestamp);
+    }
+
+    s.advance(15 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert!((20_000..=22_100).contains(&snap.effective_ms), "{snap:?}");
+    // The hold went on until then; what airs next is recorded after the dump.
+    let after: Vec<_> = s
+        .media_sent_in(n..s.sent.len())
+        .filter(|(_, x, _)| x.msg.seq.is_some())
+        .collect();
+    let last_held = s.sent.iter().rev().find(|x| x.msg.seq.is_none()).unwrap();
+    assert!(last_held.at < after[0].1.at);
+    let first = after.first().expect("the stream did not continue");
+    assert!(first.2.keyframe && first.2.arrival >= dumped_at);
+    // The stream carries on where the hold left it, at the clock's pace.
+    let wall = (first.1.at - dumped_at) / MS;
+    let ts = u64::from(first.1.msg.timestamp - last_ts);
+    assert!(
+        wall.abs_diff(ts) <= 100,
+        "{wall} ms passed, timestamps moved {ts} ms"
+    );
+    for (_, sent, i) in &after {
+        assert!(
+            !dumped.contains(&id_of_input(&s, i)),
+            "dumped content aired"
+        );
+        assert!(
+            sent.at - i.arrival >= 20 * SEC,
+            "recorded after the dump, aired after {} us",
+            sent.at - i.arrival
+        );
+    }
+    s.check_invariants_in(n..s.sent.len());
+}
+
+#[test]
+fn a_hold_sends_nothing_to_a_new_connection_until_it_ends() {
+    let mut s = dump_sim(config());
+    s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: false,
+    });
+    s.advance(3 * SEC);
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    s.advance(2 * SEC);
+    let n = s.sent.len();
+    s.connect();
+    s.advance(10 * SEC);
+    // A new connection has had no decoder configuration to show the frame with.
+    assert_eq!(s.sent.len(), n, "sent during the hold");
+    s.advance(15 * SEC);
+    assert_eq!(s.snapshot().phase, Phase::Delayed);
+    assert!(s.media_sent_in(n..s.sent.len()).next().is_some());
+    s.check_invariants_in(n..s.sent.len());
+}
+
+#[test]
+fn a_hold_ends_with_the_broadcast() {
+    // The encoder stops before a keyframe is recorded after the dump: nothing
+    // after it can be decoded, so the broadcast is over.
+    let mut s = dump_sim(config());
+    s.advance(500 * MS);
+    s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: false,
+    });
+    s.advance(500 * MS);
+    s.stop_encoder();
+    s.e.end_after(s.e.last_seq().unwrap());
+    s.advance(100 * MS);
+    assert!(s.e.end_reached());
+    assert_eq!(s.snapshot().phase, Phase::Offline, "{:?}", s.snapshot());
+    let n = s.sent.len();
+    s.advance(30 * SEC);
+    assert_eq!(s.sent.len(), n, "sent after the end");
+}
+
+#[test]
+fn what_the_slate_covers_after_a_dump_airs_without_sound() {
+    for mute in [true, false] {
+        let mut s = dump_sim(EngineConfig {
+            mute_under_slate: mute,
+            ..config()
+        });
+        let dumped_at = s.now;
+        let n = s.sent.len();
+        let ack = s.cmd(Command::Dump {
+            mode: DelayMode::Mask,
+            cover: true,
+        });
+        assert_eq!(ack.dump, Some(DumpOutcome::Cover));
+        s.advance(10 * SEC);
+        assert!(s.snapshot().mask_visible);
+        let covered: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
+        assert!(covered.iter().any(|(_, _, i)| i.kind == Kind::Video));
+        let audio = covered
+            .iter()
+            .filter(|(_, _, i)| i.kind == Kind::Audio)
+            .count();
+        assert_eq!(audio == 0, mute, "{audio} audio frames under the slate");
+        // Once the delay is back, the sound is too.
+        s.advance(20 * SEC);
+        assert!(!s.snapshot().mask_visible);
+        let m = s.sent.len();
+        s.advance(5 * SEC);
+        assert!(
+            s.media_sent_in(m..s.sent.len())
+                .any(|(_, _, i)| i.kind == Kind::Audio && i.arrival >= dumped_at)
+        );
+        s.check_invariants_in(n..s.sent.len());
+    }
+}
+
+#[test]
+fn dump_outcomes() {
+    // Enough history: a replay, whatever covers.
+    for cover in [true, false] {
+        let mut s = Sim::new(config());
+        s.cmd(Command::SetDelay {
+            ms: 20_000,
+            mode: DelayMode::Rewind,
+        });
+        s.connect();
+        s.advance(60 * SEC);
+        let ack = s.cmd(Command::Dump {
+            mode: DelayMode::Rewind,
+            cover,
+        });
+        assert_eq!(ack.dump, Some(DumpOutcome::Replay));
+        // Mask never replays.
+        let mut s = dump_sim(config());
+        s.advance(60 * SEC);
+        let ack = s.cmd(Command::Dump {
+            mode: DelayMode::Mask,
+            cover,
+        });
+        let expected = if cover {
+            DumpOutcome::Cover
+        } else {
+            DumpOutcome::Hold
+        };
+        assert_eq!(ack.dump, Some(expected));
+    }
+    // Before anything aired, or while ending: nothing more airs from before.
+    let mut s = Sim::new(config());
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(5 * SEC);
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: true,
+    });
+    assert_eq!(ack.dump, Some(DumpOutcome::Hold));
+    assert!(!s.snapshot().mask_visible);
+    // Other commands say nothing about a dump.
+    assert_eq!(s.cmd(Command::Cancel).dump, None);
+    let json = serde_json::to_value(s.cmd(Command::Cancel)).unwrap();
+    assert!(json.get("dump").is_none(), "{json}");
+}
+
 #[test]
 fn dump_needs_a_delay() {
     let mut s = live_sim();
     assert_eq!(
-        s.e.command(s.now, Command::Dump(DelayMode::Rewind)),
+        s.e.command(
+            s.now,
+            Command::Dump {
+                mode: DelayMode::Rewind,
+                cover: true
+            }
+        ),
         Err(EngineError::NothingToDump)
     );
     // Before anything airs, a dump just empties the buffer.
@@ -1186,7 +1431,10 @@ fn dump_needs_a_delay() {
     s.connect();
     s.advance(5 * SEC);
     let dumped_at = s.now;
-    s.cmd(Command::Dump(DelayMode::Mask));
+    s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: true,
+    });
     assert!(!s.snapshot().mask_visible);
     s.advance(20 * SEC);
     assert!(s.media_sent().all(|(_, i)| i.arrival >= dumped_at));
@@ -1195,7 +1443,15 @@ fn dump_needs_a_delay() {
 
 #[test]
 fn when_a_dump_is_allowed() {
-    let dump = |s: &mut Sim| s.e.command(s.now, Command::Dump(DelayMode::Mask));
+    let dump = |s: &mut Sim| {
+        s.e.command(
+            s.now,
+            Command::Dump {
+                mode: DelayMode::Mask,
+                cover: true,
+            },
+        )
+    };
     // Under half a second, what is in flight airs before anyone could react.
     for (ms, allowed) in [(400, false), (600, true)] {
         let mut s = live_sim();
@@ -1218,7 +1474,10 @@ fn when_a_dump_is_allowed() {
     s.advance(5 * SEC);
     let dumped = unaired(&s);
     let n = s.sent.len();
-    let ack = s.cmd(Command::Dump(DelayMode::Mask));
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: true,
+    });
     assert!((20_000..=22_100).contains(&ack.target_ms), "{ack:?}");
     s.advance(30 * SEC);
     let after: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
@@ -1243,9 +1502,17 @@ fn when_a_dump_is_allowed() {
 }
 
 /// Ids of what is waiting to air: recorded after the last thing sent. (What an
-/// earlier change skipped is not waiting; a rewind may still show it.)
+/// earlier change skipped is not waiting; a rewind may still show it. Nor is
+/// sound left out under the slate: it airs once the delay is back.)
 fn unaired(s: &Sim) -> std::collections::HashSet<u32> {
-    let last = s.media_sent().last().map(|(_, i)| i.arrival);
+    let sent = s.media_sent().last().map(|(_, i)| i.arrival);
+    let muted =
+        s.e.out
+            .next_seq
+            .checked_sub(1)
+            .and_then(|q| s.e.entry(q))
+            .filter(|e| e.kind == Kind::Audio);
+    let last = sent.max(muted.map(|e| e.arrival));
     s.inputs
         .iter()
         .filter(|(_, i)| last.is_none_or(|t| i.arrival > t))
@@ -1266,7 +1533,10 @@ fn a_rewind_dump_replays_what_aired_and_skips_what_had_not() {
     let dumped = unaired(&s);
     assert!(dumped.len() > 500, "nothing was waiting to air");
     let n = s.sent.len();
-    let ack = s.cmd(Command::Dump(DelayMode::Rewind));
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Rewind,
+        cover: true,
+    });
     assert_eq!((ack.target_ms, ack.effective_ms), (20_000, 20_000));
     let snap = s.snapshot();
     assert!(!snap.mask_visible, "a replay needs no slate");
@@ -1353,7 +1623,10 @@ fn a_rewind_dump_uses_the_slate_without_enough_history() {
     });
     s.connect();
     s.advance(30 * SEC);
-    s.cmd(Command::Dump(DelayMode::Rewind));
+    s.cmd(Command::Dump {
+        mode: DelayMode::Rewind,
+        cover: true,
+    });
     assert!(s.snapshot().mask_visible);
     // No rolling buffer at all.
     let mut s = Sim::new(EngineConfig {
@@ -1368,7 +1641,10 @@ fn a_rewind_dump_uses_the_slate_without_enough_history() {
     s.advance(60 * SEC);
     let dumped = unaired(&s);
     let n = s.sent.len();
-    s.cmd(Command::Dump(DelayMode::Rewind));
+    s.cmd(Command::Dump {
+        mode: DelayMode::Rewind,
+        cover: true,
+    });
     assert!(s.snapshot().mask_visible);
     s.advance(20 * SEC);
     assert!(
@@ -1387,7 +1663,10 @@ fn a_dump_while_ending_ends_at_once() {
     s.advance(20 * SEC);
     s.e.end_after(s.e.last_seq().unwrap());
     let n = s.sent.len();
-    s.cmd(Command::Dump(DelayMode::Rewind));
+    s.cmd(Command::Dump {
+        mode: DelayMode::Rewind,
+        cover: true,
+    });
     assert!(s.e.end_reached());
     s.advance(10 * SEC);
     assert_eq!(s.media_sent_in(n..s.sent.len()).count(), 0);
@@ -1481,7 +1760,8 @@ enum Op {
     Outage(u64),
     EncoderRestart,
     Cancel,
-    Dump(DelayMode),
+    /// A dump, and whether an overlay would cover it.
+    Dump(DelayMode, bool),
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -1510,7 +1790,11 @@ fn change() -> impl Strategy<Value = Op> {
 fn gap() -> impl Strategy<Value = Op> {
     prop_oneof![
         Just(Op::EncoderRestart),
-        prop_oneof![Just(DelayMode::Rewind), Just(DelayMode::Mask)].prop_map(Op::Dump),
+        (
+            prop_oneof![Just(DelayMode::Rewind), Just(DelayMode::Mask)],
+            any::<bool>()
+        )
+            .prop_map(|(mode, cover)| Op::Dump(mode, cover)),
     ]
 }
 
@@ -1548,10 +1832,12 @@ proptest! {
                 Op::AfterAir => { s.cmd(Command::GoLive(GoLiveWhen::AfterAir)); }
                 Op::Reduce(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Rewind }); }
                 Op::Cancel => { s.cmd(Command::Cancel); }
-                Op::Dump(mode) => {
+                Op::Dump(mode, cover) => {
                     let waiting = unaired(&s);
-                    if s.e.command(s.now, Command::Dump(mode)).is_ok() {
-                        if s.snapshot().mask_visible {
+                    if let Ok(ack) = s.e.command(s.now, Command::Dump { mode, cover }) {
+                        // Only the slate lets what is recorded next air sooner.
+                        if ack.dump == Some(DumpOutcome::Cover) {
+                            prop_assert!(cover);
                             s.floor = 0;
                         }
                         s.floor_log.push((s.sent.len(), s.floor));
@@ -1660,8 +1946,8 @@ fn settled(ops: Vec<Op>, jitter: u64, keep_history: bool, connect_after: u64) ->
             Op::Cancel => {
                 s.cmd(Command::Cancel);
             }
-            Op::Dump(mode) => {
-                let _ = s.e.command(s.now, Command::Dump(mode));
+            Op::Dump(mode, cover) => {
+                let _ = s.e.command(s.now, Command::Dump { mode, cover });
                 s.poll();
             }
             Op::EncoderRestart => restart_encoder(&mut s),
@@ -2133,7 +2419,10 @@ fn cancel_does_not_stop_a_dumps_replay() {
         mode: DelayMode::Rewind,
     });
     s.advance(30 * SEC);
-    let ack = s.cmd(Command::Dump(DelayMode::Rewind));
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Rewind,
+        cover: true,
+    });
     assert!(ack.pending, "no replay: {ack:?}");
     let ack = s.cmd(Command::Cancel);
     assert_eq!((ack.target_ms, ack.pending), (20_000, true), "{ack:?}");

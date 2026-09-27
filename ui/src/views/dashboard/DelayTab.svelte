@@ -91,11 +91,16 @@
         <input type="number" min="0" max="600" bind:value={grace} />
       </label>
     </div>
+    <label class="inline">
+      <input type="checkbox" bind:checked={form.mute_under_slate} />
+      Leave out the sound while the slate covers a dump
+    </label>
     <p class="muted small">
       The buffer needs about bitrate × maximum delay of memory: 6 Mbps × 120 s ≈ 90 MB. The slate margin is how
       long Mask waits after putting the slate up before what OBS sends counts as covered; raise it if gameplay
-      shows through when a Mask change starts. Changing the maximum delay, memory cap, slate margin or reconnect
-      time takes effect after a restart.
+      shows through when a Mask change starts. After a dump, what the slate covers airs almost live: the slate
+      hides the picture, not the sound, unless it is left out. Changing the maximum delay, memory cap, slate
+      margin, sound setting or reconnect time takes effect after a restart.
     </p>
     {#if form.ram_cap_mb < memoryFor(form.max_seconds)}
       <p class="warn small" role="status">

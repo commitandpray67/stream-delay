@@ -8,11 +8,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::Serialize;
-use streamdelay_config::DelayConfig;
 use streamdelay_config::{Config, ConfigError, KeyMode, SecretStore, secret};
 use streamdelay_relay::{
-    Ack, DelayMode, Destination, DestinationKey, EngineConfig, GoLiveWhen, RelayConfig, RelayError,
-    RelayHandle, RtmpUrl,
+    Ack, Destination, DestinationKey, DumpOutcome, EngineConfig, GoLiveWhen, RelayConfig,
+    RelayError, RelayHandle, RtmpUrl,
 };
 use streamdelay_rtmp::url::{TWITCH_DOMAINS, YOUTUBE_DOMAINS, in_domain};
 use thiserror::Error;
@@ -381,10 +380,9 @@ impl App {
     }
 
     /// Throws away what has not aired yet, the way the settings say (used by
-    /// hotkeys and the tray menu).
+    /// hotkeys and the tray menu). [`Ack::dump`] says what viewers see.
     pub async fn dump(&self) -> Result<Ack, RelayError> {
-        let mode = dump_mode(&self.config().delay, None);
-        self.relay().dump(mode).await
+        self.state.dump(None, false).await
     }
 
     pub async fn shutdown(&self) {
@@ -392,13 +390,21 @@ impl App {
     }
 }
 
-/// How a dump covers the stream: as asked, else the default mode. Without the
-/// rolling buffer there is nothing to replay, so the slate covers it.
-pub(crate) fn dump_mode(delay: &DelayConfig, asked: Option<DelayMode>) -> DelayMode {
-    if delay.keep_buffer {
-        asked.unwrap_or(delay.default_mode)
-    } else {
-        DelayMode::Mask
+/// What a dump did, in a sentence for the streamer (tray, hotkeys, command line).
+pub fn dump_summary(ack: &Ack) -> String {
+    let secs = ack.target_ms.div_ceil(1000);
+    match ack.dump {
+        Some(DumpOutcome::Replay) => format!(
+            "Dumped. Viewers see the last {secs} s again, then the stream continues with the delay."
+        ),
+        Some(DumpOutcome::Cover) => {
+            "Dumped. The overlay slate covers the stream while the delay builds back up.".into()
+        }
+        Some(DumpOutcome::Hold) if ack.pending => format!(
+            "Dumped. No overlay is connected, so viewers see the last frame, still, for about \
+             {secs} s until the delay is back."
+        ),
+        _ => "Dumped. Nothing that was waiting will air.".into(),
     }
 }
 
@@ -499,6 +505,7 @@ pub(crate) fn engine_config(c: &Config) -> EngineConfig {
         ram_cap_bytes: (c.delay.ram_cap_mb as usize).saturating_mul(1024 * 1024),
         keep_history: c.delay.keep_buffer,
         mask_margin_ms: c.delay.mask_margin_ms,
+        mute_under_slate: c.delay.mute_under_slate,
         ..Default::default()
     }
 }
@@ -543,24 +550,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dump_replays_only_when_there_is_a_buffer_to_replay() {
-        let mut delay = DelayConfig {
-            default_mode: DelayMode::Mask,
-            ..Default::default()
-        };
-        assert_eq!(dump_mode(&delay, None), DelayMode::Mask);
-        assert_eq!(
-            dump_mode(&delay, Some(DelayMode::Rewind)),
-            DelayMode::Rewind
-        );
-        delay.default_mode = DelayMode::Rewind;
-        assert_eq!(dump_mode(&delay, Some(DelayMode::Mask)), DelayMode::Mask);
-        delay.keep_buffer = false;
-        assert_eq!(dump_mode(&delay, None), DelayMode::Mask);
-        assert_eq!(dump_mode(&delay, Some(DelayMode::Rewind)), DelayMode::Mask);
-    }
-
-    #[test]
     fn local_clients_reach_a_listener_on_every_interface_through_loopback() {
         for (listen, reach) in [
             ("0.0.0.0:1935", "127.0.0.1:1935"),
@@ -574,17 +563,37 @@ mod tests {
     }
 
     #[test]
+    fn a_dump_says_what_viewers_see() {
+        let ack = |dump, pending| Ack {
+            target_ms: 30_000,
+            effective_ms: 30_000,
+            pending,
+            history_short: false,
+            dump: Some(dump),
+        };
+        let replay = dump_summary(&ack(DumpOutcome::Replay, true));
+        assert!(replay.contains("last 30 s again"), "{replay}");
+        assert!(dump_summary(&ack(DumpOutcome::Cover, true)).contains("slate"));
+        let hold = dump_summary(&ack(DumpOutcome::Hold, true));
+        assert!(hold.contains("still, for about 30 s"), "{hold}");
+        let gone = dump_summary(&ack(DumpOutcome::Hold, false));
+        assert!(gone.contains("Nothing that was waiting"), "{gone}");
+    }
+
+    #[test]
     fn the_engine_gets_the_delay_settings_in_its_units() {
         let mut c = Config::default();
         c.delay.max_seconds = 45;
         c.delay.ram_cap_mb = 3;
         c.delay.keep_buffer = false;
         c.delay.mask_margin_ms = 2_500;
+        c.delay.mute_under_slate = false;
         let e = engine_config(&c);
         assert_eq!(e.max_delay_ms, 45_000);
         assert_eq!(e.ram_cap_bytes, 3 * 1024 * 1024);
         assert!(!e.keep_history);
         assert_eq!(e.mask_margin_ms, 2_500);
+        assert!(!e.mute_under_slate);
     }
 
     #[test]

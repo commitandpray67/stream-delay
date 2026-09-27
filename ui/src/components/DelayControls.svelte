@@ -3,7 +3,7 @@
   import { formatDelay, formatSecondsLabel } from "../lib/format";
   import { t, type Key } from "../lib/i18n";
   import { live } from "../lib/live.svelte";
-  import type { DelayMode } from "../lib/types";
+  import type { Ack, DelayMode, DumpOutcome } from "../lib/types";
   import StatusBadge from "./StatusBadge.svelte";
 
   let { compact = false }: { compact?: boolean } = $props();
@@ -42,25 +42,56 @@
   const dumpDelayMs = $derived(snap ? (snap.target_ms > 0 ? snap.target_ms : snap.effective_ms) : 0);
   const canDump = $derived(streaming && !ending && dumpDelayMs >= 500);
   // A dump replays the stretch before what it throws away, if the buffer reaches
-  // back that far; otherwise the slate covers the stream while the delay rebuilds.
+  // back that far; otherwise the slate covers the stream while the delay
+  // rebuilds, if an overlay shows it; otherwise the last frame holds.
   const dumpReplays = $derived(
     !!snap && keepBuffer && effectiveMode === "rewind" && snap.history_ms >= snap.effective_ms + dumpDelayMs + 2000,
   );
   const noOverlay = $derived(live.overlays === 0);
+  const dumpOutcome = $derived<DumpOutcome>(dumpReplays ? "replay" : noOverlay ? "hold" : "cover");
+  const muteUnderSlate = $derived(live.config?.config.delay.mute_under_slate ?? true);
+  const dumpExpected = $derived.by(() => {
+    const delay = formatDelay(dumpDelayMs);
+    switch (dumpOutcome) {
+      case "replay":
+        return t("action.dump.replay", { delay });
+      case "cover":
+        return `${t("action.dump.slate", { delay })} ${t(muteUnderSlate ? "action.dump.slate.muted" : "action.dump.slate.sound")}`;
+      case "hold":
+        return t("action.dump.hold", { delay });
+    }
+  });
   const unaired = $derived(formatDelay(snap?.effective_ms ?? 0));
 
   let custom = $state("");
   let error = $state("");
+  // What the last dump did.
+  let notice = $state("");
   let busy = $state(false);
 
   const pending = $derived(snap ? ["adding", "going-live", "reducing"].includes(snap.phase) : false);
 
+  function dumped(ack: Partial<Ack>): string {
+    switch (ack.dump) {
+      case "replay":
+        return t("dumped.replay", { delay: formatDelay(ack.target_ms ?? 0) });
+      case "cover":
+        return t("dumped.cover");
+      case "hold":
+        return t(ack.pending ? "dumped.hold" : "dumped.gone");
+      default:
+        return "";
+    }
+  }
+
   async function run(action: () => Promise<unknown>) {
     error = "";
+    notice = "";
     busy = true;
     try {
-      const ack = (await action()) as { history_short?: boolean } | undefined;
+      const ack = (await action()) as Partial<Ack> | undefined;
       if (ack?.history_short) error = "Not enough of the stream is buffered yet; the delay is shorter than asked.";
+      if (ack?.dump) notice = dumped(ack);
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -271,6 +302,9 @@
         {label("end-now", "action.endNow", "action.endNow.confirm")}
       </button>
     </div>
+    {#if armed === "dump" && !explaining}
+      <p class="muted small" role="status">{dumpExpected}</p>
+    {/if}
   {/if}
 
   {#if explaining}
@@ -281,15 +315,7 @@
         </p>
       {:else}
         <p id="explain-title"><b>{t("action.dump")}:</b> {t("action.dump.help")}</p>
-        <p>
-          {#if dumpReplays}
-            {t("action.dump.replay", { delay: formatDelay(dumpDelayMs) })}
-          {:else if noOverlay}
-            <span class="error">{t("action.dump.noOverlay", { delay: formatDelay(dumpDelayMs) })}</span>
-          {:else}
-            {t("action.dump.slate", { delay: formatDelay(dumpDelayMs) })}
-          {/if}
-        </p>
+        <p class:error={dumpOutcome === "hold"}>{dumpExpected}</p>
       {/if}
       <label class="inline small"><input type="checkbox" bind:checked={dontShow} /> {t("popup.dontShow")}</label>
       <div class="row-buttons">
@@ -329,6 +355,7 @@
     {/each}
   {/if}
 
+  {#if notice}<p class="notice" role="status">{notice}</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </div>
 

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use common::*;
-use streamdelay_relay::{DelayMode, DestinationKey, EgressStatus};
+use streamdelay_relay::{DelayMode, DestinationKey, DumpOutcome, EgressStatus, Phase};
 use streamdelay_rtmp::session::MediaKind;
 
 async fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
@@ -597,7 +597,7 @@ async fn a_dump_needs_a_delay() {
     let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
     p.stream_for(Duration::from_millis(500)).await;
     // Live: there is nothing to throw away.
-    let refused = relay.dump(DelayMode::Rewind).await;
+    let refused = relay.dump(DelayMode::Rewind, false).await;
     assert!(
         matches!(
             refused,
@@ -619,8 +619,9 @@ async fn a_dump_replays_what_aired_and_never_airs_what_had_not() {
     let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
     p.stream_for(Duration::from_secs(6)).await;
     let dumped = Instant::now();
-    let ack = relay.dump(DelayMode::Rewind).await.unwrap();
+    let ack = relay.dump(DelayMode::Rewind, false).await.unwrap();
     assert_eq!(ack.target_ms, 2_000);
+    assert_eq!(ack.dump, Some(DumpOutcome::Replay));
     assert!(!relay.state().delay.mask_visible, "a replay needs no slate");
     p.stream_for(Duration::from_secs(5)).await;
     {
@@ -669,7 +670,8 @@ async fn a_mask_dump_throws_away_what_has_not_aired_under_the_slate() {
     let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
     p.stream_for(Duration::from_secs(5)).await;
     let dumped = Instant::now();
-    relay.dump(DelayMode::Mask).await.unwrap();
+    let ack = relay.dump(DelayMode::Mask, true).await.unwrap();
+    assert_eq!(ack.dump, Some(DumpOutcome::Cover));
     assert!(
         relay.state().delay.mask_visible,
         "the slate must go up at once"
@@ -695,6 +697,85 @@ async fn a_mask_dump_throws_away_what_has_not_aired_under_the_slate() {
         assert!(after.len() > 30, "the stream did not carry on: {after:?}");
         assert_eq!(after[0] % 30, 0, "the stream must carry on from a keyframe");
     }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dump_nothing_covers_holds_even_when_the_destination_just_dropped() {
+    // A rewind dump without the history for a replay, and no overlay: it used to
+    // show the slate (nothing showed it) and air the stream almost live.
+    let (sink, log, kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(4)).await;
+    kill.send(true).unwrap();
+    let dumped = Instant::now();
+    let ack = relay.dump(DelayMode::Rewind, false).await.unwrap();
+    assert_eq!(ack.dump, Some(DumpOutcome::Hold), "{ack:?}");
+    let state = relay.state();
+    assert!(!state.delay.mask_visible, "nothing asked for the slate");
+    assert_eq!(state.delay.phase, Phase::Holding);
+    p.stream_for(Duration::from_secs(7)).await;
+    let state = relay.state();
+    assert_eq!(state.delay.phase, Phase::Delayed, "{:?}", state.delay);
+    {
+        let l = log.lock().unwrap();
+        let mut after = Vec::new();
+        for m in l.media.iter().filter(|m| m.at >= dumped) {
+            let Some(id) = frame_of(&m.payload) else {
+                continue;
+            };
+            let captured = p.captured_at(id);
+            if captured < dumped {
+                // Only what had aired, again: the frame the hold shows.
+                assert!(
+                    captured + Duration::from_millis(2_700) <= dumped,
+                    "frame {id}, which had not aired at the dump, aired"
+                );
+            } else {
+                let age = m.at.saturating_duration_since(captured);
+                assert!(
+                    age >= Duration::from_millis(2_950),
+                    "frame {id} aired after {age:?}"
+                );
+                if m.kind == MediaKind::Video {
+                    after.push(id);
+                }
+            }
+        }
+        assert!(after.len() > 30, "the stream did not carry on: {after:?}");
+        assert_eq!(after[0] % 30, 0, "the stream must carry on from a keyframe");
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rewind_dump_with_the_destination_gone_does_not_replay() {
+    // Of what was written to a connection that has dropped, what the
+    // destination got is unknown: a replay could air frames that never did.
+    let opts = SinkOptions {
+        single_connection: true,
+        ..Default::default()
+    };
+    let (sink, _log, kill) = start_sink_with("127.0.0.1:0", opts).await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    // Enough for a replay.
+    p.stream_for(Duration::from_secs(10)).await;
+    kill.send(true).unwrap();
+    wait_until(
+        "the destination connection dropped",
+        Duration::from_secs(5),
+        || !relay.state().delay.output.connected,
+    )
+    .await;
+    let ack = relay.dump(DelayMode::Rewind, false).await.unwrap();
+    assert_eq!(ack.dump, Some(DumpOutcome::Hold), "{ack:?}");
+    assert!(!relay.state().delay.mask_visible);
     p.stop().await;
     relay.shutdown().await;
 }

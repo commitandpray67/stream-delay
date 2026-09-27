@@ -30,7 +30,7 @@ fn icon(phase: Phase) -> Image<'static> {
     let bytes: &'static [u8] = match phase {
         Phase::Live => include_bytes!("../icons/tray-live.png"),
         Phase::Delayed => include_bytes!("../icons/tray-delayed.png"),
-        Phase::Adding | Phase::GoingLive | Phase::Reducing => {
+        Phase::Adding | Phase::GoingLive | Phase::Reducing | Phase::Holding => {
             include_bytes!("../icons/tray-busy.png")
         }
         Phase::Offline => include_bytes!("../icons/tray-offline.png"),
@@ -54,6 +54,7 @@ fn status_text(state: &RelayState) -> String {
         Phase::Adding => "Adding delay…".into(),
         Phase::GoingLive => "Removing delay…".into(),
         Phase::Reducing => "Changing delay…".into(),
+        Phase::Holding => "Holding the picture…".into(),
     }
 }
 
@@ -285,8 +286,11 @@ fn on_menu(app: &AppHandle, id: &str) {
             });
         }
         "dump" => {
+            let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = core.dump().await {
+                let r = core.dump().await;
+                crate::dump_notice(&app, &r);
+                if let Err(e) = r {
                     warn!("dump failed: {e}");
                 }
             });

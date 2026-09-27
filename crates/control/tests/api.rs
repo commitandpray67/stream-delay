@@ -702,15 +702,28 @@ async fn end_after_air_dump_and_update_checks() {
     assert_eq!(body["ending"], false);
     send(&app, post("/api/v1/stream/resume", &control, "")).await;
 
-    // Dock links may dump; there is nothing to throw away yet.
+    // Dock links may dump; there is nothing to throw away yet, and nothing
+    // more from before it airs.
     let (s, body) = send(&app, post("/api/v1/stream/dump", &control, "")).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    let (s, _) = send(
+    assert_eq!(body["dump"], "hold", "{body}");
+    let (s, body) = send(
         &app,
         post("/api/v1/stream/dump", &control, r#"{"mode":"mask"}"#),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["dump"], "hold", "{body}");
+    let (s, body) = send(
+        &app,
+        post(
+            "/api/v1/stream/dump",
+            &control,
+            r#"{"mode":"mask","allow_uncovered":true}"#,
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
     let (s, _) = send(
         &app,
         post("/api/v1/stream/dump", &control, r#"{"mode":"sideways"}"#),

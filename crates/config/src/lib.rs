@@ -246,6 +246,9 @@ pub struct DelayConfig {
     /// to show the slate, and the encoder to send the frames that show it.
     /// Encoders with look-ahead need more.
     pub mask_margin_ms: u64,
+    /// After a dump the slate covers, leave out the sound of what it covers,
+    /// which airs almost live: the slate covers the picture only.
+    pub mute_under_slate: bool,
 }
 
 impl Default for DelayConfig {
@@ -258,6 +261,7 @@ impl Default for DelayConfig {
             ram_cap_mb: 512,
             keep_buffer: true,
             mask_margin_ms: 1_500,
+            mute_under_slate: true,
         }
     }
 }
