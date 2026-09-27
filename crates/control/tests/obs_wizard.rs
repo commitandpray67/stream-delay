@@ -313,6 +313,38 @@ async fn configure_imports_key_adds_overlay_and_restores() {
 }
 
 #[tokio::test]
+async fn a_twitch_key_from_obs_only_goes_to_twitch() {
+    // The destination was set to another server; OBS streams to Twitch.
+    let (app, _obs, secrets, _dir) = setup_with_config(
+        "rtmp_common",
+        json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+        |c| {
+            c.destination.service = "custom".into();
+            c.destination.url = "rtmp://relay.example/live".into();
+        },
+    )
+    .await;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"import_key": true})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["imported_key"], true);
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    assert_eq!(cfg["config"]["destination"]["service"], "twitch", "{cfg}");
+    assert_eq!(
+        cfg["config"]["destination"]["url"],
+        "rtmps://live.twitch.tv/app"
+    );
+    let saved: Value =
+        serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
+    assert_eq!(saved["for"], "rtmps://live.twitch.tv:443/app");
+}
+
+#[tokio::test]
 async fn custom_server_credentials_stay_out_of_settings_and_diagnostics() {
     let custom = json!({
         "server": "rtmp://ingest.example.net/live", "key": "custom-key-5150",

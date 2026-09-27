@@ -522,6 +522,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn same_server_takes_a_valid_address_of_the_same_service() {
+        let twitch = streamdelay_config::SERVICES[0].url;
+        assert!(same_server(twitch, twitch));
+        // Another of Twitch's ingest servers.
+        assert!(same_server(
+            twitch,
+            "rtmps://ingest.global-contribute.live-video.net/app"
+        ));
+        for other in [
+            "rtmps://relay.example/app",
+            "rtmps://live.twitch.tv.example/app",
+            // Without TLS, the key would travel in the clear.
+            "rtmp://live.twitch.tv/app",
+            "not a url",
+        ] {
+            assert!(!same_server(twitch, other), "{other}");
+        }
+    }
+
+    #[test]
     fn a_key_for_a_custom_server_stays_with_its_endpoint() {
         let key_for = "rtmps://relay.example:443/private";
         // The same endpoint, spelled differently.
