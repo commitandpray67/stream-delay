@@ -19,6 +19,14 @@ export function backToMs(d: Snapshot | null): number | null {
   return d && d.excess_ms > 0 && d.target_ms > 0 ? d.target_ms : null;
 }
 
+/**
+ * The delay to offer to set again, when it came out shorter than set for lack
+ * of buffer and the buffer now reaches back far enough; else null.
+ */
+export function setAgainMs(d: Snapshot | null): number | null {
+  return d && d.full_delay_ready && d.target_ms > 0 ? d.target_ms : null;
+}
+
 /** "0 s", "30 s", "2:05" */
 export function formatDelay(ms: number): string {
   const s = Math.round(ms / 1000);

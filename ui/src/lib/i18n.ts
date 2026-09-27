@@ -59,6 +59,7 @@ const en = {
   "action.resume.help": "Starts a new broadcast from what OBS sends from now on, without restarting the stream in OBS.",
   "action.cancel": "Cancel",
   "action.backTo": "Back to {delay}",
+  "action.setAgain": "Set {delay} again",
   "action.set": "Set",
   "popup.dontShow": "Don't show this again",
   "custom.label": "Custom delay (seconds)",

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { applyPreset, cancel, dumpBuffer, endStream, goLive, resumeStream, setDelay } from "../lib/api";
-  import { backToMs, formatDelay, formatSecondsLabel } from "../lib/format";
+  import { backToMs, formatDelay, formatSecondsLabel, setAgainMs } from "../lib/format";
   import { t, type Key } from "../lib/i18n";
   import { live } from "../lib/live.svelte";
   import type { Ack, DelayMode, DumpOutcome } from "../lib/types";
@@ -357,11 +357,19 @@
       <p class="notice">{w}</p>
     {/each}
     {@const back = ended ? null : backToMs(snap)}
+    {@const again = ended ? null : setAgainMs(snap)}
     {#if back !== null}
       <!-- A reduction: it skips ahead at the next keyframe old enough, never lower. -->
       <div class="row-buttons">
         <button class="primary" disabled={busy} onclick={() => run(() => setDelay(back / 1000, "rewind"))}>
           {t("action.backTo", { delay: formatDelay(back) })}
+        </button>
+      </div>
+    {:else if again !== null}
+      <!-- A rewind: the buffer now reaches back that far. -->
+      <div class="row-buttons">
+        <button class="primary" disabled={busy} onclick={() => run(() => setDelay(again / 1000, "rewind"))}>
+          {t("action.setAgain", { delay: formatDelay(again) })}
         </button>
       </div>
     {/if}

@@ -361,6 +361,8 @@ struct Output {
     pending: Pending,
     mask_visible: bool,
     history_short: bool,
+    /// With `history_short`: how far back the buffer reached then.
+    history_then: u64,
     /// The memory limit made the delay shorter than the one asked for.
     memory_short: bool,
     /// During a hold (or while a dump waits for its slate), the frame sent again.
@@ -436,6 +438,7 @@ impl Engine {
                 pending: Pending::None,
                 mask_visible: false,
                 history_short: false,
+                history_then: 0,
                 memory_short: false,
                 hold: None,
                 slate_change: 0,
@@ -1155,6 +1158,10 @@ impl Engine {
             Some(k) => Some(k),
             None => {
                 self.out.history_short = true;
+                self.out.history_then = self
+                    .ring
+                    .front()
+                    .map_or(0, |f| now.saturating_sub(f.arrival));
                 // When the memory limit is what keeps the buffer short, the oldest
                 // keyframe is the next to go: start one keyframe further in.
                 let full = (self.bytes + self.session_bytes) * 10 >= self.config.ram_cap_bytes * 9;

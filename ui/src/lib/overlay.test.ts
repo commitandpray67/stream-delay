@@ -21,6 +21,7 @@ function state(
       history_short: opts.short ?? false,
       memory_short: opts.memory ?? false,
       excess_ms: (opts.excess_s ?? 0) * 1000,
+      full_delay_ready: false,
       ingest: {
         active: true,
         video_codec: null,

@@ -31,6 +31,8 @@ export interface Snapshot {
   memory_short: boolean;
   /** How much longer than set the delay is, beyond keyframe rounding (after an outage); else 0. */
   excess_ms: number;
+  /** With history_short: the buffer now reaches back far enough for the delay set. */
+  full_delay_ready: boolean;
   ingest: {
     active: boolean;
     video_codec: string | null;

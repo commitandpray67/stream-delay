@@ -53,6 +53,12 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- When a delay came out shorter than set for lack of buffer, the warning put
+  how much is buffered now (which keeps growing) next to the delay fixed at
+  the time, ending up at "Only 45 s buffered, so the delay is 12 s instead of
+  30 s". It now keeps the numbers of the moment, and once enough is buffered
+  says so, with **Set 30 s again** in the dock. The state gains
+  `full_delay_ready`.
 - Wrong ingest keys could lock the streamer's own encoder out: five from one
   address refused every connection from it for a minute (ten minutes while
   keys came from many addresses), and a fifth connection from one address was

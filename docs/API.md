@@ -62,7 +62,7 @@ Commands return an acknowledgement:
     "target_ms": 30000, "effective_ms": 31200, "max_delay_ms": 120000,
     "history_ms": 64000, "buffered_bytes": 48000000,
     "mask_visible": false, "slate_change": 0, "history_short": false,
-    "memory_short": false, "excess_ms": 0,
+    "memory_short": false, "excess_ms": 0, "full_delay_ready": false,
     "ingest": { "active": true, "video_codec": "avc", "audio_codec": "aac",
                 "bitrate_kbps": 6100, "fps": 60.0, "gop_ms": 2000,
                 "enhanced": false, "multitrack": false },
@@ -77,7 +77,7 @@ Commands return an acknowledgement:
 }
 ```
 
-`excess_ms` is how much longer than `target_ms` the delay is once nothing is changing it, when that is more than rounding back to a keyframe explains (a keyframe interval and half a second): after the destination connection dropped, the delay grows by the outage and stays so until it is set again (a `PUT /api/v1/delay` with the same `seconds` brings it back at the next keyframe). It is 0 otherwise, and a warning says so while it is not.
+`full_delay_ready` is set, with `history_short`, once the buffer reaches back far enough for the delay set: setting it again gives it in full. `excess_ms` is how much longer than `target_ms` the delay is once nothing is changing it, when that is more than rounding back to a keyframe explains (a keyframe interval and half a second): after the destination connection dropped, the delay grows by the outage and stays so until it is set again (a `PUT /api/v1/delay` with the same `seconds` brings it back at the next keyframe). It is 0 otherwise, and a warning says so while it is not.
 
 `ended` (top level) is `true` after `POST /api/v1/stream/end` until the broadcast
 resumes; `ending` is `true` while an `after-air` end is still airing. `phase` is

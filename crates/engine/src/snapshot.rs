@@ -69,6 +69,9 @@ pub struct Snapshot {
     pub history_short: bool,
     /// The memory limit keeps the delay shorter than the one asked for.
     pub memory_short: bool,
+    /// With `history_short`: the buffer now reaches back far enough for the
+    /// delay asked for, which setting it again gives.
+    pub full_delay_ready: bool,
     /// How much longer than asked for the delay is, once nothing is changing
     /// it, when that is more than rounding back to a keyframe explains (a
     /// keyframe interval and half a second): after the destination connection
@@ -250,10 +253,21 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
             "No overlay confirmed that the slate showed, so instead of covering the stream after the dump, viewers see the last frame, still, until the delay is back.".into(),
         );
     }
-    if o.history_short {
+    // The history the delay was measured against was that at the command: now
+    // the buffer may reach further, enough for the full delay.
+    let full_delay_ready = o.history_short
+        && o.pending == Pending::None
+        && history_ms * MS >= o.target + e.keyframe_interval();
+    if full_delay_ready {
+        warnings.push(format!(
+            "Enough of the stream is buffered now for {:.0} s: set it again to get the full delay (it is {:.0} s).",
+            o.target as f64 / 1e6,
+            effective as f64 / 1e6,
+        ));
+    } else if o.history_short {
         warnings.push(format!(
             "Only {:.0} s of the stream was buffered, so the delay is {:.0} s instead of {:.0} s.",
-            history_ms as f64 / 1000.0,
+            o.history_then as f64 / 1e6,
             effective as f64 / 1e6,
             o.target as f64 / 1e6
         ));
@@ -270,6 +284,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         history_short: o.history_short,
         memory_short: o.memory_short,
         excess_ms,
+        full_delay_ready,
         ingest,
         output: OutputStats {
             connected: o.connected,

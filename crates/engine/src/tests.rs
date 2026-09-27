@@ -2740,3 +2740,43 @@ fn a_delay_grown_by_an_outage_says_so_until_it_is_set_again() {
     assert_eq!(snap.excess_ms, 0);
     assert!(snap.warnings.is_empty(), "{snap:?}");
 }
+
+#[test]
+fn a_delay_short_of_history_says_so_and_when_the_full_one_is_there() {
+    let mut s = Sim::new(config());
+    s.connect();
+    s.advance(10 * SEC);
+    let ack = s.cmd(Command::SetDelay {
+        ms: 30_000,
+        mode: DelayMode::Rewind,
+    });
+    assert!(ack.history_short);
+    let snap = s.snapshot();
+    assert!(!snap.full_delay_ready);
+    let short = &snap.warnings[0];
+    assert!(
+        short.starts_with(
+            "Only 10 s of the stream was buffered, so the delay is 10 s instead of 30 s"
+        ),
+        "{short}"
+    );
+    // A minute on the buffer reaches back far enough: the numbers stay those
+    // of the command until then, and it says so once it does.
+    s.advance(10 * SEC);
+    assert_eq!(&s.snapshot().warnings[0], short, "the numbers changed");
+    s.advance(50 * SEC);
+    let snap = s.snapshot();
+    assert!(snap.full_delay_ready && snap.history_short);
+    assert!(
+        snap.warnings[0].contains("buffered now for 30 s: set it again"),
+        "{snap:?}"
+    );
+    s.cmd(Command::SetDelay {
+        ms: 30_000,
+        mode: DelayMode::Rewind,
+    });
+    let snap = s.snapshot();
+    assert!(!snap.history_short && !snap.full_delay_ready);
+    assert!((30_000..=32_100).contains(&snap.effective_ms), "{snap:?}");
+    assert!(snap.warnings.is_empty(), "{snap:?}");
+}

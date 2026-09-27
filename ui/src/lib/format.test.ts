@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backToMs, formatBitrate, formatBytes, formatDelay, formatSecondsLabel, phaseTone } from "./format";
+import { backToMs, setAgainMs, formatBitrate, formatBytes, formatDelay, formatSecondsLabel, phaseTone } from "./format";
 import type { Snapshot } from "./types";
 import { t } from "./i18n";
 
@@ -10,6 +10,12 @@ describe("format", () => {
     expect(backToMs(snap(30_000, 0))).toBeNull();
     expect(backToMs(snap(30_000, 20_000))).toBe(30_000);
     expect(backToMs(snap(0, 20_000))).toBeNull();
+  });
+  it("offers to set a delay again once the buffer reaches back far enough", () => {
+    const snap = (target_ms: number, full_delay_ready: boolean) => ({ target_ms, full_delay_ready }) as Snapshot;
+    expect(setAgainMs(snap(30_000, false))).toBeNull();
+    expect(setAgainMs(snap(30_000, true))).toBe(30_000);
+    expect(setAgainMs(null)).toBeNull();
   });
   it("formats delays", () => {
     expect(formatDelay(0)).toBe("0 s");
