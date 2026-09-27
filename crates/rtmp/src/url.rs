@@ -237,7 +237,18 @@ mod tests {
         assert_eq!(u.port, 443);
         assert_eq!(u.tc_url, "rtmps://a.rtmps.youtube.com/live2");
         assert_eq!(u.stream_key.as_deref(), Some("abcd-efgh"));
-        assert!(!format!("{u:?}").contains("abcd"));
+        let shown = format!("{u:?}");
+        assert!(!shown.contains("abcd"), "{shown}");
+        assert!(
+            shown.contains("rtmps://a.rtmps.youtube.com/live2"),
+            "{shown}"
+        );
+        assert!(u.encrypted());
+        assert!(
+            !RtmpUrl::parse("rtmp://live.twitch.tv/app")
+                .unwrap()
+                .encrypted()
+        );
     }
 
     #[test]

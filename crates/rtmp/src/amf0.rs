@@ -347,6 +347,67 @@ mod tests {
             Some("NetStream.Publish.Start")
         );
         assert!(v.get("missing").is_none());
+        let typed = Amf0Value::TypedObject {
+            class: "Info".into(),
+            props: vec![("level".into(), Amf0Value::string("status"))],
+        };
+        assert_eq!(typed.get("level").and_then(|v| v.as_str()), Some("status"));
+    }
+
+    /// `k` strict arrays of one element, one inside the other, around a null.
+    fn nested_arrays(k: usize) -> Vec<u8> {
+        let mut d = Vec::new();
+        for _ in 0..k {
+            d.extend_from_slice(&[0x0a, 0, 0, 0, 1]);
+        }
+        d.push(0x05);
+        d
+    }
+
+    /// `k` objects, each the property `a` of the one around it, around a null.
+    fn nested_objects(k: usize) -> Vec<u8> {
+        let mut d = Vec::new();
+        for _ in 0..k {
+            d.extend_from_slice(&[0x03, 0, 1, b'a']);
+        }
+        d.push(0x05);
+        for _ in 0..k {
+            d.extend_from_slice(&[0, 0, 0x09]);
+        }
+        d
+    }
+
+    #[test]
+    fn nesting_is_limited_in_objects_as_in_arrays() {
+        for nested in [nested_arrays, nested_objects] {
+            assert!(decode_all(&nested(MAX_DEPTH)).is_ok());
+            assert_eq!(decode_all(&nested(MAX_DEPTH + 1)), Err(Amf0Error::TooDeep));
+        }
+    }
+
+    #[test]
+    fn a_strict_array_may_fill_the_rest_of_the_data() {
+        let three_nulls = [0x0a, 0, 0, 0, 3, 0x05, 0x05, 0x05];
+        assert_eq!(
+            decode_all(&three_nulls),
+            Ok(vec![Amf0Value::StrictArray(vec![Amf0Value::Null; 3])])
+        );
+        // One element more than there are bytes left.
+        assert_eq!(
+            decode_all(&[0x0a, 0, 0, 0, 4, 0x05, 0x05, 0x05]),
+            Err(Amf0Error::Eof)
+        );
+    }
+
+    #[test]
+    fn strings_longer_than_64_kib_are_sent_as_long_strings() {
+        let long = "x".repeat(70_000);
+        let encoded = encode_all(&[Amf0Value::String(long.clone())]);
+        assert_eq!(encoded[0], 0x0c);
+        assert_eq!(decode_all(&encoded), Ok(vec![Amf0Value::LongString(long)]));
+        let short = "x".repeat(usize::from(u16::MAX));
+        let encoded = encode_all(&[Amf0Value::String(short.clone())]);
+        assert_eq!(decode_all(&encoded), Ok(vec![Amf0Value::String(short)]));
     }
 }
 

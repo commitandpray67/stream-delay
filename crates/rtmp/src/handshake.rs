@@ -161,6 +161,34 @@ mod tests {
     }
 
     #[test]
+    fn each_side_waits_for_exactly_what_it_needs() {
+        let mut c = ClientHandshake::new();
+        let mut s = ServerHandshake::new();
+        let (mut c_out, mut s_out) = (BytesMut::new(), BytesMut::new());
+        c.start(&mut c_out);
+        let c0c1 = c_out.split();
+        // C0+C1 one byte short, then the last byte.
+        let need_more = s.feed(&c0c1[..HANDSHAKE_SIZE], &mut s_out).unwrap();
+        assert_eq!(need_more, Progress::NeedMore);
+        assert!(s_out.is_empty());
+        let need_more = s.feed(&c0c1[HANDSHAKE_SIZE..], &mut s_out).unwrap();
+        assert_eq!(need_more, Progress::NeedMore);
+        let s012 = s_out.split();
+        assert_eq!(s012.len(), 1 + 2 * HANDSHAKE_SIZE);
+        assert_eq!(&s012[1 + HANDSHAKE_SIZE..], &c0c1[1..], "S2 echoes C1");
+        // The client likewise.
+        let need_more = c.feed(&s012[..2 * HANDSHAKE_SIZE], &mut c_out).unwrap();
+        assert_eq!(need_more, Progress::NeedMore);
+        let done = c.feed(&s012[2 * HANDSHAKE_SIZE..], &mut c_out).unwrap();
+        assert_eq!(done, Progress::Done(Bytes::new()));
+        let c2 = c_out.split();
+        assert_eq!(&c2[..], &s012[1..1 + HANDSHAKE_SIZE], "C2 echoes S1");
+        // Exactly C2, with nothing after it.
+        let done = s.feed(&c2, &mut s_out).unwrap();
+        assert_eq!(done, Progress::Done(Bytes::new()));
+    }
+
+    #[test]
     fn rejects_rtmpe() {
         let mut s = ServerHandshake::new();
         let mut data = vec![6u8];
