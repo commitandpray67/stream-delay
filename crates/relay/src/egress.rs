@@ -1454,6 +1454,36 @@ mod tests {
     }
 
     #[test]
+    fn the_write_log_names_the_last_message_surely_sent() {
+        let mut log = WriteLog::default();
+        log.written(100, Some(1));
+        // Part of a message: none ends in this write.
+        log.written(50, None);
+        log.written(50, Some(2));
+        log.written(100, Some(3));
+        // (unsent, last message surely sent): message 1 ends at byte 100,
+        // 2 at 200, 3 at 300.
+        for (unsent, sent) in [
+            (0, Some(3)),
+            (99, Some(2)),
+            (100, Some(2)),
+            (101, Some(1)),
+            (200, Some(1)),
+            (201, None),
+            (400, None),
+        ] {
+            assert_eq!(log.surely_sent(unsent), sent, "{unsent} unsent");
+        }
+        // It reaches back WRITTEN_KEPT bytes, and no further.
+        let mut log = WriteLog::default();
+        log.written(10, Some(1));
+        log.written(WRITTEN_KEPT, Some(2));
+        assert_eq!(log.surely_sent(WRITTEN_KEPT), Some(1));
+        log.written(1, Some(3));
+        assert_eq!(log.surely_sent(WRITTEN_KEPT + 1), None);
+    }
+
+    #[test]
     fn errors_never_carry_the_stream_key() {
         let key = "live_123_Ab+c/d";
         let r = scrub(
