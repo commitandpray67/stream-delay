@@ -6,6 +6,14 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- RTMP timestamps wrap to 0 after 2^32 ms, about 49.7 days (sooner for encoders
+  whose timestamps start high). If audio, video or data stepped back slightly
+  just after its wrap, it was taken for a jump of 49.7 days ahead and stayed
+  that far ahead of the rest, so the destination lost audio/video sync until
+  the encoder reconnected. A step back is now a step back.
+
 ## [0.3.2] - 2026-09-27
 
 ### Changed
