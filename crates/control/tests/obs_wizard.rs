@@ -313,6 +313,39 @@ async fn configure_imports_key_adds_overlay_and_restores() {
 }
 
 #[tokio::test]
+async fn the_key_in_obs_is_only_taken_when_asked() {
+    let (app, obs, secrets, _dir) = setup_with_config(
+        "rtmp_common",
+        json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+        |c| {
+            c.destination.service = "custom".into();
+            c.destination.url = "rtmp://relay.example/live".into();
+        },
+    )
+    .await;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"import_key": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["imported_key"], false);
+    assert_eq!(secrets.get(secret::DESTINATION_KEY), None);
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    assert_eq!(
+        cfg["config"]["destination"]["url"],
+        "rtmp://relay.example/live"
+    );
+    // Backed up, to be put back.
+    assert_ne!(obs.lock().unwrap().settings["key"], "live_987_secret");
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(obs.lock().unwrap().settings["key"], "live_987_secret");
+}
+
+#[tokio::test]
 async fn a_twitch_key_from_obs_only_goes_to_twitch() {
     // The destination was set to another server; OBS streams to Twitch.
     let (app, _obs, secrets, _dir) = setup_with_config(
@@ -402,6 +435,9 @@ async fn saved_password_and_backup_stay_with_their_obs() {
         sent.iter().all(|a| a.is_some() && *a == sent[0]),
         "{sent:?}"
     );
+    let (_, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+    assert_eq!(status["has_backup"], true, "{status}");
+    assert_eq!(status["password_saved"], true, "{status}");
 
     // Another OBS (or whatever listens there) gets neither the saved password...
     let (other, other_port) = spawn_obs(
@@ -468,6 +504,34 @@ async fn an_earlier_stream_delay_address_does_not_replace_the_backup() {
     let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
     assert_eq!(s, StatusCode::OK, "{r}");
     assert_eq!(obs.lock().unwrap().settings["key"], "live_987_secret");
+}
+
+#[tokio::test]
+async fn an_earlier_address_is_recognized_by_either_key_it_streams_with() {
+    const INGEST_KEY: &str = "ingest-key-0123456789abcdef";
+    for key in ["streamdelay", INGEST_KEY] {
+        let (app, obs, secrets, _dir) = setup_with_config(
+            "rtmp_common",
+            json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+            |c| c.ingest.key = Some(INGEST_KEY.into()),
+        )
+        .await;
+        let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        assert_eq!(obs.lock().unwrap().settings["key"], INGEST_KEY);
+        obs.lock().unwrap().settings = json!({
+            "server": "rtmp://127.0.0.1:1/live", "key": key, "use_auth": false,
+        });
+        let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        assert!(
+            secrets
+                .get(secret::OBS_BACKUP)
+                .unwrap()
+                .contains("live_987_secret"),
+            "{key}: the backup of OBS's own settings was replaced"
+        );
+    }
 }
 
 #[tokio::test]
