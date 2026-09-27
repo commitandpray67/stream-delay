@@ -1729,6 +1729,18 @@ fn a_byte_budget_holds_output_back_without_gaps() {
     s.budget = Some(0);
     s.advance(3 * SEC);
     assert_eq!(s.sent.len(), n, "sent with no budget left");
+    // Seconds' worth is due now; a poll stops once its budget is spent, over it
+    // by one message at most.
+    let mut out = Vec::new();
+    s.e.poll_budget(s.now, &mut out, 1);
+    assert_eq!(
+        out.len(),
+        1,
+        "{} messages for a budget of 1 byte",
+        out.len()
+    );
+    s.sent
+        .extend(out.into_iter().map(|msg| Sent { at: s.now, msg }));
     // A small budget lets a little through per poll.
     s.budget = Some(1);
     s.advance(SEC);
