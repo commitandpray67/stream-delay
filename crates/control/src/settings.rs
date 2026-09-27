@@ -318,6 +318,63 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn settings_are_validated_to_their_limits() {
+        let current = Config::default();
+        let check = |v: serde_json::Value| {
+            let u: SettingsUpdate = serde_json::from_value(v).unwrap();
+            validate(&u, &current)
+        };
+        let overlay = |key: &str, value: serde_json::Value| {
+            let mut o = serde_json::to_value(&current.overlay).unwrap();
+            o[key] = value;
+            serde_json::json!({ "overlay": o })
+        };
+        // Colors: hex only.
+        for ok in ["#9147ff", "#fff", "#9147ffcc", "#ABCDEF"] {
+            assert!(check(overlay("accent_color", ok.into())).is_ok(), "{ok}");
+        }
+        for bad in ["9147ff", "#12345", "#ggg", "red", "#fff;x:y", "", "#"] {
+            assert!(check(overlay("text_color", bad.into())).is_err(), "{bad}");
+        }
+        // Overlay text, to the character.
+        for (key, max) in [
+            ("mask_title", 200),
+            ("mask_subtitle", 400),
+            ("mask_image", 2048),
+        ] {
+            assert!(check(overlay(key, "x".repeat(max).into())).is_ok(), "{key}");
+            assert!(
+                check(overlay(key, "x".repeat(max + 1).into())).is_err(),
+                "{key}"
+            );
+        }
+        // Between 1 and 10 presets, each from 0 to the maximum delay.
+        let presets = |seconds: Vec<f64>| {
+            let mut d = serde_json::to_value(&current.delay).unwrap();
+            let one = d["presets"][0].clone();
+            d["presets"] = seconds
+                .into_iter()
+                .map(|s| {
+                    let mut p = one.clone();
+                    p["seconds"] = s.into();
+                    p
+                })
+                .collect();
+            serde_json::json!({ "delay": d })
+        };
+        let max = current.delay.max_seconds as f64;
+        assert!(check(presets(vec![5.0; 10])).is_ok());
+        assert!(check(presets(vec![])).is_err());
+        assert!(check(presets(vec![5.0; 11])).is_err());
+        assert!(check(presets(vec![0.0, max])).is_ok());
+        assert!(check(presets(vec![-0.5])).is_err());
+        assert!(check(presets(vec![max + 0.5])).is_err());
+        // The encoder grace period.
+        assert!(check(serde_json::json!({ "grace_seconds": 600 })).is_ok());
+        assert!(check(serde_json::json!({ "grace_seconds": 601 })).is_err());
+    }
+
     #[tokio::test]
     async fn dock_and_overlay_config_has_nothing_secret() {
         let relay = streamdelay_relay::start(RelayConfig {
