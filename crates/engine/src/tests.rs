@@ -1362,6 +1362,56 @@ fn raising_the_delay_during_a_dumps_replay_holds_back_what_comes_next_longer() {
     assert!((30_000..=32_100).contains(&snap.effective_ms), "{snap:?}");
 }
 
+/// The destination connection drops during a dump's hold: on the new one the
+/// last frame holds again, after the decoder configuration it needs, instead
+/// of nothing reaching the destination until the delay is back. Timestamps
+/// carry on from the held frames when the stream continues.
+#[test]
+fn a_hold_carries_on_after_a_reconnect() {
+    let mut s = dump_sim(config());
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: false,
+    });
+    assert_eq!(ack.dump, Some(DumpOutcome::Hold));
+    s.advance(3 * SEC);
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    s.advance(2 * SEC);
+    let n = s.sent.len();
+    s.connect();
+    s.advance(5 * SEC);
+    let video: Vec<&Sent> = s.sent[n..]
+        .iter()
+        .filter(|x| x.msg.kind == Kind::Video)
+        .collect();
+    let config = |x: &Sent| x.msg.payload.get(1) == Some(&0x00);
+    assert!(
+        video.first().is_some_and(|x| config(x)),
+        "the configuration first"
+    );
+    let held = video
+        .iter()
+        .filter(|x| x.msg.seq.is_none() && !config(x))
+        .count();
+    assert!(held >= 4, "{held} frames held on the new connection");
+    // Through the end of the hold and on.
+    s.advance(30 * SEC);
+    assert!(s.snapshot().effective_ms >= 19_000, "{:?}", s.snapshot());
+    for kind in [Kind::Audio, Kind::Video] {
+        let ts: Vec<u32> = s.sent[n..]
+            .iter()
+            .filter(|x| x.msg.kind == kind)
+            .map(|x| x.msg.timestamp)
+            .collect();
+        assert!(
+            ts.windows(2).all(|w| w[0] <= w[1]),
+            "{kind:?} timestamps went back: {ts:?}"
+        );
+    }
+    s.check_invariants_in(n..s.sent.len());
+}
+
 fn dump_sim(config: EngineConfig) -> Sim {
     let mut s = Sim::new(config);
     s.connect();
@@ -1453,28 +1503,6 @@ fn a_dump_nothing_covers_holds_the_last_frame_until_the_delay_is_back() {
             sent.at - i.arrival
         );
     }
-    s.check_invariants_in(n..s.sent.len());
-}
-
-#[test]
-fn a_hold_sends_nothing_to_a_new_connection_until_it_ends() {
-    let mut s = dump_sim(config());
-    s.cmd(Command::Dump {
-        mode: DelayMode::Mask,
-        cover: false,
-    });
-    s.advance(3 * SEC);
-    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
-    s.e.output_disconnected(s.now, last);
-    s.advance(2 * SEC);
-    let n = s.sent.len();
-    s.connect();
-    s.advance(10 * SEC);
-    // A new connection has had no decoder configuration to show the frame with.
-    assert_eq!(s.sent.len(), n, "sent during the hold");
-    s.advance(15 * SEC);
-    assert_eq!(s.snapshot().phase, Phase::Delayed);
-    assert!(s.media_sent_in(n..s.sent.len()).next().is_some());
     s.check_invariants_in(n..s.sent.len());
 }
 

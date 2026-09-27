@@ -366,9 +366,15 @@ pub const SLATE_CONFIRM_WAIT: Time = 2 * SEC;
 struct HoldFrame {
     payload: Bytes,
     cts: i32,
+    /// Where it came from: its encoder session and sequence number, for the
+    /// decoder configuration a new connection needs before it.
+    session: u32,
+    seq: u64,
     /// When it was last sent (or the hold began), and when it is due next.
     last: Time,
     next: Time,
+    /// A new destination connection has not had the configuration yet.
+    needs_headers: bool,
 }
 
 struct Output {
@@ -678,9 +684,12 @@ impl Engine {
     pub fn output_connected(&mut self, now: Time) -> u64 {
         let o = &mut self.out;
         o.connected = true;
-        // A new connection has not had the decoder configuration a hold frame
-        // needs: it waits for the end of the hold with nothing.
-        o.hold = None;
+        // A hold goes on, sent again at once, after the decoder configuration
+        // the new connection has not had.
+        if let Some(h) = &mut o.hold {
+            h.needs_headers = true;
+            h.next = now;
+        }
         o.generation += 1;
         o.fresh = true;
         o.last_out_ts = 0;
@@ -1088,6 +1097,7 @@ impl Engine {
             .find(|&&s| s < self.out.next_seq)
             .copied()?;
         let e = self.entry(k).filter(|e| e.kind == Kind::Video)?;
+        let (session, seq) = (e.session, e.seq);
         let payload = match (e.hevc_nal, e.nal_offset) {
             // Sent again after other frames: mark it as a new start.
             (Some(flv::hevc::CRA), Some(offset)) => flv::hevc::cra_to_bla(&e.payload, offset)
@@ -1097,8 +1107,11 @@ impl Engine {
         Some(HoldFrame {
             payload,
             cts: e.cts,
+            session,
+            seq,
             last: now,
             next: now,
+            needs_headers: false,
         })
     }
 
@@ -1115,6 +1128,13 @@ impl Engine {
         h.last = now;
         h.next = now + SEC;
         let (payload, cts, next) = (h.payload.clone(), h.cts, h.next);
+        let headers = std::mem::take(&mut h.needs_headers).then_some((h.session, h.seq));
+        // What follows the hold carries on from its timestamps.
+        o.fresh = false;
+        if let Some((session, seq)) = headers {
+            self.emit_hold_headers(session, seq, t, out);
+        }
+        let o = &mut self.out;
         o.last_kind_ts[Kind::Video.index()] = Some(t);
         o.last_out_ts = o.last_out_ts.max(t);
         o.last_pts = o.last_pts.max(t as i64 + cts as i64);
@@ -1126,6 +1146,44 @@ impl Engine {
             seq: None,
         });
         Some(next)
+    }
+
+    /// Before a held frame on a new connection: the metadata and decoder
+    /// configuration in effect at it (sequence number `seq` of `session`), at
+    /// its timestamp `t`.
+    fn emit_hold_headers(&mut self, session: u32, seq: u64, t: u64, out: &mut Vec<OutMsg>) {
+        let Some(s) = self.sessions.iter().find(|s| s.id == session) else {
+            return;
+        };
+        let metadata = s.metadata.clone();
+        let mut headers: Vec<(Kind, u16, Bytes)> = Vec::new();
+        for h in s.headers.iter().filter(|h| h.seq < seq) {
+            headers.retain(|&(k, c, _)| !(k == h.kind && c == h.class));
+            headers.push((h.kind, h.class, h.payload.clone()));
+        }
+        if let Some(m) = metadata {
+            self.out.sent_metadata = Some(m.clone());
+            out.push(OutMsg {
+                kind: Kind::Data,
+                timestamp: t as u32,
+                payload: m,
+                seq: None,
+            });
+            self.out.last_kind_ts[Kind::Data.index()] = Some(t);
+        }
+        for (kind, class, payload) in headers {
+            if self.mark_header_sent(kind, class, &payload) {
+                self.out.sent_bytes += payload.len() as u64;
+                self.out.last_kind_ts[kind.index()] = Some(t);
+                out.push(OutMsg {
+                    kind,
+                    timestamp: t as u32,
+                    payload,
+                    seq: None,
+                });
+            }
+        }
+        self.out.last_out_ts = self.out.last_out_ts.max(t);
     }
 
     /// Stops sending the held frame, which showed until now: the output's

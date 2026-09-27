@@ -86,6 +86,11 @@ All notable changes to stream-delay are listed here. The format follows
   ends the still frame (the stream had no video until the delay was back), a
   replay that runs out before what comes next is due holds its last frame, and
   the same Mask change pressed twice no longer puts the slate up anew.
+- When the connection to the destination dropped during a dump's hold, the
+  new connection got nothing until the delay was back (a destination can take
+  that long a silence for the end of the stream). The last frame now holds on
+  the new connection too, after the stream's metadata and decoder
+  configuration.
 - `streamdelayd urls` showed the token and ingest key saved in the settings
   file even when `run` was given others: with `STREAMDELAY_INGEST_KEY` in
   Docker it said the OBS key was "any", and with `STREAMDELAY_TOKEN` its links
