@@ -279,6 +279,11 @@ pub struct ApiConfig {
     /// on your own DNS. Any other name is refused, so that a web page whose domain
     /// points here (DNS rebinding) is not taken for this server.
     pub allowed_hosts: Vec<String>,
+    /// Origins, besides this server's own (`http://` or `https://` and the Host
+    /// the request names), whose pages may use the API: a reverse proxy that
+    /// serves the dashboard under another name than it passes on as the Host,
+    /// such as `https://stream.example.com`.
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for ApiConfig {
@@ -288,6 +293,7 @@ impl Default for ApiConfig {
             token: String::new(),
             allow_lan: false,
             allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
         }
     }
 }

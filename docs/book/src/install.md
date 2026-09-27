@@ -108,6 +108,21 @@ with `421 Misdirected Request`, so that a web page cannot pass for stream-delay
 allowed_hosts = ["stream.example.com"]
 ```
 
+Behind a reverse proxy that adds HTTPS (Caddy, nginx, Traefik), the dashboard
+works as long as the proxy passes the Host header on (the default for Caddy;
+`proxy_set_header Host $host;` for nginx) and that name is in `allowed_hosts`.
+If the proxy instead sends its own requests to `127.0.0.1:7788`, list the
+address people open in `allowed_origins`, or the dashboard's changes are
+refused as cross-origin:
+
+```toml
+[api]
+allowed_origins = ["https://stream.example.com"]
+```
+
+Keep such a proxy to your own network or behind its own sign-in: the dashboard
+link carries the token that controls everything.
+
 ## Where things are stored
 
 | | Linux | macOS | Windows |

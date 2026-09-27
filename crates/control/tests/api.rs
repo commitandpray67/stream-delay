@@ -110,13 +110,25 @@ async fn foreign_host_and_cross_origin_are_rejected() {
         .body(Body::from(r#"{"seconds":0}"#))
         .unwrap();
     assert_eq!(send(&app, r).await.0, StatusCode::FORBIDDEN);
-    // Same origin (the dock) is fine.
-    let r = req("GET", "/api/v1/state")
-        .header(header::ORIGIN, format!("http://127.0.0.1:{PORT}"))
+    // Same origin (the dock) is fine, and so is the same host over HTTPS (a
+    // reverse proxy that terminates TLS and passes the Host on).
+    for scheme in ["http", "https"] {
+        let r = req("PUT", "/api/v1/delay")
+            .header(header::ORIGIN, format!("{scheme}://127.0.0.1:{PORT}"))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"seconds":0}"#))
+            .unwrap();
+        assert_eq!(send(&app, r).await.0, StatusCode::OK, "{scheme}");
+    }
+    // Another host over HTTPS is not.
+    let r = req("PUT", "/api/v1/delay")
+        .header(header::ORIGIN, format!("https://127.0.0.2:{PORT}"))
         .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
-        .body(Body::empty())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"seconds":0}"#))
         .unwrap();
-    assert_eq!(send(&app, r).await.0, StatusCode::OK);
+    assert_eq!(send(&app, r).await.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

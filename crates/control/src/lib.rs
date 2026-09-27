@@ -59,6 +59,8 @@ pub(crate) struct Shared {
     /// address, this changes at the next start, not when the setting is saved.
     pub allow_lan: bool,
     pub allowed_hosts: Vec<String>,
+    /// See [`streamdelay_config::ApiConfig::allowed_origins`]. Read at startup.
+    pub allowed_origins: Vec<String>,
     /// Single-use codes for downloading diagnostics; see [`diagnostics`].
     pub download_codes: diagnostics::Codes,
     /// Destination key given on the command line or environment (not persisted).
@@ -176,6 +178,7 @@ pub(crate) fn state(
             tokens: auth::Tokens::new(&config.api.token),
             allow_lan: config.api.allow_lan,
             allowed_hosts: config.api.allowed_hosts.clone(),
+            allowed_origins: config.api.allowed_origins.clone(),
             download_codes: Default::default(),
             saved: Mutex::new(config.clone()),
             config: RwLock::new(config),

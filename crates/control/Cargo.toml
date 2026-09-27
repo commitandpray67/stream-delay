@@ -36,6 +36,8 @@ http-body-util = "0.1"
 # Already used by axum for WebSockets; a client for the events socket.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# A paused clock for the rate-limit test.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

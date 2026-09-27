@@ -53,6 +53,10 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- Behind a reverse proxy that adds HTTPS, every change from the dashboard was
+  refused as cross-origin (only `http://` pages counted as this server's). A
+  page from the same host over HTTPS now counts, and `api.allowed_origins`
+  lists others, for a proxy that rewrites the Host.
 - When a delay came out shorter than set for lack of buffer, the warning put
   how much is buffered now (which keeps growing) next to the delay fixed at
   the time, ending up at "Only 45 s buffered, so the delay is 12 s instead of

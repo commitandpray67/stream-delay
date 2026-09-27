@@ -143,8 +143,7 @@ pub(crate) fn check_origin(
     }
     if let Some(origin) = headers.get(header::ORIGIN) {
         let origin = origin.to_str().unwrap_or("");
-        let same = origin.eq_ignore_ascii_case(&format!("http://{host}"));
-        if !same {
+        if !same_origin(origin, host, &state.shared.allowed_origins) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "cross-origin requests are not allowed",
@@ -152,6 +151,18 @@ pub(crate) fn check_origin(
         }
     }
     Ok(())
+}
+
+/// A page from this server (over HTTP, or HTTPS through a proxy that passes
+/// the Host on), or from an origin the settings allow.
+fn same_origin(origin: &str, host: &str, allowed: &[String]) -> bool {
+    let origin = origin.trim_end_matches('/');
+    ["http", "https"]
+        .iter()
+        .any(|scheme| origin.eq_ignore_ascii_case(&format!("{scheme}://{host}")))
+        || allowed
+            .iter()
+            .any(|a| a.trim_end_matches('/').eq_ignore_ascii_case(origin))
 }
 
 fn token_from(req: &Request) -> Option<String> {
@@ -203,6 +214,39 @@ pub(crate) async fn require(needed: Scope, req: Request, next: Next) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pages_from_this_server_over_http_or_https_are_same_origin() {
+        let host = "nas.local:7788";
+        for origin in [
+            "http://nas.local:7788",
+            "https://nas.local:7788",
+            "HTTPS://NAS.local:7788",
+        ] {
+            assert!(same_origin(origin, host, &[]), "{origin}");
+        }
+        for origin in [
+            "https://evil.example",
+            "http://nas.local:7789",
+            "https://nas.local:7788.evil.example",
+            "null",
+            "",
+        ] {
+            assert!(!same_origin(origin, host, &[]), "{origin}");
+        }
+        // A proxy that serves the dashboard under its own name.
+        let allowed = vec!["https://stream.example.com/".to_string()];
+        assert!(same_origin(
+            "https://stream.example.com",
+            "127.0.0.1:7788",
+            &allowed
+        ));
+        assert!(!same_origin(
+            "https://other.example.com",
+            "127.0.0.1:7788",
+            &allowed
+        ));
+    }
 
     #[test]
     fn loopback_hosts() {

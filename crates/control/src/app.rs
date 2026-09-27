@@ -288,6 +288,7 @@ impl App {
                 tokens: Tokens::new(&config.api.token),
                 allow_lan: config.api.allow_lan,
                 allowed_hosts: config.api.allowed_hosts.clone(),
+                allowed_origins: config.api.allowed_origins.clone(),
                 download_codes: Default::default(),
                 saved: std::sync::Mutex::new(saved),
                 config: RwLock::new(config),
