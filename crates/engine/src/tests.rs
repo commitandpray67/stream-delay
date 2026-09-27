@@ -1861,3 +1861,67 @@ fn tiny_messages_count_against_the_ram_cap() {
     );
     assert!(e.ring.len() > 1000, "the cap should not empty the buffer");
 }
+
+#[test]
+fn cancel_keeps_the_delay_in_effect() {
+    // A mask still building up: the slate comes down and it stays live.
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Mask,
+    });
+    s.advance(5 * SEC);
+    assert!(s.snapshot().mask_visible);
+    let ack = s.cmd(Command::Cancel);
+    assert_eq!((ack.target_ms, ack.pending), (0, false), "{ack:?}");
+    assert!(!s.snapshot().mask_visible);
+    s.advance(30 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(
+        (snap.phase, snap.effective_ms),
+        (Phase::Live, 0),
+        "{snap:?}"
+    );
+    s.check_invariants();
+
+    // Going live once what is buffered has aired: the delay stays.
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(20 * SEC);
+    let delay = effective(&s);
+    let ack = s.cmd(Command::GoLive(GoLiveWhen::AfterAir));
+    assert!(ack.pending, "{ack:?}");
+    s.advance(5 * SEC);
+    let ack = s.cmd(Command::Cancel);
+    assert_eq!((ack.target_ms, ack.pending), (delay, false), "{ack:?}");
+    s.advance(30 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(
+        (snap.phase, snap.effective_ms),
+        (Phase::Delayed, delay),
+        "{snap:?}"
+    );
+    s.check_invariants();
+}
+
+#[test]
+fn cancel_does_not_stop_a_dumps_replay() {
+    // A rewind dump's replay is not a change: its delay is the one asked for.
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(30 * SEC);
+    let ack = s.cmd(Command::Dump(DelayMode::Rewind));
+    assert!(ack.pending, "no replay: {ack:?}");
+    let ack = s.cmd(Command::Cancel);
+    assert_eq!((ack.target_ms, ack.pending), (20_000, true), "{ack:?}");
+    s.advance(30 * SEC);
+    let snap = s.snapshot();
+    assert!((20_000..=22_100).contains(&snap.effective_ms), "{snap:?}");
+    s.check_invariants();
+}
