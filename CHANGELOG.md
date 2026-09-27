@@ -97,6 +97,11 @@ All notable changes to stream-delay are listed here. The format follows
   were refused. It now reads the same variables (and takes the same options).
   An empty `STREAMDELAY_TOKEN` counts as unset, instead of keeping the client
   from using the settings file's token.
+- The desktop app's update question said whether installing ends the stream
+  only as it was when the question came up. Left open (it appears at
+  start) until after a stream started, Install ended the stream without
+  that warning. The question is now asked again, with the warning, if a
+  stream started meanwhile.
 - Dock and overlay links got the destination URL (without its key or query)
   in the state, though the settings they get leave the destination out. It
   is now left out of their state too.

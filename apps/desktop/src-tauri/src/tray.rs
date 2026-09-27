@@ -445,6 +445,69 @@ async fn install_update(app: AppHandle, update: tauri_plugin_updater::Update) {
     app.restart();
 }
 
+/// The question offering version `version`: message, install and later
+/// buttons. Like quitting, while streaming it says what installing does to the
+/// stream.
+fn update_prompt(version: &str, live: bool) -> (String, &'static str, &'static str) {
+    if live {
+        (
+            format!(
+                "stream-delay {version} is available. You are streaming through \
+                 stream-delay: installing it ends your stream now, and what is still \
+                 in the delay buffer does not air. The app restarts afterwards."
+            ),
+            "Install and end the stream",
+            "Keep streaming",
+        )
+    } else {
+        (
+            format!(
+                "stream-delay {version} is available. Install it now? The app \
+                 restarts afterwards."
+            ),
+            "Install",
+            "Later",
+        )
+    }
+}
+
+/// Whether an answer of Install, to a question asked while streaming (`warned`)
+/// or not, may install now that the app is streaming (`live`) or not. The
+/// question can stay up for a long time: one asked before a stream started
+/// did not say that installing ends it, and is asked again.
+fn install_now(warned: bool, live: bool) -> bool {
+    warned || !live
+}
+
+/// Asks whether to install `update`, and installs it if so.
+fn offer_update(app: AppHandle, update: tauri_plugin_updater::Update) {
+    let live = app.try_state::<Core>().is_some_and(|c| streaming(&c.0));
+    let (message, install, later) = update_prompt(&update.version, live);
+    let app2 = app.clone();
+    let mut dialog = app
+        .dialog()
+        .message(message)
+        .title("Update available")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            install.into(),
+            later.into(),
+        ));
+    if live {
+        dialog = dialog.kind(MessageDialogKind::Warning);
+    }
+    dialog.show(move |install| {
+        if !install {
+            return;
+        }
+        let live_now = app2.try_state::<Core>().is_some_and(|c| streaming(&c.0));
+        if install_now(live, live_now) {
+            tauri::async_runtime::spawn(install_update(app2, update));
+        } else {
+            offer_update(app2, update);
+        }
+    });
+}
+
 /// Checks GitHub Releases for a signed update. `interactive` reports "up to date"
 /// and errors too; background checks only speak up when an update exists.
 pub fn check_for_updates(app: AppHandle, interactive: bool) {
@@ -455,48 +518,7 @@ pub fn check_for_updates(app: AppHandle, interactive: bool) {
         }
         .await;
         match result {
-            Ok(Some(update)) => {
-                let version = update.version.clone();
-                let live = app.try_state::<Core>().is_some_and(|c| streaming(&c.0));
-                // Like quitting: while live, say what installing does to the stream.
-                let (message, install, later) = if live {
-                    (
-                        format!(
-                            "stream-delay {version} is available. You are streaming through \
-                             stream-delay: installing it ends your stream now, and what is still \
-                             in the delay buffer does not air. The app restarts afterwards."
-                        ),
-                        "Install and end the stream",
-                        "Keep streaming",
-                    )
-                } else {
-                    (
-                        format!(
-                            "stream-delay {version} is available. Install it now? The app \
-                             restarts afterwards."
-                        ),
-                        "Install",
-                        "Later",
-                    )
-                };
-                let app2 = app.clone();
-                let mut dialog = app
-                    .dialog()
-                    .message(message)
-                    .title("Update available")
-                    .buttons(MessageDialogButtons::OkCancelCustom(
-                        install.into(),
-                        later.into(),
-                    ));
-                if live {
-                    dialog = dialog.kind(MessageDialogKind::Warning);
-                }
-                dialog.show(move |install| {
-                    if install {
-                        tauri::async_runtime::spawn(install_update(app2, update));
-                    }
-                });
-            }
+            Ok(Some(update)) => offer_update(app, update),
             Ok(None) if interactive => {
                 app.dialog()
                     .message("You have the latest version.")
@@ -535,5 +557,24 @@ mod tests {
         assert_eq!(status_text(&state), "Delayed 52 s");
         state.ended = true;
         assert_eq!(back_to_ms(&state), None);
+    }
+
+    #[test]
+    fn installing_asks_again_if_a_stream_started_while_the_question_was_up() {
+        // Asked while not streaming, answered while streaming: that answer was
+        // given without knowing that installing ends the stream.
+        assert!(!install_now(false, true));
+        assert!(install_now(false, false));
+        assert!(install_now(true, true));
+        assert!(install_now(true, false), "the stream ended meanwhile");
+        let (message, install, later) = update_prompt("9.9.9", true);
+        assert!(message.contains("ends your stream now"), "{message}");
+        assert_eq!(
+            (install, later),
+            ("Install and end the stream", "Keep streaming")
+        );
+        let (message, install, _) = update_prompt("9.9.9", false);
+        assert!(!message.contains("stream now"), "{message}");
+        assert_eq!(install, "Install");
     }
 }
