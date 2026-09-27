@@ -1331,20 +1331,28 @@ mod tests {
                 refused: true,
             };
             waits.push(failures.wait(&mut f).as_secs());
-            if waits.len() == 4 {
-                assert!(
-                    f.message.ends_with("; trying again in 2 min"),
-                    "{}",
-                    f.message
-                );
-            }
+            let said = match waits.len() {
+                2 => "30 s",
+                3 => "1 min",
+                4 => "2 min",
+                _ => continue,
+            };
+            assert!(
+                f.message.ends_with(&format!("; trying again in {said}")),
+                "{}",
+                f.message
+            );
         }
         assert_eq!(waits, [10, 30, 60, 120, 300, 300]);
         // Other failures keep the quick schedule, and say nothing more.
         let mut failures = Failures::default();
-        let mut f = Failure::new("could not reach x");
-        assert_eq!(failures.wait(&mut f), Duration::ZERO);
-        assert_eq!(f.message, "could not reach x");
+        let mut waits = Vec::new();
+        for _ in 0..7 {
+            let mut f = Failure::new("could not reach x");
+            waits.push(failures.wait(&mut f).as_millis());
+            assert_eq!(f.message, "could not reach x");
+        }
+        assert_eq!(waits, [0, 500, 1000, 2000, 4000, 5000, 5000]);
     }
 
     #[tokio::test]
@@ -1368,6 +1376,39 @@ mod tests {
                 }
             ),
             "not reset"
+        );
+        drop(far);
+    }
+
+    #[tokio::test]
+    async fn where_the_os_cannot_say_a_dump_counts_its_buffers_as_unsent() {
+        // Megabytes written into buffers nobody reads, then a write blocks. Where
+        // the OS cannot say what it still holds, it may hold all of it: nothing
+        // counts as delivered, or a rewind dump could replay what never aired.
+        let (stream, far) = tokio::io::duplex(6 * 1024 * 1024);
+        let mut p = Publishing::start(Box::pin(stream), Aborter(None, Arc::default()));
+        // One at a time, so each is written by itself, until one does not go.
+        let mut written = 0;
+        for seq in 1..=70 {
+            p.frame(seq, 100_000, 0);
+            let drained = tokio::time::timeout(Duration::from_millis(500), p.until_written());
+            if drained.await.is_err() {
+                break;
+            }
+            written = seq;
+        }
+        assert!((55..70).contains(&written), "{written} frames written");
+        p.dump();
+        let end = p.ended().await;
+        assert!(
+            matches!(
+                end,
+                RunEnd::CutReset {
+                    cut: 1,
+                    delivered: None
+                }
+            ),
+            "not reset, or counted something as delivered"
         );
         drop(far);
     }
