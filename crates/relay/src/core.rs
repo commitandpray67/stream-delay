@@ -840,6 +840,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn long_errors_are_clipped_on_a_character() {
+        let short = "x".repeat(MAX_ERROR_LEN);
+        assert_eq!(clip(short.clone()), short);
+        // 'é' is 2 bytes: the limit falls inside one.
+        let long = format!("{}{}", "x".repeat(MAX_ERROR_LEN - 1), "é".repeat(10));
+        let clipped = clip(long);
+        assert_eq!(clipped, format!("{}…", "x".repeat(MAX_ERROR_LEN - 1)));
+    }
+
+    #[test]
     fn stream_keys_are_compared_exactly() {
         let key = "0123456789abcdef";
         assert!(same_key(key, key));

@@ -172,6 +172,56 @@ async fn changing_the_destination_while_live_moves_the_broadcast() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rewind_dump_replays_and_a_mask_dump_shows_the_slate() {
+    let (sink, _log, _kill) = start_sink().await;
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    relay.set_delay(3_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(8)).await;
+    relay.dump(DelayMode::Rewind).await.unwrap();
+    assert!(
+        !relay.state().delay.mask_visible,
+        "a rewind dump showed the slate instead of replaying"
+    );
+    p.stream_for(Duration::from_secs(1)).await;
+    relay.dump(DelayMode::Mask).await.unwrap();
+    assert!(
+        relay.state().delay.mask_visible,
+        "a mask dump showed no slate"
+    );
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_key_in_the_destination_url_is_used() {
+    // As pasted from a service: the key at the end of the URL, none set apart.
+    let (sink, log, _kill) = start_sink().await;
+    let relay = start_relay_with(RelayConfig {
+        destination: Some(Destination {
+            url: format!("rtmp://{sink}/app/url-key"),
+            key: DestinationKey::Fixed(String::new()),
+        }),
+        ..relay_config(
+            sink,
+            DestinationKey::Fixed("unused".into()),
+            Duration::from_secs(5),
+        )
+    })
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    assert_eq!(log.lock().unwrap().keys, vec!["url-key".to_string()]);
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn passthrough_key_and_second_publisher_rejected() {
     let (sink, log, _kill) = start_sink().await;
     let relay = start_relay(sink, DestinationKey::Passthrough, Duration::from_secs(1)).await;
