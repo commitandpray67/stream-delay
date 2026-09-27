@@ -132,6 +132,46 @@ async fn destination_reconnects_after_a_drop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changing_the_destination_while_live_moves_the_broadcast() {
+    let (first, first_log, _kill_first) = start_sink().await;
+    let (second, second_log, _kill_second) = start_sink().await;
+    let relay = start_relay(
+        first,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+    assert!(!video_frames(&first_log.lock().unwrap()).is_empty());
+    relay
+        .set_destination(Some(Destination {
+            url: format!("rtmp://{second}/app"),
+            key: DestinationKey::Fixed("k2".into()),
+        }))
+        .unwrap();
+    p.stream_for(Duration::from_secs(2)).await;
+    // The old destination's connection has ended, and gets no more of it.
+    let sent_to_first = video_frames(&first_log.lock().unwrap()).len();
+    p.stream_for(Duration::from_secs(2)).await;
+    assert_eq!(
+        video_frames(&first_log.lock().unwrap()).len(),
+        sent_to_first,
+        "still streaming to the old destination"
+    );
+    {
+        let l = second_log.lock().unwrap();
+        assert_eq!(l.keys, vec!["k2".to_string()]);
+        assert!(
+            video_frames(&l).len() > 30,
+            "the new destination got too little"
+        );
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn passthrough_key_and_second_publisher_rejected() {
     let (sink, log, _kill) = start_sink().await;
     let relay = start_relay(sink, DestinationKey::Passthrough, Duration::from_secs(1)).await;
