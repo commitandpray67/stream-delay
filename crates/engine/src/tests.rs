@@ -1584,9 +1584,20 @@ proptest! {
                 s.floor_log.push((s.sent.len(), s.floor));
             }
         }
-        // Once nothing more happens, every frame airs: no keyframe group is
-        // lost to eviction and spliced over, however long the outages were.
-        s.advance(90 * SEC);
+        // Once nothing more happens and no change is under way (one pending
+        // through outages keeps the delay they added until it is done), every
+        // frame airs: no keyframe group is lost to eviction and spliced over,
+        // however long the outages were.
+        s.advance(10 * SEC);
+        for _ in 0..60 {
+            if matches!(s.snapshot().phase, Phase::Live | Phase::Delayed | Phase::Offline) {
+                break;
+            }
+            s.advance(5 * SEC);
+        }
+        // What the last operation did (an encoder restart, say) airs once the
+        // delay in effect has passed.
+        s.advance(s.snapshot().effective_ms * MS + 5 * SEC);
         let (from, splices) = (s.sent.len(), s.snapshot().output.splices);
         s.advance(20 * SEC);
         if s.encoder_on {

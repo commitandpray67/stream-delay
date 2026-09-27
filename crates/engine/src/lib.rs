@@ -765,7 +765,9 @@ impl Engine {
             Command::Cancel if matches!(self.out.pending, Pending::Replay { .. }) => {}
             Command::Cancel => {
                 self.set_pending(Pending::None);
-                self.out.target = self.out.delay;
+                // An outage can have taken the delay past the maximum; the
+                // output comes back down to it (see `back_under_max`).
+                self.out.target = self.out.delay.min(self.config.max_delay_ms * MS);
             }
             Command::Dump(_) if !self.can_dump() => return Err(EngineError::NothingToDump),
             Command::Dump(mode) => {
@@ -855,11 +857,12 @@ impl Engine {
     /// The delay a dump goes back to: the one asked for, or while it is being
     /// removed, the protection that was in effect.
     fn dump_delay(&self) -> u64 {
-        if self.out.target > 0 {
+        let delay = if self.out.target > 0 {
             self.out.target
         } else {
             self.out.delay
-        }
+        };
+        delay.min(self.config.max_delay_ms * MS)
     }
 
     /// False when a dump would be refused: live (as the snapshot counts it), what
@@ -906,6 +909,7 @@ impl Engine {
     fn back_under_max(&mut self) {
         let max = self.config.max_delay_ms * MS;
         if self.out.pending == Pending::None && self.out.delay > max + self.keyframe_interval() {
+            self.out.target = self.out.target.min(max);
             self.set_pending(Pending::Reduce { delay: max });
         }
     }

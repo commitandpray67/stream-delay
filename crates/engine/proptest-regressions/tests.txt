@@ -9,3 +9,6 @@ cc f69af53bccd33f3f63f3ca14ff1539ea9addb823b5ddd03ea3daf209f0d81792 # shrinks to
 cc 5b65844caaa46c6fd546b8c9b36c4f96137a88dbca9ef84c6bcd718d72aafaa1 # shrinks to ops = [Wait(1647), Rewind(5), AfterAir, Wait(2377), Wait(3240), Dump(Rewind), Rewind(1), Wait(1500), Wait(1365)], audio = false, jitter = 3909, keep_history = true
 cc 3819ca7ffe531c133f28b479b43436e851a129b29197984fb089cbd7c20a7c91 # shrinks to ops = [Wait(5698), DropOutput, Dump(Rewind), EncoderRestart, Dump(Rewind), Rewind(11), Wait(1389), Wait(5370), DropOutput, Rewind(13)], audio = false, jitter = 0, keep_history = true
 cc 30594b09944e6d75707e3e50f6466baa7ac479c70a863052efca8cc54856c66a # shrinks to ops = [Outage(26), Wait(5008), Reduce(34), Outage(34)], audio = true, jitter = 467, keep_history = true
+cc c1f77bff67507dc1c1630100ef44e1fd86486bac4defca1efe4b93d6458aef35 # shrinks to ops = [Outage(32), AfterAir, Outage(28), Cancel, DropOutput], audio = false, jitter = 0, keep_history = false
+cc 9d776a0ab028b4d97f444b44ce670016ea16ecc8b91c7117bcd3f2b9116ee0bd # shrinks to ops = [Wait(100), Outage(7), Wait(2161), Wait(751), Outage(34), Outage(9), AfterAir, Outage(37), AfterAir], audio = false, jitter = 157, keep_history = false
+cc 444daa77ee91bf75304ea1c123ae327f5778ce5404dd8094b95d9e93d5ce8759 # shrinks to ops = [Outage(20), EncoderRestart], audio = false, jitter = 0, keep_history = false
