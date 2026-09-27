@@ -21,6 +21,8 @@ struct FaultProxy {
     generation: Arc<AtomicU64>,
     /// While set, no bytes are forwarded in either direction.
     stalled: Arc<AtomicBool>,
+    /// While set, new connections are reset at once: the destination is down.
+    down: Arc<AtomicBool>,
     /// For each connection, in order (as the sink numbers them), what came from
     /// the relay.
     conns: Arc<Mutex<Vec<Arc<Upstream>>>>,
@@ -73,10 +75,20 @@ impl FaultProxy {
         let addr = listener.local_addr().unwrap();
         let generation = Arc::new(AtomicU64::new(0));
         let stalled = Arc::new(AtomicBool::new(false));
+        let down = Arc::new(AtomicBool::new(false));
         let conns = Arc::new(Mutex::new(Vec::new()));
-        let (g, st, cs) = (generation.clone(), stalled.clone(), conns.clone());
+        let (g, st, dn, cs) = (
+            generation.clone(),
+            stalled.clone(),
+            down.clone(),
+            conns.clone(),
+        );
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
+                if dn.load(Ordering::SeqCst) {
+                    let _ = socket2::SockRef::from(&client).set_linger(Some(Duration::ZERO));
+                    continue;
+                }
                 let Ok(server) = TcpStream::connect(target).await else {
                     continue;
                 };
@@ -99,6 +111,7 @@ impl FaultProxy {
             addr,
             generation,
             stalled,
+            down,
             conns,
         }
     }
@@ -133,6 +146,15 @@ impl FaultProxy {
 
     fn stall(&self, on: bool) {
         self.stalled.store(on, Ordering::SeqCst);
+    }
+
+    /// The destination goes down (its connections are reset, and new ones
+    /// too) or comes back.
+    fn down(&self, on: bool) {
+        self.down.store(on, Ordering::SeqCst);
+        if on {
+            self.reset_all();
+        }
     }
 }
 
@@ -633,6 +655,113 @@ async fn a_destination_connection_that_goes_silent_is_replaced() {
     }
     p.stop().await;
     relay.shutdown().await;
+}
+
+/// The destination goes down for 3 s while streaming with `delay_ms` of delay,
+/// at most `max_ms`, keeping 1 s of history past the maximum. Returns the video
+/// frames the sink got before and after, and the delay at the end.
+async fn outage(max_ms: u64, delay_ms: u64) -> (Vec<u32>, Vec<u32>, u64) {
+    let (sink, log, _kill) = start_sink().await;
+    let proxy = FaultProxy::start(sink).await;
+    let mut config = relay_config(
+        proxy.addr,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(10),
+    );
+    config.engine.max_delay_ms = max_ms;
+    config.engine.headroom_ms = 1_000;
+    let relay = start_relay_with(config).await;
+    relay.set_delay(delay_ms, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_millis(delay_ms) + Duration::from_secs(3))
+        .await;
+    proxy.down(true);
+    p.stream_for(Duration::from_secs(3)).await;
+    proxy.down(false);
+    p.stream_for(Duration::from_secs(10)).await;
+    let state = relay.state();
+    let sent = p.frame;
+    assert_eq!(state.egress.status, EgressStatus::Live);
+    p.stop().await;
+    relay.shutdown().await;
+    let l = log.lock().unwrap();
+    check_connections(&l);
+    assert_eq!(l.connections, 2, "expected one reconnect");
+    let on = |conn: usize| -> Vec<u32> {
+        l.media
+            .iter()
+            .filter(|m| m.conn == conn && m.kind == MediaKind::Video)
+            .filter_map(|m| frame_of(&m.payload))
+            .collect()
+    };
+    let (before, after) = (on(0), on(1));
+    assert!(!before.is_empty(), "nothing aired before the outage");
+    assert!(!after.is_empty(), "nothing aired after the outage");
+    eprintln!(
+        "aired to {}, resumed at {}, newest {}/{}, delay {} ms",
+        before.last().unwrap(),
+        after[0],
+        after.last().unwrap(),
+        sent,
+        state.delay.effective_ms
+    );
+    (before, after, state.delay.effective_ms)
+}
+
+/// Where `frames` jumps (from, to).
+fn skips(frames: &[u32]) -> Vec<(u32, u32)> {
+    frames
+        .windows(2)
+        .filter(|w| w[1] != w[0] + 1)
+        .map(|w| (w[0], w[1]))
+        .collect()
+}
+
+/// At the maximum delay, an outage longer than the history kept past it: the
+/// output comes back down to the maximum at a keyframe, then airs every frame.
+/// (It used to throw away each keyframe group just before airing it, and
+/// never recovered.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outage_at_the_maximum_delay_comes_back_to_it_and_airs_every_frame() {
+    const MAX_MS: u64 = 4_000;
+    let (before, after, delay) = outage(MAX_MS, MAX_MS).await;
+    let skipped = skips(&after);
+    assert!(skipped.len() <= 1, "the output kept skipping: {skipped:?}");
+    assert!(
+        after[0] > *before.last().unwrap() && skipped.iter().all(|(a, b)| b > a),
+        "went back after the outage: {} then {:?}",
+        before.last().unwrap(),
+        after
+    );
+    // Back at the maximum (within a keyframe interval), for the last 7 s at
+    // least with every frame.
+    assert!(delay <= MAX_MS + 1_500, "the delay stayed at {delay} ms");
+    let unbroken = after.len() - skipped.last().map_or(0, |&(_, to)| {
+        after.iter().position(|&f| f == to).unwrap()
+    });
+    assert!(unbroken >= 7 * 30, "only {unbroken} frames in a row");
+}
+
+/// Below the maximum, an outage that the maximum has room for: the broadcast
+/// resumes where it left off and viewers miss nothing (the delay grows by the
+/// outage instead).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outage_below_the_maximum_delay_misses_nothing() {
+    const DELAY_MS: u64 = 3_000;
+    let (before, after, delay) = outage(12_000, DELAY_MS).await;
+    let last_aired = *before.last().unwrap();
+    // From the keyframe before what was on its way: at most a keyframe
+    // interval (30 frames) back, never ahead.
+    assert!(
+        after[0] <= last_aired + 1 && after[0] + 30 > last_aired,
+        "aired up to frame {last_aired}, resumed at {}",
+        after[0]
+    );
+    assert_eq!(skips(&after), vec![], "frames skipped after the outage");
+    assert!(
+        delay >= DELAY_MS + 2_500,
+        "the delay did not grow by the outage: {delay} ms"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
