@@ -1479,6 +1479,20 @@ mod tests {
             scrub("abc,abcd abc", "abc"),
             "<stream key>,abcd <stream key>"
         );
+        // From 4 characters on, everywhere.
+        assert_eq!(scrub("liveabcd1", "abcd"), "live<stream key>1");
+    }
+
+    #[test]
+    fn errors_never_carry_secrets_from_the_url_query() {
+        let target = Target {
+            url: RtmpUrl::parse("rtmp://host/app?token=s3cr3t&x=ab").unwrap(),
+            key: "k".into(),
+            connect_props: Vec::new(),
+        };
+        let f = Failure::new("refused ?token=s3cr3t&x=ab: bad token s3cr3t").scrubbed(&target);
+        // Values under 4 characters stay, so they do not mangle the words around them.
+        assert_eq!(f.message, "refused ?<redacted>: bad token <redacted>");
     }
 
     #[tokio::test]
