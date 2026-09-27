@@ -19,7 +19,7 @@ RUN pnpm install --frozen-lockfile
 COPY ui/ ./
 RUN pnpm build
 
-FROM rust:1-bookworm AS build
+FROM rust:1.98.1-bookworm AS build
 WORKDIR /src
 COPY . .
 COPY --from=ui /src/ui/dist ui/dist

@@ -6,6 +6,12 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Building from source needs Rust 1.89 or newer. The declared minimum was 1.88,
+  but two dependencies already needed 1.89; CI now checks the minimum. Builds
+  and releases use the exact Rust version in `rust-toolchain.toml`.
+
 ### Fixed
 
 - RTMP timestamps wrap to 0 after 2^32 ms, about 49.7 days (sooner for encoders

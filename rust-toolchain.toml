@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# An exact version, so a new Rust release (and its new lints) cannot turn CI red
+# without a change here. Renovate proposes each new one.
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]

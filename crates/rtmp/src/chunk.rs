@@ -482,7 +482,7 @@ fn arena_with_room<'a>(
     retry_after: &mut usize,
     len: usize,
 ) -> Option<&'a mut BytesMut> {
-    if !arena.as_ref().is_some_and(|a| a.capacity() >= len) {
+    if arena.as_ref().is_none_or(|a| a.capacity() < len) {
         if *retry_after > 0 {
             return None;
         }
