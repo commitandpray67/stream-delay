@@ -542,6 +542,49 @@ mod tests {
     }
 
     #[test]
+    fn a_dump_replays_only_when_there_is_a_buffer_to_replay() {
+        let mut delay = DelayConfig {
+            default_mode: DelayMode::Mask,
+            ..Default::default()
+        };
+        assert_eq!(dump_mode(&delay, None), DelayMode::Mask);
+        assert_eq!(
+            dump_mode(&delay, Some(DelayMode::Rewind)),
+            DelayMode::Rewind
+        );
+        delay.default_mode = DelayMode::Rewind;
+        assert_eq!(dump_mode(&delay, Some(DelayMode::Mask)), DelayMode::Mask);
+        delay.keep_buffer = false;
+        assert_eq!(dump_mode(&delay, None), DelayMode::Mask);
+        assert_eq!(dump_mode(&delay, Some(DelayMode::Rewind)), DelayMode::Mask);
+    }
+
+    #[test]
+    fn local_clients_reach_a_listener_on_every_interface_through_loopback() {
+        for (listen, reach) in [
+            ("0.0.0.0:1935", "127.0.0.1:1935"),
+            ("[::]:1935", "[::1]:1935"),
+            ("192.168.1.5:1935", "192.168.1.5:1935"),
+            ("[2001:db8::5]:1935", "[2001:db8::5]:1935"),
+            ("127.0.0.1:1935", "127.0.0.1:1935"),
+        ] {
+            assert_eq!(reachable(listen.parse().unwrap()).to_string(), reach);
+        }
+    }
+
+    #[test]
+    fn the_engine_gets_the_delay_settings_in_its_units() {
+        let mut c = Config::default();
+        c.delay.max_seconds = 45;
+        c.delay.ram_cap_mb = 3;
+        c.delay.keep_buffer = false;
+        let e = engine_config(&c);
+        assert_eq!(e.max_delay_ms, 45_000);
+        assert_eq!(e.ram_cap_bytes, 3 * 1024 * 1024);
+        assert!(!e.keep_history);
+    }
+
+    #[test]
     fn a_key_for_a_custom_server_stays_with_its_endpoint() {
         let key_for = "rtmps://relay.example:443/private";
         // The same endpoint, spelled differently.

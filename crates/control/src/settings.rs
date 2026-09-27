@@ -319,6 +319,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_settings_read_at_startup_ask_for_a_restart() {
+        let current = Config::default();
+        let apply = |v: serde_json::Value| {
+            let u: SettingsUpdate = serde_json::from_value(v).unwrap();
+            let a = u.apply(&mut current.clone());
+            (a.restart, a.keep_buffer_changed)
+        };
+        let delay = |key: &str, value: serde_json::Value| {
+            let mut d = serde_json::to_value(&current.delay).unwrap();
+            d[key] = value;
+            serde_json::json!({ "delay": d })
+        };
+        // Read when the relay starts: the buffer's size, and the grace period.
+        assert_eq!(apply(delay("max_seconds", 60.into())), (true, false));
+        assert_eq!(apply(delay("ram_cap_mb", 256.into())), (true, false));
+        assert_eq!(
+            apply(serde_json::json!({ "grace_seconds": 45 })),
+            (true, false)
+        );
+        assert_eq!(
+            apply(serde_json::json!({ "allow_lan": true })),
+            (true, false)
+        );
+        // In effect right away.
+        assert_eq!(apply(delay("keep_buffer", false.into())), (false, true));
+        assert_eq!(apply(delay("start_seconds", 5.into())), (false, false));
+        let same_grace = current.ingest.grace_seconds;
+        assert_eq!(
+            apply(serde_json::json!({ "grace_seconds": same_grace, "allow_lan": false })),
+            (false, false)
+        );
+    }
+
+    #[test]
     fn settings_are_validated_to_their_limits() {
         let current = Config::default();
         let check = |v: serde_json::Value| {

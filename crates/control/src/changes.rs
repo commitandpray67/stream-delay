@@ -373,6 +373,11 @@ mod tests {
     const TWITCH: &str = "rtmps://live.twitch.tv:443/app";
 
     async fn setup(path: Option<PathBuf>) -> (AppState, Arc<MemorySecrets>) {
+        let secrets = Arc::new(MemorySecrets::default());
+        (setup_with(secrets.clone(), path).await, secrets)
+    }
+
+    async fn setup_with(secrets: Arc<dyn SecretStore>, path: Option<PathBuf>) -> AppState {
         let relay = streamdelay_relay::start(RelayConfig {
             ingest_bind: "127.0.0.1:0".parse().unwrap(),
             ..Default::default()
@@ -381,9 +386,29 @@ mod tests {
         .unwrap();
         let mut config = Config::default();
         config.api.token = "0123456789abcdef".into();
-        let secrets = Arc::new(MemorySecrets::default());
-        let st = crate::state(relay, config, secrets.clone(), 7788, path);
-        (st, secrets)
+        crate::state(relay, config, secrets, 7788, path)
+    }
+
+    /// A locked keychain: nothing can be read from it.
+    #[derive(Default)]
+    struct Locked(MemorySecrets);
+
+    impl SecretStore for Locked {
+        fn get(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn try_get(&self, _: &str) -> Result<Option<String>, SecretError> {
+            Err(SecretError::Keychain("the keychain is locked".into()))
+        }
+        fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
+            self.0.set(name, value)
+        }
+        fn delete(&self, name: &str) -> Result<(), SecretError> {
+            self.0.delete(name)
+        }
+        fn describe(&self) -> String {
+            "locked".into()
+        }
     }
 
     fn applied_key(st: &AppState) -> Option<String> {
@@ -472,6 +497,39 @@ mod tests {
         assert!(matches!(e, ChangeError::Invalid(_)), "{e}");
     }
 
+    #[tokio::test]
+    async fn a_locked_keychain_holds_up_only_changes_to_the_key() {
+        let st = setup_with(Arc::new(Locked::default()), None).await;
+        st.change_settings(KeyChange::Keep, |c| c.delay.presets[1].seconds = 7.0)
+            .unwrap();
+        assert_eq!(st.config().delay.presets[1].seconds, 7.0);
+        // The key as it was cannot be read, so it could not be put back if the
+        // settings failed to save.
+        let e = st
+            .change_settings(KeyChange::Forget, set_url("rtmp://ingest.example.net/live"))
+            .unwrap_err();
+        assert!(matches!(e, ChangeError::Key(_)), "{e}");
+        assert_eq!(st.config().destination.url, TWITCH);
+    }
+
+    #[tokio::test]
+    async fn stream_keys_are_checked_before_they_are_saved() {
+        let (st, _) = setup(None).await;
+        let longest = "k".repeat(512);
+        st.save_destination_key(&format!(" {longest}\n")).unwrap();
+        assert_eq!(applied_key(&st).as_deref(), Some(longest.as_str()));
+        for bad in [
+            String::new(),
+            "k".repeat(513),
+            "live_1\u{7}_a".into(),
+            "live_1\n_a".into(),
+        ] {
+            let e = st.save_destination_key(&bad).unwrap_err();
+            assert!(matches!(e, ChangeError::Invalid(_)), "{bad:?}: {e}");
+        }
+        assert_eq!(applied_key(&st).as_deref(), Some(longest.as_str()));
+    }
+
     #[test]
     fn only_what_a_change_changed_is_saved() {
         let saved = Config::default();
@@ -494,6 +552,26 @@ mod tests {
         assert_eq!(s.obs.backup, None);
         assert_eq!(s.delay.presets, saved.delay.presets);
         assert_eq!(s, saved);
+
+        // A value in effect but missing from the file stays out of it when
+        // something next to it changes, and is saved once it changes itself.
+        let mut saved = Config::default();
+        saved.obs.backup = Some(streamdelay_config::ObsBackup {
+            service_type: "rtmp_common".into(),
+            obs: None,
+            settings_json: None,
+        });
+        let mut before = saved.clone();
+        before.obs.backup.as_mut().unwrap().obs = Some("127.0.0.1:4455".into());
+        let mut after = before.clone();
+        after.obs.backup.as_mut().unwrap().service_type = "rtmp_custom".into();
+        let s = with_changes(&saved, &before, &after);
+        let backup = s.obs.backup.unwrap();
+        assert_eq!(backup.service_type, "rtmp_custom");
+        assert_eq!(backup.obs, None, "a value that did not change was saved");
+        after.obs.backup.as_mut().unwrap().obs = Some("127.0.0.1:4456".into());
+        let s = with_changes(&saved, &before, &after);
+        assert_eq!(s.obs.backup, after.obs.backup);
     }
 
     #[tokio::test]

@@ -33,6 +33,9 @@ bytes.workspace = true
 streamdelay-config.workspace = true
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Already used by axum for WebSockets; a client for the events socket.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [lints]
 workspace = true

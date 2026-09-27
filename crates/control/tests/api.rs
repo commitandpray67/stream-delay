@@ -140,6 +140,20 @@ async fn delay_commands() {
     assert!(body["error"].as_str().unwrap().contains("maximum"));
     let (s, _) = send(&app, put(r#"{"seconds":-1}"#)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, body) = send(&app, put(r#"{"seconds":0}"#)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["target_ms"], 0);
+    // The second of the default presets, 15 s.
+    let (s, body) = send(
+        &app,
+        req("POST", "/api/v1/presets/1")
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["target_ms"], 15_000);
     let (s, body) = send(
         &app,
         req("POST", "/api/v1/presets/0")

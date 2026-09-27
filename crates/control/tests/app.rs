@@ -1,6 +1,7 @@
 //! `App::start`: settings migration and the ingest key for network-reachable inputs.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use streamdelay_config::{Config, MemorySecrets, ObsBackup, SecretStore, secret};
 use streamdelay_control::{App, AppError, AppOptions, Overrides};
@@ -341,5 +342,275 @@ async fn command_line_settings_are_not_saved_with_dashboard_changes() {
     assert_eq!(s, 200);
     let saved = Config::load_or_create(&path).unwrap();
     assert_eq!(saved.destination.url, "rtmp://127.0.0.1:2/other");
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_relay_starts_with_the_settings_given() {
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: Overrides {
+            destination_url: Some("rtmp://127.0.0.1:1/test".into()),
+            max_delay_seconds: Some(60),
+            start_delay_seconds: Some(2.5),
+            ..overrides("127.0.0.1:0")
+        },
+    })
+    .await
+    .unwrap();
+    let mut state = app.relay().subscribe();
+    let s = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.wait_for(|s| s.delay.target_ms == 2500),
+    )
+    .await
+    .expect("the start delay was not applied")
+    .unwrap()
+    .clone();
+    assert_eq!(s.delay.max_delay_ms, 60_000);
+    assert_eq!(
+        s.egress.destination.as_deref(),
+        Some("rtmp://127.0.0.1:1/test")
+    );
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_command_line_key_only_goes_to_its_server() {
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: Overrides {
+            destination_url: Some("rtmp://127.0.0.1:1/test".into()),
+            destination_key: Some("cli-key-12345".into()),
+            ..overrides("127.0.0.1:0")
+        },
+    })
+    .await
+    .unwrap();
+    assert!(!app.needs_setup(), "the command-line key is not used");
+    let (_, cfg) = http(&app, "GET", "/api/v1/config", "").await;
+    assert_eq!(cfg["destination_key_set"], true);
+    let dest = |url: &str| {
+        serde_json::json!({ "destination": {
+            "service": "custom", "url": url, "key_mode": "stored" } })
+        .to_string()
+    };
+    // Another server, set from the dashboard: the key must not go there.
+    let (s, body) = http(
+        &app,
+        "PUT",
+        "/api/v1/config",
+        &dest("rtmp://127.0.0.1:2/other"),
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["destination_key_set"], false);
+    assert!(app.needs_setup());
+    // Back to the server it was given for.
+    let (s, body) = http(
+        &app,
+        "PUT",
+        "/api/v1/config",
+        &dest("rtmp://127.0.0.1:1/test"),
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["destination_key_set"], true);
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_key_left_in_the_destination_url_is_kept_unless_one_is_saved() {
+    for (stored, kept) in [
+        // A saved key took precedence over the one in the URL, and still does.
+        ("stored-key-5678", "stored-key-5678"),
+        // An empty one did not.
+        ("", "url-key-1234"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.api.token = "0123456789abcdef".into();
+        c.destination.service = "custom".into();
+        c.destination.url = "rtmp://a.rtmp.youtube.com/live2/url-key-1234".into();
+        c.save(&path).unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        secrets.set(secret::DESTINATION_KEY, stored).unwrap();
+        let app = App::start(AppOptions {
+            config_path: Some(path.clone()),
+            secrets: secrets.clone(),
+            overrides: overrides("127.0.0.1:0"),
+        })
+        .await
+        .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
+        assert_eq!(saved["value"], kept, "{stored:?}");
+        assert_eq!(saved["for"], "rtmp://a.rtmp.youtube.com/live2");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("url-key-1234"), "key still in config.toml");
+        app.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn presets_from_hotkeys_set_the_delay() {
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    let presets = app.config().delay.presets;
+    assert_eq!(presets[0].seconds, 0.0);
+    let mut state = app.relay().subscribe();
+    let mut target = async |ms: u64| {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            state.wait_for(|s| s.delay.target_ms == ms),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the delay did not become {ms} ms"))
+        .unwrap();
+    };
+    app.apply_preset(1).await.unwrap();
+    target((presets[1].seconds * 1000.0) as u64).await;
+    // One that does not exist changes nothing.
+    app.apply_preset(presets.len()).await.unwrap();
+    app.apply_preset(0).await.unwrap();
+    target(0).await;
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_dashboard_starts_the_desktop_apps_update_check() {
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let c = checked.clone();
+    app.on_update_check(move || c.store(true, std::sync::atomic::Ordering::SeqCst));
+    let (s, body) = http(&app, "POST", "/api/v1/updates/check", "").await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["checking"], true);
+    assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutting_down_closes_the_rtmp_input() {
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    let ingest = app.relay().ingest_addr();
+    tokio::net::TcpStream::connect(ingest).await.unwrap();
+    app.shutdown().await;
+    // The input stops accepting soon after, not necessarily at once.
+    let closed = async {
+        while tokio::net::TcpStream::connect(ingest).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), closed)
+        .await
+        .expect("still taking encoders");
+}
+
+type Events = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+/// The live updates the dashboard (`role` empty), dock or overlay page gets.
+async fn events(app: &App, token: &str, role: &str) -> Events {
+    let addr = app.api_addr;
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let url = format!("ws://{addr}/api/v1/events?token={token}{role}");
+    tokio_tungstenite::client_async(url, tcp).await.unwrap().0
+}
+
+/// The next update `wanted` takes, skipping others.
+async fn next(ws: &mut Events, wanted: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let read = async {
+        loop {
+            if let Message::Text(t) = ws.next().await.unwrap().unwrap() {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if wanted(&v) {
+                    return v;
+                }
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .expect("no such update")
+}
+
+fn of_type(t: &'static str) -> impl Fn(&serde_json::Value) -> bool {
+    move |v| v["type"] == t
+}
+
+#[tokio::test]
+async fn live_updates_carry_what_each_link_may_see() {
+    use streamdelay_control::{Scope, scoped_token};
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    let admin = app.config().api.token;
+    // On connecting: the settings, the state, and how many overlay pages are open.
+    let mut dashboard = events(&app, &admin, "").await;
+    let first = next(&mut dashboard, |_| true).await;
+    assert_eq!(first["type"], "config");
+    assert_eq!(first["config"]["scope"], "admin");
+    assert!(
+        first["config"]["config"]["destination"].is_object(),
+        "{first}"
+    );
+    assert_eq!(next(&mut dashboard, |_| true).await["type"], "state");
+    let count = next(&mut dashboard, |_| true).await;
+    assert_eq!(count, serde_json::json!({"type": "overlays", "count": 0}));
+
+    // The overlay page sees only what it shows, and is counted while open.
+    let mut overlay = events(&app, &scoped_token(&admin, Scope::Read), "&role=overlay").await;
+    let config = next(&mut overlay, of_type("config")).await;
+    assert_eq!(config["config"]["scope"], "read");
+    assert!(
+        config["config"]["config"]["destination"].is_null(),
+        "{config}"
+    );
+    assert!(
+        config["config"]["config"]["overlay"].is_object(),
+        "{config}"
+    );
+    let count = next(&mut dashboard, of_type("overlays")).await;
+    assert_eq!(count["count"], 1);
+    drop(overlay);
+    let count = next(&mut dashboard, of_type("overlays")).await;
+    assert_eq!(count["count"], 0);
+
+    // Changes reach every open link.
+    let mut dock = events(&app, &scoped_token(&admin, Scope::Control), "").await;
+    next(&mut dock, of_type("overlays")).await;
+    let (s, _) = http(&app, "PUT", "/api/v1/config", r#"{"grace_seconds": 45}"#).await;
+    assert_eq!(s, 200);
+    let config = next(&mut dashboard, of_type("config")).await;
+    assert_eq!(config["config"]["config"]["ingest"]["grace_seconds"], 45);
+    let (s, _) = http(&app, "PUT", "/api/v1/delay", r#"{"seconds": 4}"#).await;
+    assert_eq!(s, 200);
+    next(&mut dock, |v| v["state"]["delay"]["target_ms"] == 4000).await;
     app.shutdown().await;
 }
