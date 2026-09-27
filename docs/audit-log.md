@@ -19,6 +19,48 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-27 — Area 4, control and settings
+
+Read: `auth.rs`, `routes.rs`, `lib.rs`, `ui.rs`, `settings.rs`, `changes.rs`,
+`diagnostics.rs` (redaction), `overlays.rs`, `obs_routes.rs` (connecting and
+secret binding), `dest_key.rs`, `bound.rs`, the startup in `app.rs`, and the
+secret store's tests.
+
+Fixed, each with a test that failed first:
+
+- 5b0bb0d: dock and overlay links got the destination URL in the state,
+  though the settings they get leave it out.
+- 5a87e3c: a destination URL in `config.toml` that does not parse kept the
+  app from starting at all, so the dashboard could not fix it. The stricter
+  URL parsing of area 2 could lead there on upgrade (a saved port 0). Such
+  a URL now gets no destination and the Setup tab names the problem; one on
+  the command line is still refused at once.
+
+Checked and sound: token scopes and constant-time comparison, Host and
+Origin checks (DNS rebinding), single-use diagnostics codes, redaction of
+every stored secret and token, keys bound to their server and OBS secrets
+to their OBS, the settings-and-secrets transaction.
+
+### 2026-09-27 — Area 3, relay
+
+Read: `ingest.rs`, `core.rs`, `lib.rs`, `lifecycle.rs`, `egress.rs`,
+`sendq.rs`, `io.rs`, `heap.rs`. No real finding.
+
+Traced in particular: every message the core queues for the destination is
+taken off the backlog on each path that drops it (idle, backoff, stop, a
+stale connection or dump in `publish`), so `backlog_empty` and the room
+for more cannot drift; the cut/dump answer on each path; stop and End
+stream winning over a connection attempt; ingest writes time out, so a
+peer that stops reading cannot hold a task.
+
+Investigated and left as designed: when OBS is stopped and started again
+before any of the first stream has aired (a stream shorter than the
+delay), the engine drops that first stream when the new one starts
+(`Engine::ingest_start`), so the new stream gets a broadcast of its own.
+If End stream (after air) was pressed during that first stream, the
+stream stays ended until Resume or another restart in OBS: rare, visible
+in the dashboard, and nothing unexpected airs.
+
 ### 2026-09-27 — Area 2, protocol parsing
 
 Read in full: `chunk.rs`, `amf0.rs`, `handshake.rs`, `message.rs`, `ts.rs`,
