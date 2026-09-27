@@ -698,6 +698,12 @@ fn delay_above_maximum_is_rejected() {
             max_ms: 120_000
         })
     );
+    // The maximum itself is allowed.
+    let ack = s.cmd(Command::SetDelay {
+        ms: 120_000,
+        mode: DelayMode::Mask,
+    });
+    assert_eq!(ack.target_ms, 120_000);
 }
 
 #[test]
