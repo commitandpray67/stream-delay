@@ -492,3 +492,26 @@ jobs:
           file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: false
+      # The image starts, and its health check (streamdelayd health) passes.
+      - name: Build the amd64 image to run
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64
+          load: true
+          tags: stream-delay:check
+      - name: The image starts and reports healthy
+        run: |
+          docker run -d --name stream-delay-check stream-delay:check
+          # The first check runs 30 s after start.
+          for _ in $(seq 60); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' stream-delay-check)
+            if [ "$status" = healthy ]; then echo healthy; exit 0; fi
+            if [ "$(docker inspect --format '{{.State.Running}}' stream-delay-check)" != true ]; then break; fi
+            sleep 2
+          done
+          echo "health: $status"
+          docker inspect --format '{{json .State.Health}}' stream-delay-check
+          docker logs stream-delay-check
+          exit 1
