@@ -4694,12 +4694,14 @@ name = "streamdelayd"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "dhat",
  "serde_json",
  "streamdelay-config",
  "streamdelay-control",
  "streamdelay-relay",
+ "tempfile",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "tracing",

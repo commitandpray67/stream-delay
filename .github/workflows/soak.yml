@@ -1,7 +1,7 @@
 name: Soak
 
 # Long-running stream with random delay changes, dumps and encoder crashes
-# (tests/soak/run.sh).
+# (tests/soak/run.sh), and the property tests with 5000 cases each.
 # GitHub-hosted runners stop after 6 hours, so the nightly run lasts 2 hours and
 # manual runs are capped at 5.5 hours. Run the full 12-hour soak on your own
 # machine: `DURATION=43200 tests/soak/run.sh`.
@@ -43,3 +43,24 @@ jobs:
         with:
           name: soak-results
           path: ${{ runner.temp }}/soak
+
+  # The property tests with many more cases than on every push (64). A failing
+  # case is saved under proptest-regressions/: commit the uploaded file and
+  # `cargo test` tries it first from then on.
+  properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Property tests, 5000 cases each
+        env:
+          PROPTEST_CASES: "5000"
+        run: cargo test --release -p streamdelay-engine -p streamdelay-rtmp -p streamdelay-flv
+      - name: Upload failing cases
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proptest-regressions
+          path: crates/*/proptest-regressions

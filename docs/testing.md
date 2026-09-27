@@ -5,8 +5,10 @@ automatically.
 
 | Level | What | Where | When |
 |---|---|---|---|
-| Unit and property tests | RTMP chunking, AMF0, FLV parsing, the delay engine's invariants (never airs early, timestamps always increase, splices land on keyframes) | `cargo test` | every push |
+| Unit and property tests | RTMP chunking, AMF0, FLV parsing, the delay engine's invariants (never airs early, timestamps always increase, splices land on keyframes) | `cargo test` | every push (64 cases per property); nightly with 5000 (`PROPTEST_CASES=5000`) |
 | Integration tests | the relay over real sockets, the API, the OBS wizard against a mock obs-websocket | `cargo test` | every push |
+| Command line | `streamdelayd` arguments; what each command sends and prints, against a stand-in API and a running instance | `crates/streamdelayd` | every push |
+| Web UI | the dock's delay, dump and end controls (confirmations, what a dump will do and did, "Back to"), the overlay's slate and what it tells stream-delay inside OBS | `pnpm test` in `ui/` | every push |
 | Chaos tests | destination resets and stalls, a slow uplink, the encoder crashing inside and past the grace period | `crates/relay/tests/chaos.rs` | every push |
 | End to end | ffmpeg → streamdelayd → ffmpeg with H.264 B-frames, open-GOP HEVC and the 24-bit timestamp wrap; checks there are 0 decode errors | `tests/e2e/run.sh` | every push (Linux) |
 | Fuzzing | chunk decoder, AMF0, FLV, publish sessions, engine | `fuzz/` | nightly, and PRs touching the decoders |

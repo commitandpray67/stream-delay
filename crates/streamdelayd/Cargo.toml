@@ -22,6 +22,11 @@ toml = "1"
 ureq = { version = "3", default-features = false, features = ["json"] }
 dhat = { version = "0.3", optional = true }
 
+[dev-dependencies]
+tempfile = "3"
+# A stand-in control API for the client tests (already used by the control crate).
+axum = "0.8"
+
 [features]
 # Heap profiling for leak hunting: writes dhat-heap.json when `run` exits
 # (Ctrl-C). View it at https://nnethercote.github.io/dh_view/dh_view.html.

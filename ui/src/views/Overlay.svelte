@@ -20,10 +20,8 @@
   // stream and when it has painted the slate: only then does the slate count
   // as covering the stream.
   const reporter = !preview && inObs() ? new OverlayReporter(sendLive) : null;
-  if (reporter) {
-    reporter.listen(window);
-    whenConnected(() => reporter.connected());
-  }
+  if (reporter) whenConnected(() => reporter.connected());
+  $effect(() => reporter?.listen(window));
   $effect(() => {
     // Runs once the slate is in the page.
     const d = live.state?.delay;

@@ -438,3 +438,225 @@ fn startup_error(e: AppError) -> anyhow::Error {
         err
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use clap::error::ErrorKind;
+
+    fn parse(args: &[&str]) -> Cli {
+        let argv = std::iter::once("streamdelayd").chain(args.iter().copied());
+        match Cli::try_parse_from(argv) {
+            Ok(cli) => cli,
+            Err(e) => panic!("`{}` refused: {e}", args.join(" ")),
+        }
+    }
+
+    fn refused(args: &[&str]) -> ErrorKind {
+        let args = std::iter::once("streamdelayd").chain(args.iter().copied());
+        match Cli::try_parse_from(args) {
+            Ok(_) => panic!("accepted"),
+            Err(e) => e.kind(),
+        }
+    }
+
+    #[test]
+    fn the_command_line_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn delay_takes_seconds_and_a_mode() {
+        let cli = parse(&[
+            "delay",
+            "12.5",
+            "--mask",
+            "--url",
+            "http://h:1",
+            "--token",
+            "t",
+        ]);
+        let Cmd::Delay { seconds, mask, api } = cli.command else {
+            panic!("not delay");
+        };
+        assert_eq!(seconds, 12.5);
+        assert!(mask);
+        assert_eq!(api.url.as_deref(), Some("http://h:1"));
+        assert_eq!(api.token.as_deref(), Some("t"));
+        let Cmd::Delay { seconds, mask, .. } = parse(&["delay", "0"]).command else {
+            panic!("not delay");
+        };
+        assert_eq!(seconds, 0.0);
+        assert!(!mask);
+        assert_eq!(refused(&["delay"]), ErrorKind::MissingRequiredArgument);
+        assert_eq!(refused(&["delay", "soon"]), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn stream_commands_take_their_flags() {
+        assert!(matches!(
+            parse(&["live", "--after-air"]).command,
+            Cmd::Live {
+                after_air: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["live"]).command,
+            Cmd::Live {
+                after_air: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["end", "--after-air"]).command,
+            Cmd::End {
+                after_air: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["dump", "--mask"]).command,
+            Cmd::Dump { mask: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["dump"]).command,
+            Cmd::Dump { mask: false, .. }
+        ));
+        assert!(matches!(parse(&["resume"]).command, Cmd::Resume { .. }));
+        assert!(matches!(parse(&["state"]).command, Cmd::State { .. }));
+        assert!(matches!(parse(&["urls"]).command, Cmd::Urls));
+        let Cmd::Diagnostics { output, .. } = parse(&["diagnostics", "-o", "d.json"]).command
+        else {
+            panic!("not diagnostics");
+        };
+        assert_eq!(output, Some(PathBuf::from("d.json")));
+        // Dump has no replay flag: replaying is what it does without --mask.
+        assert_eq!(refused(&["dump", "--replay"]), ErrorKind::UnknownArgument);
+        assert_eq!(refused(&["pause"]), ErrorKind::InvalidSubcommand);
+        assert_eq!(
+            refused(&[]),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
+
+    #[test]
+    fn the_config_file_may_follow_the_command() {
+        let cli = parse(&["state", "--config", "/etc/sd.toml"]);
+        assert_eq!(cli.config, Some(PathBuf::from("/etc/sd.toml")));
+        let cli = parse(&["--config", "/etc/sd.toml", "run", "--ephemeral"]);
+        assert_eq!(cli.config, Some(PathBuf::from("/etc/sd.toml")));
+    }
+
+    #[test]
+    fn run_takes_addresses_and_settings() {
+        let Cmd::Run(a) = parse(&[
+            "run",
+            "--ingest",
+            "0.0.0.0:1935",
+            "--api",
+            "[::1]:7788",
+            "--dest",
+            "rtmp://live.twitch.tv/app",
+            "--delay",
+            "30",
+            "--max-delay",
+            "600",
+            "--grace",
+            "20",
+            "--allow-lan",
+            "--no-keychain",
+        ])
+        .command
+        else {
+            panic!("not run");
+        };
+        assert_eq!(a.ingest, Some("0.0.0.0:1935".parse().unwrap()));
+        assert_eq!(a.api, Some("[::1]:7788".parse().unwrap()));
+        assert_eq!(a.dest.as_deref(), Some("rtmp://live.twitch.tv/app"));
+        assert_eq!(a.delay, Some(30.0));
+        assert_eq!(a.max_delay, Some(600));
+        assert_eq!(a.grace, Some(20));
+        assert!(a.allow_lan && a.no_keychain);
+        assert!(!a.ephemeral && !a.passthrough);
+        assert_eq!(a.key_env, "STREAMDELAY_KEY");
+        // A name, not an address: resolving it would pick one of its addresses
+        // silently.
+        assert_eq!(
+            refused(&["run", "--ingest", "localhost:1935"]),
+            ErrorKind::ValueValidation
+        );
+        assert_eq!(
+            refused(&["run", "--max-delay", "2.5"]),
+            ErrorKind::ValueValidation
+        );
+    }
+
+    fn write_config(dir: &std::path::Path, bind: &str, token: &str) -> Option<PathBuf> {
+        let mut c = Config::default();
+        c.api.bind = bind.parse().unwrap();
+        c.api.token = token.into();
+        let path = dir.join("config.toml");
+        c.save(&path).unwrap();
+        Some(path)
+    }
+
+    fn api(url: Option<&str>, token: Option<&str>) -> ApiArgs {
+        ApiArgs {
+            url: url.map(str::to_string),
+            token: token.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_client_finds_the_instance_in_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), "0.0.0.0:7790", "from-the-file-0123");
+        // An instance listening on every interface is reached over loopback.
+        let (url, token) = api(None, None).resolve(&path).unwrap();
+        assert_eq!(url, "http://127.0.0.1:7790");
+        assert_eq!(token, "from-the-file-0123");
+        // What is given wins over the file.
+        let (url, token) = api(Some("http://nas:1"), Some("given"))
+            .resolve(&path)
+            .unwrap();
+        assert_eq!((url.as_str(), token.as_str()), ("http://nas:1", "given"));
+    }
+
+    #[test]
+    fn the_client_needs_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = Some(dir.path().join("none.toml"));
+        let err = api(None, None).resolve(&missing).unwrap_err();
+        assert!(err.to_string().contains("no API token"), "{err}");
+        // Defaults to the default address when there is no file.
+        let (url, _) = api(None, Some("t")).resolve(&missing).unwrap();
+        assert_eq!(
+            url,
+            format!("http://{}", reachable(Config::default().api.bind))
+        );
+        // An empty token is no token, whether given or in the file.
+        assert!(api(None, Some("")).resolve(&missing).is_err());
+        let path = write_config(dir.path(), "127.0.0.1:7790", "");
+        assert!(api(None, None).resolve(&path).is_err());
+    }
+
+    #[test]
+    fn a_port_in_use_says_what_to_do() {
+        let busy = AppError::Bind {
+            addr: "127.0.0.1:7788".parse().unwrap(),
+            source: std::io::ErrorKind::AddrInUse.into(),
+        };
+        let text = format!("{:#}", startup_error(busy));
+        assert!(text.contains("already in use"), "{text}");
+        assert!(text.contains("--api and --ingest"), "{text}");
+        let other = AppError::Bind {
+            addr: "127.0.0.1:7788".parse().unwrap(),
+            source: std::io::ErrorKind::PermissionDenied.into(),
+        };
+        let text = format!("{:#}", startup_error(other));
+        assert!(!text.contains("already in use"), "{text}");
+        assert!(text.contains("starting stream-delay"), "{text}");
+    }
+}

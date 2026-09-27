@@ -26,12 +26,14 @@ export class OverlayReporter {
     private readonly frame: Frame = (cb) => requestAnimationFrame(cb),
   ) {}
 
-  /** Listens to what OBS says (on `window` in a browser source). */
-  listen(target: EventTarget): void {
-    target.addEventListener("obsSourceActiveChanged", (e) => {
+  /** Listens to what OBS says (on `window` in a browser source). Returns what stops it. */
+  listen(target: EventTarget): () => void {
+    const changed = (e: Event) => {
       this.active = (e as CustomEvent<{ active?: unknown }>).detail?.active === true;
       this.report();
-    });
+    };
+    target.addEventListener("obsSourceActiveChanged", changed);
+    return () => target.removeEventListener("obsSourceActiveChanged", changed);
   }
 
   /** Call on every (re)connection to stream-delay. */
