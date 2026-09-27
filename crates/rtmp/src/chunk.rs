@@ -710,6 +710,42 @@ mod tests {
     }
 
     #[test]
+    fn chunk_size_limits() {
+        let mut dec = ChunkDecoder::new();
+        assert_eq!(dec.set_chunk_size(0), Err(ChunkError::InvalidChunkSize(0)));
+        let over = MAX_CHUNK_SIZE as u32 + 1;
+        assert_eq!(
+            dec.set_chunk_size(over),
+            Err(ChunkError::InvalidChunkSize(over))
+        );
+        assert_eq!(dec.set_chunk_size(MAX_CHUNK_SIZE as u32), Ok(()));
+        assert_eq!(dec.chunk_size(), MAX_CHUNK_SIZE);
+        assert_eq!(dec.set_chunk_size(1), Ok(()));
+        assert_eq!(dec.chunk_size(), 1);
+    }
+
+    #[test]
+    fn type3_new_message_carries_the_extended_timestamp() {
+        // fmt 0 with an extended timestamp, then a new message with a type-3
+        // header: it carries the extended field too, as the delta.
+        let mut data = vec![0x04, 0xff, 0xff, 0xff, 0, 0, 1, 8, 1, 0, 0, 0];
+        data.extend_from_slice(&0x0100_0000u32.to_be_bytes());
+        data.push(0xaa);
+        data.push(0xc4);
+        data.extend_from_slice(&0x0100_0000u32.to_be_bytes());
+        data.push(0xbb);
+        let mut dec = ChunkDecoder::new();
+        let mut got = Vec::new();
+        for byte in &data {
+            dec.push(&[*byte]);
+            while let Some(m) = dec.next_message().unwrap() {
+                got.push((m.timestamp, m.payload[0]));
+            }
+        }
+        assert_eq!(got, vec![(0x0100_0000, 0xaa), (0x0200_0000, 0xbb)]);
+    }
+
+    #[test]
     fn missing_header_is_an_error() {
         let mut dec = ChunkDecoder::new();
         dec.push(&[0xc5, 0x00]);
@@ -845,6 +881,35 @@ mod tests {
         }
         assert_eq!(err, Some(ChunkError::TooMuchPending));
         assert!(dec.pending <= MAX_PENDING_BYTES);
+    }
+
+    #[test]
+    fn the_pending_limit_is_exact_and_a_replaced_message_frees_its_share() {
+        let mut dec = ChunkDecoder::new();
+        dec.set_chunk_size(8 * 1024 * 1024).unwrap();
+        let body = vec![0u8; 8 * 1024 * 1024];
+        // The first 8 MiB of a 16 MiB message on chunk stream `csid`.
+        let start = |csid: u8| {
+            let mut chunk = vec![csid, 0, 0, 0, 0xff, 0xff, 0xff, 9, 1, 0, 0, 0];
+            chunk.extend_from_slice(&body);
+            chunk
+        };
+        // Eight of them hold exactly the limit, which is allowed.
+        for csid in 2u8..10 {
+            dec.push(&start(csid));
+            assert_eq!(dec.next_message(), Ok(None), "chunk stream {csid}");
+        }
+        assert_eq!(dec.pending, MAX_PENDING_BYTES);
+        // A new message on one of them replaces its unfinished one, which frees
+        // its share first.
+        dec.push(&[2, 0, 0, 0, 0, 0, 1, 8, 1, 0, 0, 0, 0xaa]);
+        assert_eq!(dec.next_message().unwrap().unwrap().payload.len(), 1);
+        assert_eq!(dec.pending, MAX_PENDING_BYTES - body.len());
+        dec.push(&start(10));
+        assert_eq!(dec.next_message(), Ok(None));
+        // One byte over is not.
+        dec.push(&[11, 0, 0, 0, 0, 0, 1, 9, 1, 0, 0, 0, 0xcc]);
+        assert_eq!(dec.next_message(), Err(ChunkError::TooMuchPending));
     }
 
     #[test]
@@ -1031,7 +1096,12 @@ mod tests {
         #[test]
         fn interleaved_streams_round_trip(
             msgs in prop::collection::vec(
-                (2u32..10, any::<u32>(), 1u8..30, prop::collection::vec(any::<u8>(), 0..600)),
+                (
+                    prop_oneof![2u32..10, 64u32..320, 320u32..=65599],
+                    any::<u32>(),
+                    1u8..30,
+                    prop::collection::vec(any::<u8>(), 0..600),
+                ),
                 1..20,
             ),
             chunk_size in 1usize..700,
