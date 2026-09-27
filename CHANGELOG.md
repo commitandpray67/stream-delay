@@ -104,6 +104,11 @@ All notable changes to stream-delay are listed here. The format follows
   (`rtmp://::1/app`) was read as host `::` and port 1, text after the closing
   bracket (`rtmp://[::1]x/app`) was dropped, and port 0 was taken. Each is now
   refused with a message saying what is wrong.
+- A destination URL in `config.toml` that does not parse (saved by an older
+  version, such as one of those above, or edited by hand) kept stream-delay
+  from starting. It now starts without sending anywhere, says so in the log,
+  and the Setup tab shows the URL and what is wrong with it when it is saved.
+  One given on the command line is still refused at once.
 - With multitrack video that has more than one track in a message, the size
   of the first track's data was read as its composition time, which is used to
   keep timestamps valid where the delay changes. (Multitrack video is still

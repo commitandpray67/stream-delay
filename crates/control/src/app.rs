@@ -161,6 +161,8 @@ impl App {
             config.api.bind = v;
         }
         if let Some(v) = &o.destination_url {
+            // A mistake on the command line is pointed out at once.
+            RtmpUrl::parse(v).map_err(RelayError::Url)?;
             let (url, key) = split_url_key(v);
             config.destination.url = url;
             config.destination.service = "custom".into();
@@ -255,6 +257,14 @@ impl App {
             addr: config.api.bind,
             source,
         })?;
+        if !config.destination.url.trim().is_empty()
+            && let Err(e) = RtmpUrl::parse(&config.destination.url)
+        {
+            warn!(
+                "the destination URL in the settings is not valid ({e}); nothing is sent until \
+                 it is corrected on the Setup tab"
+            );
+        }
         let key_override_url = config.destination.url.clone();
         // The stored key belongs to the destination in the settings file; a
         // destination given on the command line for another server does not get it.
@@ -512,9 +522,12 @@ pub(crate) fn engine_config(c: &Config) -> EngineConfig {
     }
 }
 
-/// Builds the relay destination from settings and the stream key for it.
+/// Builds the relay destination from settings and the stream key for it. A URL
+/// that does not parse gets none: one saved by an older version that this one
+/// refuses, or a hand edit, must not keep stream-delay from starting. The Setup
+/// tab shows it, and says what is wrong when it is saved.
 pub(crate) fn destination(c: &Config, key: Option<String>) -> Option<Destination> {
-    if c.destination.url.trim().is_empty() {
+    if RtmpUrl::parse(&c.destination.url).is_err() {
         return None;
     }
     let key = match c.destination.key_mode {

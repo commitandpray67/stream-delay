@@ -286,6 +286,64 @@ async fn a_command_line_destination_never_gets_the_stored_key_of_another_server(
 }
 
 #[tokio::test]
+async fn a_saved_destination_this_version_refuses_does_not_keep_it_from_starting() {
+    // Older versions took a port of 0, for one; a hand edit can hold anything.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut c = Config::default();
+    c.api.token = "0123456789abcdef".into();
+    c.destination.service = "custom".into();
+    c.destination.url = "rtmp://ingest.example.net:0/live".into();
+    c.save(&path).unwrap();
+    let app = App::start(AppOptions {
+        config_path: Some(path.clone()),
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .expect("an invalid saved destination kept stream-delay from starting");
+    // Nothing is sent to it. The Setup tab shows it, and says what is wrong
+    // when it is saved as it is.
+    let (_, state) = http(&app, "GET", "/api/v1/state", "").await;
+    assert_eq!(state["egress"]["status"], "disabled");
+    let (_, cfg) = http(&app, "GET", "/api/v1/config", "").await;
+    assert_eq!(
+        cfg["config"]["destination"]["url"],
+        "rtmp://ingest.example.net:0/live"
+    );
+    let body = serde_json::json!({ "destination": cfg["config"]["destination"] });
+    let (s, body) = http(&app, "PUT", "/api/v1/config", &body.to_string()).await;
+    assert_eq!(s, 400, "{body}");
+    assert!(body.to_string().contains("port"), "{body}");
+    // Other settings can still be changed meanwhile.
+    let (s, body) = http(&app, "PUT", "/api/v1/config", r#"{"grace_seconds": 45}"#).await;
+    assert_eq!(s, 200, "{body}");
+    // A valid one takes effect.
+    let body = serde_json::json!({ "destination": {
+        "service": "custom", "url": "rtmp://127.0.0.1:1/live", "key_mode": "stored" } });
+    let (s, body) = http(&app, "PUT", "/api/v1/config", &body.to_string()).await;
+    assert_eq!(s, 200, "{body}");
+    let (_, state) = http(&app, "GET", "/api/v1/state", "").await;
+    assert_eq!(state["egress"]["status"], "idle");
+    app.shutdown().await;
+    // One given on the command line is a mistake to point out at once.
+    let started = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: Overrides {
+            destination_url: Some("rtmp://ingest.example.net:0/live".into()),
+            ..overrides("127.0.0.1:0")
+        },
+    })
+    .await;
+    assert!(
+        matches!(&started, Err(AppError::Relay(_))),
+        "{:?}",
+        started.as_ref().err()
+    );
+}
+
+#[tokio::test]
 async fn command_line_settings_are_not_saved_with_dashboard_changes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
