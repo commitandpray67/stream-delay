@@ -97,6 +97,14 @@ All notable changes to stream-delay are listed here. The format follows
   were refused. It now reads the same variables (and takes the same options).
   An empty `STREAMDELAY_TOKEN` counts as unset, instead of keeping the client
   from using the settings file's token.
+- A custom destination URL with an IPv6 address and no brackets
+  (`rtmp://::1/app`) was read as host `::` and port 1, text after the closing
+  bracket (`rtmp://[::1]x/app`) was dropped, and port 0 was taken. Each is now
+  refused with a message saying what is wrong.
+- With multitrack video that has more than one track in a message, the size
+  of the first track's data was read as its composition time, which is used to
+  keep timestamps valid where the delay changes. (Multitrack video is still
+  not supported, and a warning says so.)
 - From an encoder that does not repeat the extended timestamp on the later
   chunks of a message (timestamps past about 4.6 hours), a chunk whose data
   happened to start with those same four bytes lost them, and the connection

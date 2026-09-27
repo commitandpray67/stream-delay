@@ -178,18 +178,26 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn split_host_port(authority: &str, default_port: u16) -> Result<(String, u16), UrlError> {
-    if let Some(rest) = authority.strip_prefix('[') {
-        let (host, after) = rest.split_once(']').ok_or(UrlError::Host)?;
-        let port = match after.strip_prefix(':') {
-            Some(p) => p.parse().map_err(|_| UrlError::Port)?,
-            None => default_port,
-        };
-        return Ok((host.to_string(), port));
-    }
-    match authority.rsplit_once(':') {
-        Some((h, p)) => Ok((h.to_string(), p.parse().map_err(|_| UrlError::Port)?)),
-        None => Ok((authority.to_string(), default_port)),
-    }
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(rest) => {
+            let (host, after) = rest.split_once(']').ok_or(UrlError::Host)?;
+            match after {
+                "" => (host, None),
+                _ => (host, Some(after.strip_prefix(':').ok_or(UrlError::Host)?)),
+            }
+        }
+        // More than one colon: an IPv6 address without its brackets.
+        None => match authority.split_once(':') {
+            Some((h, p)) if !p.contains(':') => (h, Some(p)),
+            Some(_) => return Err(UrlError::Host),
+            None => (authority, None),
+        },
+    };
+    let port = match port {
+        Some(p) => p.parse().ok().filter(|&p| p != 0).ok_or(UrlError::Port)?,
+        None => default_port,
+    };
+    Ok((host.to_string(), port))
 }
 
 #[cfg(test)]
@@ -298,6 +306,28 @@ mod tests {
         // A multi-byte character where the scheme would end.
         assert_eq!(RtmpUrl::parse("aaaaaaé"), Err(UrlError::Scheme));
         assert_eq!(RtmpUrl::parse("rtmpé://x/app"), Err(UrlError::Scheme));
+    }
+
+    #[test]
+    fn a_host_that_is_not_one_is_refused_not_guessed_at() {
+        // An IPv6 address needs brackets: without them, which colon starts the
+        // port is a guess (this one read as host `::`, port 1).
+        assert_eq!(RtmpUrl::parse("rtmp://::1/app"), Err(UrlError::Host));
+        assert_eq!(RtmpUrl::parse("rtmp://a:b:1935/app"), Err(UrlError::Host));
+        // Text after the closing bracket other than a port was dropped.
+        assert_eq!(RtmpUrl::parse("rtmp://[::1]x/app"), Err(UrlError::Host));
+        assert_eq!(
+            RtmpUrl::parse("rtmp://[::1]x:1940/app"),
+            Err(UrlError::Host)
+        );
+        // Nothing listens on port 0.
+        assert_eq!(RtmpUrl::parse("rtmp://host:0/app"), Err(UrlError::Port));
+        assert_eq!(RtmpUrl::parse("rtmp://[::1]:0/app"), Err(UrlError::Port));
+        // What is valid still is.
+        let u = RtmpUrl::parse("rtmp://[::1]/app").unwrap();
+        assert_eq!((u.host.as_str(), u.port), ("::1", 1935));
+        let u = RtmpUrl::parse("rtmps://host:65535/app").unwrap();
+        assert_eq!(u.port, 65535);
     }
 
     proptest::proptest! {

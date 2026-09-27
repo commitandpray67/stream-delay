@@ -136,6 +136,10 @@ mod video_packet {
     pub const MOD_EX: u8 = 7;
 }
 
+/// The multitrack layout (high nibble after a Multitrack packet type) with a
+/// single track and so no track sizes.
+const MULTITRACK_ONE_TRACK: u8 = 0;
+
 mod audio_packet {
     pub const SEQUENCE_START: u8 = 0;
     pub const MULTICHANNEL_CONFIG: u8 = 4;
@@ -281,10 +285,15 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
     if packet_type == video_packet::MULTITRACK {
         multitrack = true;
         // For every multitrack layout the first track begins with a FourCC (shared or
-        // per-track) followed by its track id.
-        packet_type = r.u8()? & 0x0f;
+        // per-track) followed by its track id; with more than one track, then the
+        // size of the track's data.
+        let b = r.u8()?;
+        packet_type = b & 0x0f;
         fourcc = r.fourcc()?;
         track_id = r.u8().unwrap_or(0);
+        if b >> 4 != MULTITRACK_ONE_TRACK {
+            r.skip(3);
+        }
     } else {
         fourcc = r.fourcc()?;
     }
@@ -577,6 +586,27 @@ mod tests {
         m.push(0);
         m.extend_from_slice(&[0, 0, 0, 0, 0, 0, 3, 21 << 1, 1, 0xaf]);
         assert_eq!(inspect_video(&m).unwrap().nal_offset, None);
+    }
+
+    #[test]
+    fn multitrack_composition_time_comes_after_the_track_size() {
+        // One track: FourCC, track id, then the composition time.
+        let mut one = vec![0x80 | 0x10 | 0x06, 0x01];
+        one.extend_from_slice(b"avc1");
+        one.extend_from_slice(&[0, 0, 0, 33]);
+        assert_eq!(inspect_video(&one).unwrap().composition_time, 33);
+        // Many tracks (one codec, or one each): the track id is followed by the
+        // size of the track's data, which is not the composition time.
+        for (layout, len) in [(0x10, 0x0100), (0x20, 0x0200)] {
+            let mut many = vec![0x80 | 0x10 | 0x06, layout | 0x01];
+            many.extend_from_slice(b"hvc1");
+            many.push(0);
+            many.extend_from_slice(&[0, (len >> 8) as u8, 0]);
+            many.extend_from_slice(&[0, 0, 33]);
+            let i = inspect_video(&many).unwrap();
+            assert_eq!(i.composition_time, 33, "layout {layout:#x}");
+            assert!(i.keyframe && i.multitrack);
+        }
     }
 
     #[test]
