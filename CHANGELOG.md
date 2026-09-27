@@ -14,6 +14,17 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- After a connection outage at a high delay (about 9 s or more at the 120 s
+  preset), the output never recovered: each keyframe group was thrown out of
+  the buffer just before it aired, so viewers saw a few frames every couple of
+  seconds until the delay was changed. Content that has not aired is now kept
+  however old it is, and a delay grown past the maximum by an outage comes back
+  down to the maximum at the next keyframe.
+- A memory cap smaller than the delay at the stream's bitrate did the same, or
+  kept the stream from starting at all. A delay the cap cannot hold is now
+  refused (`PUT /api/v1/delay` answers 400); when the bitrate rises later, the
+  delay comes down to what memory holds, with a warning in the dock. The Delay
+  settings tab warns when the cap is small for the maximum delay.
 - RTMP timestamps wrap to 0 after 2^32 ms, about 49.7 days (sooner for encoders
   whose timestamps start high). If audio, video or data stepped back slightly
   just after its wrap, it was taken for a jump of 49.7 days ahead and stayed

@@ -67,8 +67,15 @@ it.
 
 When the connection to Twitch drops, stream-delay reconnects (the first attempt
 comes at once) and continues where it left off, so viewers miss nothing, but the
-delay grows by the length of the outage. Press your preset again to go back to
-the delay you want.
+delay grows by the length of the outage, up to the maximum delay (then it skips
+ahead to the maximum). Press your preset again to go back to the delay you want.
+
+## "The memory limit holds only about N s of the stream"
+
+At your bitrate, the memory cap is too small for the delay you asked for, so the
+delay was brought down to what fits. Raise **Memory cap** on the **Delay
+settings** tab (it takes about 1.3 MiB per second of delay at 10 Mbps) and
+restart stream-delay.
 
 ## The Mask slate doesn't appear
 

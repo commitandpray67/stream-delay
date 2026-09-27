@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatDelay, phaseTone } from "../lib/format";
+  import { formatDelay, phaseTone, shownDelayMs } from "../lib/format";
   import { t } from "../lib/i18n";
   import type { Snapshot } from "../lib/types";
 
@@ -15,9 +15,7 @@
   // second or so, which would look like the wrong preset took effect.
   const delay = $derived(
     formatDelay(
-      snap && snap.phase === "delayed" && snap.target_ms > 0 && !snap.history_short
-        ? snap.target_ms
-        : (snap?.effective_ms ?? 0),
+      snap && snap.phase === "delayed" ? shownDelayMs(snap) : (snap?.effective_ms ?? 0),
     ),
   );
   const label = $derived(t(`phase.${phase}`, { delay }));

@@ -1476,13 +1476,20 @@ enum Op {
     AfterAir,
     Reduce(u64),
     DropOutput,
+    /// The destination connection is down for this many seconds.
+    Outage(u64),
     EncoderRestart,
     Cancel,
     Dump(DelayMode),
 }
 
 fn op() -> impl Strategy<Value = Op> {
-    prop_oneof![11 => change(), 2 => gap(), 1 => Just(Op::DropOutput)]
+    prop_oneof![
+        11 => change(),
+        2 => gap(),
+        1 => Just(Op::DropOutput),
+        1 => (1u64..40).prop_map(Op::Outage),
+    ]
 }
 
 /// Waits and delay changes.
@@ -1551,10 +1558,14 @@ proptest! {
                     }
                     s.poll();
                 }
-                Op::DropOutput => {
+                Op::DropOutput | Op::Outage(_) => {
+                    let down = match op {
+                        Op::Outage(sec) => sec * SEC,
+                        _ => 1_500 * MS,
+                    };
                     let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
                     s.e.output_disconnected(s.now, last);
-                    s.advance(1_500 * MS);
+                    s.advance(down);
                     // Restart invariant tracking for the new connection.
                     connections.push(s.sent.len());
                     s.connect();
@@ -1572,7 +1583,19 @@ proptest! {
                 s.floor_log.push((s.sent.len(), s.floor));
             }
         }
-        s.advance(5 * SEC);
+        // Once nothing more happens, every frame airs: no keyframe group is
+        // lost to eviction and spliced over, however long the outages were.
+        s.advance(90 * SEC);
+        let (from, splices) = (s.sent.len(), s.snapshot().output.splices);
+        s.advance(20 * SEC);
+        if s.encoder_on {
+            prop_assert_eq!(s.snapshot().output.splices, splices, "{:?}", s.snapshot());
+            let video = s
+                .media_sent_in(from..s.sent.len())
+                .filter(|(_, _, i)| i.kind == Kind::Video)
+                .count();
+            prop_assert!(video > 20 * 1000 / (FRAME_MS + 3 * jitter / 1000) as usize - 30, "{video} frames");
+        }
         connections.push(s.sent.len());
         for w in connections.windows(2) {
             s.check_invariants_in(w[0]..w[1]);
@@ -1630,7 +1653,7 @@ fn settled(ops: Vec<Op>, jitter: u64, keep_history: bool, connect_after: u64) ->
                 s.poll();
             }
             Op::EncoderRestart => restart_encoder(&mut s),
-            Op::DropOutput => unreachable!("outages are left out"),
+            Op::DropOutput | Op::Outage(_) => unreachable!("outages are left out"),
         }
     }
     // Longer than the largest delay, and a mask or dump building it up.
@@ -1649,7 +1672,8 @@ proptest! {
     /// back to one.
     ///
     /// Left out: a lost destination connection, after which the delay grows by
-    /// the outage and stays until it is changed, as documented; and dumps and
+    /// the outage (up to the maximum) and stays until it is changed, as
+    /// documented; and dumps and
     /// encoder restarts, which leave gaps in the buffer: a delay change around
     /// them can still land a few seconds over (see the next property, and the
     /// two gap tests above for the cases that no longer do).
@@ -2105,4 +2129,154 @@ fn cancel_does_not_stop_a_dumps_replay() {
     let snap = s.snapshot();
     assert!((20_000..=22_100).contains(&snap.effective_ms), "{snap:?}");
     s.check_invariants();
+}
+
+/// Video frames sent from `from` on, and splices meanwhile.
+fn aired_since(s: &Sim, from: usize) -> usize {
+    s.media_sent_in(from..s.sent.len())
+        .filter(|(_, _, i)| i.kind == Kind::Video)
+        .count()
+}
+
+#[test]
+fn an_outage_at_the_maximum_delay_does_not_break_the_output() {
+    for outage in [5, 9, 12, 25, 300] {
+        let mut s = Sim::new(config());
+        s.connect();
+        s.advance(130 * SEC);
+        s.cmd(Command::SetDelay {
+            ms: 120_000,
+            mode: DelayMode::Rewind,
+        });
+        s.advance(150 * SEC);
+        let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+        s.e.output_disconnected(s.now, last);
+        s.advance(outage * SEC);
+        let reconnected = s.sent.len();
+        let splices = s.snapshot().output.splices;
+        s.connect();
+        s.advance(60 * SEC);
+        // Back to the maximum at once, not a keyframe group lost at a time.
+        assert!(
+            s.snapshot().output.splices - splices <= 2,
+            "{outage} s: {} splices",
+            s.snapshot().output.splices - splices
+        );
+        assert!(effective(&s) <= 122_000, "{outage} s: {} ms", effective(&s));
+        // Then every frame airs, in order.
+        let from = s.sent.len();
+        s.advance(60 * SEC);
+        assert!(
+            aired_since(&s, from) >= 1_800,
+            "{outage} s: {} frames",
+            aired_since(&s, from)
+        );
+        s.check_invariants_in(reconnected..s.sent.len());
+    }
+}
+
+/// A limit that holds about `secs` of the simulated stream.
+fn ram_cap_for(secs: u64) -> usize {
+    let mut probe = live_sim();
+    let before = probe.snapshot().buffered_bytes;
+    probe.advance(10 * SEC);
+    ((probe.snapshot().buffered_bytes - before) / 10 * secs) as usize
+}
+
+/// The output airs every frame from here on, for a minute, at the delay now in
+/// effect.
+fn airs_everything(s: &mut Sim) {
+    let (from, splices) = (s.sent.len(), s.snapshot().output.splices);
+    // Checked from the last keyframe sent, where a decoder could join.
+    let keyframe = s
+        .media_sent_in(0..from)
+        .filter(|(_, _, i)| i.keyframe)
+        .map(|(n, _, _)| n)
+        .last()
+        .unwrap_or(0);
+    s.floor = s.snapshot().effective_ms * MS;
+    s.floor_log.push((keyframe, s.floor));
+    s.advance(60 * SEC);
+    assert_eq!(s.snapshot().output.splices, splices, "{:?}", s.snapshot());
+    assert!(
+        aired_since(s, from) >= 1_800,
+        "{} frames",
+        aired_since(s, from)
+    );
+    s.check_invariants_in(keyframe..s.sent.len());
+}
+
+#[test]
+fn a_memory_limit_shorter_than_the_delay_lowers_it_and_says_so() {
+    let config = EngineConfig {
+        ram_cap_bytes: ram_cap_for(31),
+        ..config()
+    };
+    // The delay is set first; the limit is reached once the buffer holds 31 s.
+    let mut s = Sim::new(config.clone());
+    s.cmd(Command::SetDelay {
+        ms: 31_000,
+        mode: DelayMode::Rewind,
+    });
+    s.connect();
+    s.advance(90 * SEC);
+    let snap = s.snapshot();
+    assert!(snap.memory_short, "{snap:?}");
+    assert!(snap.effective_ms < 31_000, "{snap:?}");
+    assert!(
+        snap.warnings.iter().any(|w| w.contains("memory limit")),
+        "{snap:?}"
+    );
+    airs_everything(&mut s);
+    // Asking for a delay again clears it.
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    assert!(!s.snapshot().memory_short);
+
+    // Rewinding into a buffer the limit keeps short starts a keyframe inside its
+    // oldest, which the limit throws away next.
+    let mut s = Sim::new(config);
+    s.connect();
+    s.advance(60 * SEC);
+    s.cmd(Command::SetDelay {
+        ms: 31_000,
+        mode: DelayMode::Rewind,
+    });
+    let snap = s.snapshot();
+    assert!(snap.history_short, "{snap:?}");
+    assert!(snap.effective_ms < snap.history_ms - 1_000, "{snap:?}");
+    airs_everything(&mut s);
+}
+
+#[test]
+fn a_delay_the_memory_limit_cannot_hold_is_refused() {
+    // Before anything is measured, any delay up to the maximum is taken.
+    let mut e = Engine::new(EngineConfig {
+        ram_cap_bytes: 50_000,
+        ..config()
+    });
+    let set = |e: &mut Engine, ms| {
+        e.command(
+            1_000 * SEC,
+            Command::SetDelay {
+                ms,
+                mode: DelayMode::Rewind,
+            },
+        )
+    };
+    assert!(set(&mut e, 100_000).is_ok());
+    // The simulated stream sends about 700 bytes of payload a second.
+    let mut s = Sim::new(EngineConfig {
+        ram_cap_bytes: 50_000,
+        ..config()
+    });
+    s.connect();
+    s.advance(10 * SEC);
+    assert!(set(&mut s.e, 30_000).is_ok());
+    assert!(matches!(
+        set(&mut s.e, 100_000),
+        Err(EngineError::NotEnoughMemory { .. })
+    ));
 }

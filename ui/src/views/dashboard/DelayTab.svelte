@@ -17,6 +17,11 @@
     }
   });
 
+  /** Memory for `seconds` of a 10 Mbps stream, with some to spare, in MiB. */
+  function memoryFor(seconds: number): number {
+    return Math.ceil(seconds * 1.3);
+  }
+
   function addPreset() {
     form!.presets.push({ seconds: 45, mode: "rewind" });
   }
@@ -86,6 +91,12 @@
       The buffer needs about bitrate × maximum delay of memory: 6 Mbps × 120 s ≈ 90 MB. Changing the maximum
       delay, memory cap or reconnect time takes effect after a restart.
     </p>
+    {#if form.ram_cap_mb < memoryFor(form.max_seconds)}
+      <p class="warn small" role="status">
+        At 10 Mbps, a {form.max_seconds} s maximum needs about {memoryFor(form.max_seconds)} MiB. With
+        {form.ram_cap_mb} MiB, a long delay is shortened to what memory holds.
+      </p>
+    {/if}
     <div class="row">
       <button class="primary" type="submit">Save</button>
       {#if message}<span class="ok">{message}</span>{/if}
@@ -125,5 +136,8 @@
   }
   .ok {
     color: var(--live);
+  }
+  .warn {
+    color: var(--delayed);
   }
 </style>

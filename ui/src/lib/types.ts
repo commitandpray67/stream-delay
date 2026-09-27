@@ -21,6 +21,7 @@ export interface Snapshot {
   buffered_bytes: number;
   mask_visible: boolean;
   history_short: boolean;
+  memory_short: boolean;
   ingest: {
     active: boolean;
     video_codec: string | null;

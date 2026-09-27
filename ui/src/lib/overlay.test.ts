@@ -6,7 +6,7 @@ function state(
   phase: Phase,
   target_s: number,
   effective_s: number,
-  opts: { connected?: boolean; ended?: boolean; short?: boolean } = {},
+  opts: { connected?: boolean; ended?: boolean; short?: boolean; memory?: boolean } = {},
 ): RelayState {
   return {
     delay: {
@@ -18,6 +18,7 @@ function state(
       buffered_bytes: 0,
       mask_visible: false,
       history_short: opts.short ?? false,
+      memory_short: opts.memory ?? false,
       ingest: {
         active: true,
         video_codec: null,
@@ -53,6 +54,13 @@ describe("overlay announcements", () => {
     expect(a.update(state("going-live", 0, 15))).toBeNull();
     expect(a.update(state("live", 0, 0))).toBe("Stream delay removed");
     expect(a.update(state("delayed", 30, 30))).toBe("Stream delay: 30 s");
+  });
+
+  it("says what the delay really is when the memory limit keeps it shorter", () => {
+    const a = new DelayAnnouncer();
+    a.update(state("live", 0, 0));
+    expect(a.update(state("delayed", 60, 28, { memory: true }))).toBe("Stream delay: 28 s");
+    expect(settledDelay(state("delayed", 60, 28, { memory: true }))).toBe(28);
   });
 
   it("says what the delay really is when the buffer was too short", () => {

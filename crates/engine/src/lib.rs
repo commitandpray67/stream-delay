@@ -154,6 +154,10 @@ pub enum EngineError {
     TooLarge { requested_ms: u64, max_ms: u64 },
     #[error("there is no delay, so nothing is waiting to air")]
     NothingToDump,
+    #[error(
+        "a delay that long needs about {needed_mb} MB at the stream's bitrate, more than the memory limit of {cap_mb} MB"
+    )]
+    NotEnoughMemory { needed_mb: u64, cap_mb: u64 },
 }
 
 /// Memory a buffered message takes besides its payload: its [`Entry`], its slot
@@ -292,6 +296,8 @@ struct Output {
     pending: Pending,
     mask_visible: bool,
     history_short: bool,
+    /// The memory limit made the delay shorter than the one asked for.
+    memory_short: bool,
     /// Nothing after this sequence number is sent (see [`Engine::end_after`]).
     end_mark: Option<u64>,
     splices: u64,
@@ -354,6 +360,7 @@ impl Engine {
                 pending: Pending::None,
                 mask_visible: false,
                 history_short: false,
+                memory_short: false,
                 end_mark: None,
                 splices: 0,
                 dropped: 0,
@@ -553,12 +560,12 @@ impl Engine {
         // Restart from the keyframe at or before the cursor so the new connection
         // starts with a decodable frame.
         if self.out.started {
-            let cursor = self.out.next_seq;
-            match self.syncs.iter().rev().find(|&&s| s <= cursor).copied() {
+            match self.sync_at_or_before(self.out.next_seq) {
                 Some(k) => {
                     let arrival = self.entry(k).map_or(now, |e| e.arrival);
                     let delay = self.out.delay.max(now.saturating_sub(arrival));
                     self.splice_to(k, delay);
+                    self.back_under_max();
                 }
                 None => self.out.need_sync = true,
             }
@@ -609,6 +616,7 @@ impl Engine {
         o.next_seq = self.next_seq;
         o.delay = o.target;
         o.history_short = false;
+        o.memory_short = false;
         o.gate = None;
         o.end_mark = None;
         if o.pending.covers() {
@@ -745,6 +753,12 @@ impl Engine {
     // ----- commands -------------------------------------------------------------
 
     pub fn command(&mut self, now: Time, cmd: Command) -> Result<Ack, EngineError> {
+        if let Command::SetDelay { ms, .. } = cmd {
+            self.check_memory(ms)?;
+        }
+        if !matches!(cmd, Command::Cancel) {
+            self.out.memory_short = false;
+        }
         match cmd {
             // A dump's replay is not a change to cancel: its delay is the target.
             Command::Cancel if matches!(self.out.pending, Pending::Replay { .. }) => {}
@@ -876,6 +890,58 @@ impl Engine {
         self.out.pending = p;
     }
 
+    /// The encoder's keyframe interval, as measured (2 s until it is).
+    fn keyframe_interval(&self) -> u64 {
+        self.stats
+            .gop_ms()
+            .map_or(2 * SEC, |ms| ms.clamp(1, 60_000) * MS)
+    }
+
+    /// After a splice that took the delay past the maximum (a reconnect after an
+    /// outage, or a resync): come back down to the maximum at the next keyframe
+    /// old enough. The buffer only keeps what the maximum needs, so a delay
+    /// above it would outrun it. Within a keyframe interval of the maximum is
+    /// just rounding back to a keyframe.
+    fn back_under_max(&mut self) {
+        let max = self.config.max_delay_ms * MS;
+        if self.out.pending == Pending::None && self.out.delay > max + self.keyframe_interval() {
+            self.set_pending(Pending::Reduce { delay: max });
+        }
+    }
+
+    /// Refuses a delay the memory limit cannot hold at the bitrate the encoder is
+    /// sending (with a fifth to spare). Before the stream is measured, any delay
+    /// up to the maximum is taken; the limit then shortens it if it must.
+    fn check_memory(&self, ms: u64) -> Result<(), EngineError> {
+        let bits_per_s = self.stats.bitrate_bps();
+        if !self.ingest_active || bits_per_s == 0 {
+            return Ok(());
+        }
+        let needed = (bits_per_s as u128 / 8 * ms as u128 / 1000 * 6 / 5) as u64;
+        let cap = self.config.ram_cap_bytes as u64;
+        if needed > cap {
+            return Err(EngineError::NotEnoughMemory {
+                needed_mb: needed.div_ceil(1 << 20),
+                cap_mb: cap >> 20,
+            });
+        }
+        Ok(())
+    }
+
+    /// The newest keyframe at or before `seq`.
+    fn sync_at_or_before(&self, seq: u64) -> Option<u64> {
+        self.syncs.iter().rev().find(|&&s| s <= seq).copied()
+    }
+
+    /// Once the broadcast has started, where the output would start again after a
+    /// reconnect: the keyframe at or before what airs next. From there on,
+    /// nothing has aired in full.
+    fn restart_point(&self) -> Option<u64> {
+        let o = &self.out;
+        o.started
+            .then(|| self.sync_at_or_before(o.next_seq).unwrap_or(o.next_seq))
+    }
+
     /// Jumps back to the newest keyframe at least `d` old (or the oldest available).
     fn rewind(&mut self, now: Time, d: u64) {
         let newest = self.newest_sync_arrived_by(now.checked_sub(d));
@@ -883,7 +949,11 @@ impl Engine {
             Some(k) => Some(k),
             None => {
                 self.out.history_short = true;
-                self.syncs.front().copied()
+                // When the memory limit is what keeps the buffer short, the oldest
+                // keyframe is the next to go: start one keyframe further in.
+                let full = (self.bytes + self.session_bytes) * 10 >= self.config.ram_cap_bytes * 9;
+                let inside = if full { self.syncs.get(1) } else { None };
+                inside.or(self.syncs.front()).copied()
             }
         };
         if let Some(k) = k {
@@ -1212,6 +1282,8 @@ impl Engine {
                     self.set_pending(Pending::Reduce {
                         delay: self.out.target,
                     });
+                } else {
+                    self.back_under_max();
                 }
                 if self.out.end_mark.is_some_and(|m| self.out.next_seq > m) {
                     break;
@@ -1434,15 +1506,9 @@ impl Engine {
             return None;
         }
         let o = &self.out;
-        let mut keep = if o.started {
-            self.syncs
-                .iter()
-                .rev()
-                .find(|&&s| s <= o.next_seq)
-                .copied()
-                .unwrap_or(o.next_seq)
-        } else {
-            self.newest_sync_arrived_by(now.checked_sub(o.delay))?
+        let mut keep = match self.restart_point() {
+            Some(r) => r,
+            None => self.newest_sync_arrived_by(now.checked_sub(o.delay))?,
         };
         if let Pending::Mask {
             anchor: Some(a), ..
@@ -1456,22 +1522,35 @@ impl Engine {
     fn evict(&mut self, now: Time) {
         let capacity = (self.config.max_delay_ms + self.config.headroom_ms) * MS;
         let keep_from = self.keep_from(now);
+        let restart = self.restart_point();
+        let mut lost_unaired = false;
         while let Some(front) = self.ring.front() {
             let over_ram =
                 self.bytes + self.session_bytes > self.config.ram_cap_bytes && self.ring.len() > 1;
             // Evict a whole GOP once its successor keyframe is older than the capacity,
             // so the oldest entry is always a keyframe.
             let next_sync = self.syncs.iter().find(|&&s| s > front.seq).copied();
-            let gop_expired = match next_sync {
-                Some(s) => self.entry(s).is_some_and(|e| e.arrival + capacity < now),
-                None => !front.sync && front.arrival + capacity < now,
-            };
+            let end = next_sync.unwrap_or(front.seq + 1);
+            // What has not aired is kept however old: after an outage, the output
+            // is still to send it (and comes back under the maximum soon after).
+            let aired = restart.is_none_or(|r| end <= r);
+            let gop_expired = aired
+                && match next_sync {
+                    Some(s) => self.entry(s).is_some_and(|e| e.arrival + capacity < now),
+                    None => !front.sync && front.arrival + capacity < now,
+                };
             // Without history, a GOP goes as soon as nothing needs it any more.
             let not_needed = keep_from.zip(next_sync).is_some_and(|(k, s)| s <= k);
             if !over_ram && !gop_expired && !not_needed {
                 break;
             }
-            let end = next_sync.unwrap_or(front.seq + 1);
+            // Before the broadcast starts, a group younger than the delay is
+            // where it would start, or after.
+            let unaired = match restart {
+                Some(_) => !aired,
+                None => front.arrival + self.out.delay > now,
+            };
+            lost_unaired |= unaired && !gop_expired && !not_needed;
             while let Some(f) = self.ring.front() {
                 if f.seq >= end {
                     break;
@@ -1484,6 +1563,34 @@ impl Engine {
                 }
             }
             self.forget_sessions();
+        }
+        if lost_unaired {
+            self.memory_short(now);
+        }
+    }
+
+    /// The memory limit threw away what was still to air: bring the delay down to
+    /// what the buffer holds, a keyframe interval inside it so the next eviction
+    /// does not catch up with the output again, and say so.
+    fn memory_short(&mut self, now: Time) {
+        let Some(oldest) = self.syncs.front().and_then(|&s| self.entry(s)) else {
+            return;
+        };
+        let held = now.saturating_sub(oldest.arrival);
+        let delay = held.saturating_sub(self.keyframe_interval());
+        self.out.memory_short = true;
+        if !self.out.started {
+            // Not started yet: it simply starts with the shorter delay.
+            self.out.delay = self.out.delay.min(delay);
+            return;
+        }
+        let lower = match self.out.pending {
+            Pending::None => true,
+            Pending::Reduce { delay: d } => delay < d,
+            _ => false,
+        };
+        if lower && delay < self.out.delay {
+            self.set_pending(Pending::Reduce { delay });
         }
     }
 

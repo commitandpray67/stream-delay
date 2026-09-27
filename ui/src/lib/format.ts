@@ -1,4 +1,13 @@
-import type { Phase } from "./types";
+import type { Phase, Snapshot } from "./types";
+
+/**
+ * The delay to show once a change has settled: the one asked for, since rounding
+ * back to a keyframe stretches the exact one by a second or so; the real one
+ * when the buffer or the memory limit keeps it shorter.
+ */
+export function shownDelayMs(d: Snapshot): number {
+  return d.target_ms > 0 && !d.history_short && !d.memory_short ? d.target_ms : d.effective_ms;
+}
 
 /** "0 s", "30 s", "2:05" */
 export function formatDelay(ms: number): string {

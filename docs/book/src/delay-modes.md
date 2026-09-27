@@ -142,10 +142,15 @@ work the same. The switch takes effect immediately.
   interval (2 s) longer than requested.
 - **Maximum delay** is 120 s by default and can be raised on the **Delay settings**
   tab (it needs memory: about bitrate × maximum delay, so 6 Mbps × 120 s ≈ 90 MB).
+  If the memory cap holds less than the delay at your bitrate, a delay that long
+  is refused; if the bitrate rises later, the delay comes down to what memory
+  holds and the dock says so. Raise the cap on the **Delay settings** tab.
 - **If the connection to Twitch drops,** stream-delay reconnects at once (then
   after ½, 1, 2 and 4 s, and every 5 s after that) and continues from where it
   was in the buffer, so viewers miss nothing; the delay grows by however long the
-  outage lasted. Press a preset to bring it back to the delay you want. A
+  outage lasted, up to the maximum delay. Past the maximum, it skips ahead to the
+  maximum at the next keyframe, so what aired during the longest part of the
+  outage is skipped. Press a preset to bring it back to the delay you want. A
   connection that dies without either side noticing (after your computer switched
   networks, say) counts as dropped once Twitch has taken no data for 20 s.
 - **When you click *Stop Streaming* in OBS,** stream-delay airs what is still

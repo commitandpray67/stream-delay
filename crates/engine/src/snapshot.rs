@@ -61,6 +61,8 @@ pub struct Snapshot {
     /// The overlay should show the mask slate.
     pub mask_visible: bool,
     pub history_short: bool,
+    /// The memory limit keeps the delay shorter than the one asked for.
+    pub memory_short: bool,
     pub ingest: IngestStats,
     pub output: OutputStats,
     pub warnings: Vec<String>,
@@ -96,6 +98,17 @@ impl IngestTracker {
         if !info.config {
             self.window.push_back((now, 0, true));
         }
+    }
+
+    /// The keyframe interval, once two keyframes have come.
+    pub(crate) fn gop_ms(&self) -> Option<u64> {
+        self.gop_ms
+    }
+
+    /// The bitrate over the last couple of seconds, in bits per second.
+    pub(crate) fn bitrate_bps(&self) -> u64 {
+        let bytes: usize = self.window.iter().map(|(_, n, _)| n).sum();
+        (bytes as u64 * 8 * SEC) / WINDOW
     }
 
     pub(crate) fn audio(&mut self, info: &AudioInfo) {
@@ -179,6 +192,14 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
             "Multitrack video (Enhanced Broadcasting) was detected. It is not supported yet; turn it off in OBS.".into(),
         );
     }
+    if o.memory_short {
+        warnings.push(format!(
+            "The memory limit holds only about {:.0} s of the stream at its bitrate, so the delay is {:.0} s instead of {:.0} s. Raise the memory limit in the Delay settings.",
+            history_ms as f64 / 1000.0,
+            effective as f64 / 1e6,
+            o.target as f64 / 1e6
+        ));
+    }
     if o.history_short {
         warnings.push(format!(
             "Only {:.0} s of the stream was buffered, so the delay is {:.0} s instead of {:.0} s.",
@@ -196,6 +217,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         buffered_bytes: (e.bytes + e.session_bytes) as u64,
         mask_visible: o.mask_visible,
         history_short: o.history_short,
+        memory_short: o.memory_short,
         ingest,
         output: OutputStats {
             connected: o.connected,

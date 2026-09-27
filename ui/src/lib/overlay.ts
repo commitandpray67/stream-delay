@@ -1,6 +1,6 @@
 // What the overlay tells viewers about the delay, and when.
 
-import { formatDelay } from "./format";
+import { formatDelay, shownDelayMs } from "./format";
 import type { RelayState } from "./types";
 
 /** A broadcast is running: the destination is connected and the streamer has not ended it. */
@@ -20,8 +20,7 @@ export function settledDelay(state: RelayState | null): number | null {
   const d = state.delay;
   if (d.phase === "live") return 0;
   if (d.phase !== "delayed") return null;
-  const ms = d.target_ms > 0 && !d.history_short ? d.target_ms : d.effective_ms;
-  return Math.round(ms / 1000);
+  return Math.round(shownDelayMs(d) / 1000);
 }
 
 /**
