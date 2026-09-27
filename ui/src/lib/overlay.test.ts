@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeDelay, DelayAnnouncer, previewUrl, settledDelay } from "./overlay";
+import { badgeDelay, DelayAnnouncer, opaque, previewUrl, settledDelay } from "./overlay";
 import type { Phase, RelayState } from "./types";
 
 function state(
@@ -126,5 +126,19 @@ describe("the dashboard's overlay preview", () => {
     expect(previewUrl(undefined, "mask")).toBeNull();
     expect(previewUrl("not a url", "mask")).toBeNull();
     expect(previewUrl("http://127.0.0.1:7788/overlay", "mask")).toBeNull();
+  });
+});
+
+describe("the slate's color", () => {
+  it("is opaque whatever alpha the background color has", () => {
+    // The slate is drawn over the stream while what airs is nearly live: any
+    // transparency would show that through it.
+    expect(opaque("#0e0e1080")).toBe("#0e0e10");
+    expect(opaque("#0E0E1000")).toBe("#0E0E10");
+    expect(opaque("#0e0e10")).toBe("#0e0e10");
+    expect(opaque("#fff")).toBe("#fff");
+    // Anything else (not from these settings): black, which covers.
+    expect(opaque("transparent")).toBe("#000");
+    expect(opaque("")).toBe("#000");
   });
 });

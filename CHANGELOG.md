@@ -97,6 +97,11 @@ All notable changes to stream-delay are listed here. The format follows
   were refused. It now reads the same variables (and takes the same options).
   An empty `STREAMDELAY_TOKEN` counts as unset, instead of keeping the client
   from using the settings file's token.
+- The slate took the overlay's background color as set, alpha included
+  (`#0e0e1080`, which the API and `config.toml` accept; the color picker
+  does not offer it), so it could be see-through. What airs under the slate
+  is nearly live, and showed through. The slate now always uses the color
+  without its alpha; the badge keeps it.
 - The desktop app's update question said whether installing ends the stream
   only as it was when the question came up. Left open (it appears at
   start) until after a stream started, Install ended the stream without

@@ -156,6 +156,19 @@ describe("overlay slate", () => {
     }
   });
 
+  it("the slate hides the stream even with a see-through background color", async () => {
+    open("/overlay?token=r", false);
+    const seeThrough = structuredClone(config);
+    (seeThrough.config.overlay as { background_color: string }).background_color = "#0e0e1040";
+    live.config = seeThrough;
+    live.state = state({ phase: "adding", mask_visible: true, slate_change: 1 });
+    await tick();
+    const root = document.querySelector<HTMLElement>(".root")!;
+    expect(root.style.getPropertyValue("--slate")).toBe("#0e0e10");
+    // The badge keeps the color as set.
+    expect(root.style.getPropertyValue("--bg")).toBe("#0e0e1040");
+  });
+
   it("the preview shows the slate without a stream", () => {
     history.replaceState(null, "", "/overlay?preview=mask&token=r");
     live.config = config;

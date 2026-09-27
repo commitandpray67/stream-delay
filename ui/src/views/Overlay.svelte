@@ -4,7 +4,7 @@
   import { formatDelay } from "../lib/format";
   import { live, sendLive, whenConnected } from "../lib/live.svelte";
   import { inObs, OverlayReporter } from "../lib/obs";
-  import { badgeDelay, DelayAnnouncer } from "../lib/overlay";
+  import { badgeDelay, DelayAnnouncer, opaque } from "../lib/overlay";
 
   const params = new URLSearchParams(location.search);
   // ?preview=mask or ?preview=badge renders a static preview (settings page).
@@ -43,6 +43,7 @@
     class="root"
     style:--accent={overlay.accent_color}
     style:--bg={overlay.background_color}
+    style:--slate={opaque(overlay.background_color)}
     style:--fg={overlay.text_color}
   >
     {#if masked}
@@ -74,7 +75,8 @@
   .mask {
     position: absolute;
     inset: 0;
-    background: var(--bg);
+    /* Never see-through: what airs under it is nearly live. */
+    background: var(--slate);
     display: grid;
     place-content: center;
     justify-items: center;

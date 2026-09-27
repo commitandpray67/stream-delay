@@ -24,6 +24,17 @@ export function settledDelay(state: RelayState | null): number | null {
 }
 
 /**
+ * `color` (`#rgb`, `#rrggbb` or `#rrggbbaa`, as the settings take) without its
+ * alpha, for the slate: it is drawn over the stream while what airs is nearly
+ * live, and must hide it entirely. Black for anything else.
+ */
+export function opaque(color: string): string {
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(color)) return color;
+  if (/^#[0-9a-f]{8}$/i.test(color)) return color.slice(0, 7);
+  return "#000";
+}
+
+/**
  * The dashboard's overlay preview: this server's overlay page with the overlay
  * link's own token, which can only read, never the dashboard's. Relative, so it
  * loads from wherever the dashboard was opened. Null without a usable link.
