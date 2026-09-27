@@ -112,15 +112,16 @@ async fn get_state(
     Json(visible_state(st.relay().state(), scope))
 }
 
-/// The state as a link with `scope` may see it: the encoder's network address and
-/// what the destination replied (keys are removed from it, but it is the
-/// destination's text) are for the dashboard only.
+/// The state as a link with `scope` may see it: the encoder's network address,
+/// where the stream goes, and what the destination replied (keys are removed
+/// from it, but it is the destination's text) are for the dashboard only.
 fn visible_state(mut state: RelayState, scope: Scope) -> RelayState {
     if scope < Scope::Admin {
         state.ingest.peer = None;
         state.ingest.bad_keys_recent = 0;
         state.ingest.bad_key_from = None;
         state.ingest.key_warning = None;
+        state.egress.destination = None;
         state.egress.last_error = None;
     }
     state
@@ -452,15 +453,19 @@ mod tests {
         state.ingest.bad_key_from = Some("203.0.113.9".into());
         state.ingest.key_warning = Some("weak".into());
         state.egress.last_error = Some("destination refused the stream".into());
+        state.egress.destination = Some("rtmps://restream.example.net:4443/live".into());
         let admin = visible_state(state.clone(), Scope::Admin);
         assert!(admin.ingest.peer.is_some());
         assert!(admin.egress.last_error.is_some());
+        assert!(admin.egress.destination.is_some());
         assert_eq!(admin.ingest.bad_keys_recent, 12);
         assert!(admin.ingest.bad_key_from.is_some() && admin.ingest.key_warning.is_some());
         for scope in [Scope::Control, Scope::Read] {
             let s = visible_state(state.clone(), scope);
             assert_eq!(s.ingest.peer, None);
             assert_eq!(s.egress.last_error, None);
+            // The settings they get leave the destination out; so does the state.
+            assert_eq!(s.egress.destination, None);
             assert_eq!(s.ingest.bad_keys_recent, 0);
             assert_eq!((s.ingest.bad_key_from, s.ingest.key_warning), (None, None));
         }

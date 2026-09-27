@@ -12,7 +12,7 @@ Every `/api` request needs a token. The install's admin token is generated on fi
 | Dock | `control` | `GET /api/v1/state`, the events WebSocket, and the delay control endpoints below. |
 | Overlay | `read` | `GET /api/v1/state` and the events WebSocket. |
 
-The state seen with dock and overlay tokens leaves out the encoder's address (`ingest.peer` is `null`) and what the destination replied to a failed connection (`egress.last_error` is `null`).
+The state seen with dock and overlay tokens leaves out the encoder's address (`ingest.peer`), wrong ingest keys (`ingest.bad_key_from`, and `ingest.bad_keys_recent` is 0), the ingest key warning (`ingest.key_warning`), where the stream goes (`egress.destination`) and what the destination replied to a failed connection (`egress.last_error`): each is `null`.
 
 A valid token without enough scope gets `403 Forbidden`; a missing or wrong token gets `401 Unauthorized`. For a Stream Deck or another controller, use the dock link's token. The derived tokens stay the same as long as the admin token does.
 

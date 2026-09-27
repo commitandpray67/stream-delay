@@ -97,6 +97,9 @@ All notable changes to stream-delay are listed here. The format follows
   were refused. It now reads the same variables (and takes the same options).
   An empty `STREAMDELAY_TOKEN` counts as unset, instead of keeping the client
   from using the settings file's token.
+- Dock and overlay links got the destination URL (without its key or query)
+  in the state, though the settings they get leave the destination out. It
+  is now left out of their state too.
 - A custom destination URL with an IPv6 address and no brackets
   (`rtmp://::1/app`) was read as host `::` and port 1, text after the closing
   bracket (`rtmp://[::1]x/app`) was dropped, and port 0 was taken. Each is now
