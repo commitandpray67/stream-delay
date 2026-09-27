@@ -69,6 +69,12 @@ pub struct Snapshot {
     pub history_short: bool,
     /// The memory limit keeps the delay shorter than the one asked for.
     pub memory_short: bool,
+    /// How much longer than asked for the delay is, once nothing is changing
+    /// it, when that is more than rounding back to a keyframe explains (a
+    /// keyframe interval and half a second): after the destination connection
+    /// dropped, the delay grows by the outage and stays so until changed. 0
+    /// otherwise.
+    pub excess_ms: u64,
     pub ingest: IngestStats,
     pub output: OutputStats,
     pub warnings: Vec<String>,
@@ -184,8 +190,35 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         Pending::None if effective < 500 * MS => Phase::Live,
         Pending::None => Phase::Delayed,
     };
+    let excess = if o.started
+        && o.pending == Pending::None
+        && o.target > 0
+        && !o.history_short
+        && !o.memory_short
+    {
+        effective.saturating_sub(o.target)
+    } else {
+        0
+    };
+    let excess_ms = if excess > e.keyframe_interval() + 500 * MS {
+        excess / MS
+    } else {
+        0
+    };
     let ingest = e.stats.stats(now, e.ingest_active);
     let mut warnings = Vec::new();
+    if excess_ms > 0 {
+        let why = if o.grew_on_reconnect {
+            " after a connection problem"
+        } else {
+            ""
+        };
+        warnings.push(format!(
+            "The delay is {:.0} s instead of {:.0} s{why}. Set it again to go back.",
+            effective as f64 / 1e6,
+            o.target as f64 / 1e6
+        ));
+    }
     if let Some(gop) = ingest.gop_ms
         && gop > 2_500
     {
@@ -236,6 +269,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         slate_change: o.slate_change,
         history_short: o.history_short,
         memory_short: o.memory_short,
+        excess_ms,
         ingest,
         output: OutputStats {
             connected: o.connected,

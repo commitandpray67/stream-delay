@@ -1,6 +1,6 @@
 <script lang="ts">
   import { applyPreset, cancel, dumpBuffer, endStream, goLive, resumeStream, setDelay } from "../lib/api";
-  import { formatDelay, formatSecondsLabel } from "../lib/format";
+  import { backToMs, formatDelay, formatSecondsLabel } from "../lib/format";
   import { t, type Key } from "../lib/i18n";
   import { live } from "../lib/live.svelte";
   import type { Ack, DelayMode, DumpOutcome } from "../lib/types";
@@ -356,6 +356,15 @@
     {#each snap.warnings as w (w)}
       <p class="notice">{w}</p>
     {/each}
+    {@const back = ended ? null : backToMs(snap)}
+    {#if back !== null}
+      <!-- A reduction: it skips ahead at the next keyframe old enough, never lower. -->
+      <div class="row-buttons">
+        <button class="primary" disabled={busy} onclick={() => run(() => setDelay(back / 1000, "rewind"))}>
+          {t("action.backTo", { delay: formatDelay(back) })}
+        </button>
+      </div>
+    {/if}
   {/if}
 
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}

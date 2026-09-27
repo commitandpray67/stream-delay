@@ -371,6 +371,9 @@ struct Output {
     slate_unconfirmed: bool,
     /// A dump asked for the slate, no overlay confirmed it, and it holds.
     cover_lost: bool,
+    /// Reconnecting to the destination made the delay longer (by the outage),
+    /// since the last command.
+    grew_on_reconnect: bool,
     /// Nothing after this sequence number is sent (see [`Engine::end_after`]).
     end_mark: Option<u64>,
     splices: u64,
@@ -438,6 +441,7 @@ impl Engine {
                 slate_change: 0,
                 slate_unconfirmed: false,
                 cover_lost: false,
+                grew_on_reconnect: false,
                 end_mark: None,
                 splices: 0,
                 dropped: 0,
@@ -644,6 +648,7 @@ impl Engine {
                 Some(k) => {
                     let arrival = self.entry(k).map_or(now, |e| e.arrival);
                     let delay = self.out.delay.max(now.saturating_sub(arrival));
+                    self.out.grew_on_reconnect |= delay > self.out.delay;
                     self.splice_to(k, delay);
                     self.back_under_max();
                 }
@@ -700,6 +705,7 @@ impl Engine {
         o.hold = None;
         o.slate_unconfirmed = false;
         o.cover_lost = false;
+        o.grew_on_reconnect = false;
         o.gate = None;
         o.end_mark = None;
         if o.pending.covers() {
@@ -843,6 +849,7 @@ impl Engine {
             self.out.memory_short = false;
             self.out.slate_unconfirmed = false;
             self.out.cover_lost = false;
+            self.out.grew_on_reconnect = false;
         }
         match cmd {
             Command::SlateShown { change } => {
@@ -1089,7 +1096,7 @@ impl Engine {
     }
 
     /// The encoder's keyframe interval, as measured (2 s until it is).
-    fn keyframe_interval(&self) -> u64 {
+    pub(crate) fn keyframe_interval(&self) -> u64 {
         self.stats
             .gop_ms()
             .map_or(2 * SEC, |ms| ms.clamp(1, 60_000) * MS)

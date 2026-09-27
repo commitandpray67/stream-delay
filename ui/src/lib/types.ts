@@ -29,6 +29,8 @@ export interface Snapshot {
   slate_change: number;
   history_short: boolean;
   memory_short: boolean;
+  /** How much longer than set the delay is, beyond keyframe rounding (after an outage); else 0. */
+  excess_ms: number;
   ingest: {
     active: boolean;
     video_codec: string | null;

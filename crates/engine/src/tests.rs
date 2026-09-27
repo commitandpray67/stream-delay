@@ -2698,3 +2698,45 @@ fn a_delay_the_memory_limit_cannot_hold_is_refused() {
         Err(EngineError::NotEnoughMemory { .. })
     ));
 }
+
+#[test]
+fn a_delay_grown_by_an_outage_says_so_until_it_is_set_again() {
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 30_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(20 * SEC);
+    // Rounding back to a keyframe is not worth a word.
+    let snap = s.snapshot();
+    assert!(snap.effective_ms > 30_000, "{snap:?}");
+    assert_eq!(snap.excess_ms, 0, "{snap:?}");
+    assert!(snap.warnings.is_empty(), "{snap:?}");
+
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    s.advance(10 * SEC);
+    s.connect();
+    s.advance(5 * SEC);
+    let snap = s.snapshot();
+    assert!((9_000..=12_500).contains(&snap.excess_ms), "{snap:?}");
+    assert_eq!(snap.excess_ms, snap.effective_ms - 30_000);
+    assert!(
+        snap.warnings
+            .iter()
+            .any(|w| w.contains("instead of 30 s after a connection problem")),
+        "{snap:?}"
+    );
+
+    // Back to the delay set: a reduction at the next keyframe old enough.
+    s.cmd(Command::SetDelay {
+        ms: 30_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(5 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert!((30_000..=32_100).contains(&snap.effective_ms), "{snap:?}");
+    assert_eq!(snap.excess_ms, 0);
+    assert!(snap.warnings.is_empty(), "{snap:?}");
+}

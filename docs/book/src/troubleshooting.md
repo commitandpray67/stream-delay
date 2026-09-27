@@ -68,7 +68,9 @@ it.
 When the connection to Twitch drops, stream-delay reconnects (the first attempt
 comes at once) and continues where it left off, so viewers miss nothing, but the
 delay grows by the length of the outage, up to the maximum delay (then it skips
-ahead to the maximum). Press your preset again to go back to the delay you want.
+ahead to the maximum). The dock, the tray and the overlay's badge then show the
+real delay, and the dock and tray offer **Back to 30 s** (your delay): it skips
+ahead at the next keyframe. Pressing your preset again does the same.
 
 ## "The memory limit holds only about N s of the stream"
 

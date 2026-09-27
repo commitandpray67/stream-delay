@@ -3,10 +3,20 @@ import type { Phase, Snapshot } from "./types";
 /**
  * The delay to show once a change has settled: the one asked for, since rounding
  * back to a keyframe stretches the exact one by a second or so; the real one
- * when the buffer or the memory limit keeps it shorter.
+ * when the buffer or the memory limit keeps it shorter, or an outage made it
+ * longer than rounding explains.
  */
 export function shownDelayMs(d: Snapshot): number {
-  return d.target_ms > 0 && !d.history_short && !d.memory_short ? d.target_ms : d.effective_ms;
+  const asked = d.target_ms > 0 && !d.history_short && !d.memory_short && !(d.excess_ms > 0);
+  return asked ? d.target_ms : d.effective_ms;
+}
+
+/**
+ * The delay to offer to go back to, when an outage made the delay longer than
+ * set (and rounding explains); else null.
+ */
+export function backToMs(d: Snapshot | null): number | null {
+  return d && d.excess_ms > 0 && d.target_ms > 0 ? d.target_ms : null;
 }
 
 /** "0 s", "30 s", "2:05" */

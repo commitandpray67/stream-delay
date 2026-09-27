@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { formatBitrate, formatBytes, formatDelay, formatSecondsLabel, phaseTone } from "./format";
+import { backToMs, formatBitrate, formatBytes, formatDelay, formatSecondsLabel, phaseTone } from "./format";
+import type { Snapshot } from "./types";
 import { t } from "./i18n";
 
 describe("format", () => {
+  it("offers to go back only to a delay an outage stretched", () => {
+    const snap = (target_ms: number, excess_ms: number) => ({ target_ms, excess_ms }) as Snapshot;
+    expect(backToMs(null)).toBeNull();
+    expect(backToMs(snap(30_000, 0))).toBeNull();
+    expect(backToMs(snap(30_000, 20_000))).toBe(30_000);
+    expect(backToMs(snap(0, 20_000))).toBeNull();
+  });
   it("formats delays", () => {
     expect(formatDelay(0)).toBe("0 s");
     expect(formatDelay(30_400)).toBe("30 s");

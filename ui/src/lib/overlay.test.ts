@@ -6,7 +6,7 @@ function state(
   phase: Phase,
   target_s: number,
   effective_s: number,
-  opts: { connected?: boolean; ended?: boolean; short?: boolean; memory?: boolean } = {},
+  opts: { connected?: boolean; ended?: boolean; short?: boolean; memory?: boolean; excess_s?: number } = {},
 ): RelayState {
   return {
     delay: {
@@ -20,6 +20,7 @@ function state(
       slate_change: 0,
       history_short: opts.short ?? false,
       memory_short: opts.memory ?? false,
+      excess_ms: (opts.excess_s ?? 0) * 1000,
       ingest: {
         active: true,
         video_codec: null,
@@ -55,6 +56,23 @@ describe("overlay announcements", () => {
     expect(a.update(state("going-live", 0, 15))).toBeNull();
     expect(a.update(state("live", 0, 0))).toBe("Stream delay removed");
     expect(a.update(state("delayed", 30, 30))).toBe("Stream delay: 30 s");
+  });
+
+  it("shows a delay an outage made longer, without announcing it", () => {
+    const a = new DelayAnnouncer();
+    expect(a.update(state("live", 0, 0))).toBeNull();
+    expect(a.update(state("delayed", 30, 31.9))).toBe("Stream delay: 30 s");
+    // Rounding back to a keyframe: the delay set.
+    expect(settledDelay(state("delayed", 30, 31.9))).toBe(30);
+    expect(badgeDelay(state("delayed", 30, 31.9))).toBe(30);
+    // The destination drops, and comes back 20 s later.
+    expect(a.update(state("delayed", 30, 31.9, { connected: false }))).toBeNull();
+    const grown = state("delayed", 30, 52, { excess_s: 22 });
+    expect(a.update(grown)).toBeNull();
+    expect(settledDelay(grown)).toBe(52);
+    expect(badgeDelay(grown)).toBe(52);
+    // Back to 30 s: that is news.
+    expect(a.update(state("delayed", 30, 30.5))).toBe("Stream delay: 30 s");
   });
 
   it("says what the delay really is when the memory limit keeps it shorter", () => {
