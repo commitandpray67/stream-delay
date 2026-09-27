@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::Serialize;
-use streamdelay_config::{Config, ConfigError, KeyMode, SecretStore, secret};
+use streamdelay_config::{AfterReconnect, Config, ConfigError, KeyMode, SecretStore, secret};
 use streamdelay_relay::{
     Ack, Destination, DestinationKey, DumpOutcome, EngineConfig, GoLiveWhen, RelayConfig,
     RelayError, RelayHandle, RtmpUrl,
@@ -507,6 +507,7 @@ pub(crate) fn engine_config(c: &Config) -> EngineConfig {
         keep_history: c.delay.keep_buffer,
         mask_margin_ms: c.delay.mask_margin_ms,
         mute_under_slate: c.delay.mute_under_slate,
+        restore_after_reconnect: c.delay.after_reconnect == AfterReconnect::Restore,
         ..Default::default()
     }
 }

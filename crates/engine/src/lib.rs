@@ -58,6 +58,12 @@ pub struct EngineConfig {
     /// rewinding. When false, content is dropped once it has aired and every delay
     /// increase uses mask mode, which builds the delay from new content.
     pub keep_history: bool,
+    /// After the destination connection comes back, go back to the delay set, at
+    /// the first keyframe old enough: viewers miss what was recorded while it was
+    /// down. Otherwise the broadcast resumes where it left off and the delay
+    /// stays longer by the outage (up to the maximum).
+    #[serde(default)]
+    pub restore_after_reconnect: bool,
 }
 
 impl Default for EngineConfig {
@@ -69,6 +75,7 @@ impl Default for EngineConfig {
             mask_margin_ms: 1_500,
             mute_under_slate: true,
             keep_history: true,
+            restore_after_reconnect: false,
         }
     }
 }
@@ -465,6 +472,12 @@ impl Engine {
         self.config.keep_history = keep;
     }
 
+    /// See [`EngineConfig::restore_after_reconnect`]; applies from the next
+    /// reconnect.
+    pub fn set_restore_after_reconnect(&mut self, restore: bool) {
+        self.config.restore_after_reconnect = restore;
+    }
+
     // ----- ingest ---------------------------------------------------------------
 
     /// A publisher connected. Returns the new session id.
@@ -654,6 +667,9 @@ impl Engine {
                     self.out.grew_on_reconnect |= delay > self.out.delay;
                     self.splice_to(k, delay);
                     self.back_under_max();
+                    if self.config.restore_after_reconnect {
+                        self.back_to_target();
+                    }
                 }
                 None => self.out.need_sync = true,
             }
@@ -1110,6 +1126,30 @@ impl Engine {
     /// old enough. The buffer only keeps what the maximum needs, so a delay
     /// above it would outrun it. Within a keyframe interval of the maximum is
     /// just rounding back to a keyframe.
+    /// With [`EngineConfig::restore_after_reconnect`]: a delay the outage made
+    /// longer goes back to the one set, at the first keyframe old enough (to live
+    /// at the next keyframe, without one). A change under way decides instead;
+    /// coming back to the maximum is on the way.
+    fn back_to_target(&mut self) {
+        let target = self.out.target;
+        if self.out.delay < target + 500 * MS {
+            return;
+        }
+        match self.out.pending {
+            Pending::None => {}
+            Pending::Reduce { delay } if delay > target => {}
+            _ => return,
+        }
+        let pending = if target == 0 {
+            Pending::GoLiveNow {
+                after_seq: self.next_seq.saturating_sub(1),
+            }
+        } else {
+            Pending::Reduce { delay: target }
+        };
+        self.set_pending(pending);
+    }
+
     fn back_under_max(&mut self) {
         let max = self.config.max_delay_ms * MS;
         if self.out.pending == Pending::None && self.out.delay > max + self.keyframe_interval() {

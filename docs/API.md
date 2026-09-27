@@ -77,7 +77,7 @@ Commands return an acknowledgement:
 }
 ```
 
-`full_delay_ready` is set, with `history_short`, once the buffer reaches back far enough for the delay set: setting it again gives it in full. `excess_ms` is how much longer than `target_ms` the delay is once nothing is changing it, when that is more than rounding back to a keyframe explains (a keyframe interval and half a second): after the destination connection dropped, the delay grows by the outage and stays so until it is set again (a `PUT /api/v1/delay` with the same `seconds` brings it back at the next keyframe). It is 0 otherwise, and a warning says so while it is not.
+`full_delay_ready` is set, with `history_short`, once the buffer reaches back far enough for the delay set: setting it again gives it in full. `excess_ms` is how much longer than `target_ms` the delay is once nothing is changing it, when that is more than rounding back to a keyframe explains (a keyframe interval and half a second): after the destination connection dropped, the delay grows by the outage and stays so until it is set again (a `PUT /api/v1/delay` with the same `seconds` brings it back at the next keyframe), unless `delay.after_reconnect` is `"restore"` in the settings (the default is `"keep"`): the delay then goes back to the one set at the first keyframe old enough. It is 0 otherwise, and a warning says so while it is not.
 
 `ended` (top level) is `true` after `POST /api/v1/stream/end` until the broadcast
 resumes; `ending` is `true` while an `after-air` end is still airing. `phase` is

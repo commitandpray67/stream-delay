@@ -226,6 +226,20 @@ impl Preset {
     }
 }
 
+/// What happens to the delay when the connection to the destination comes back
+/// after dropping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AfterReconnect {
+    /// Resume where the broadcast left off: viewers miss nothing, and the delay
+    /// is longer by the outage (up to the maximum).
+    #[default]
+    Keep,
+    /// Go back to the delay set, at the first keyframe old enough: viewers miss
+    /// what was recorded while the connection was down.
+    Restore,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DelayConfig {
@@ -249,6 +263,8 @@ pub struct DelayConfig {
     /// After a dump the slate covers, leave out the sound of what it covers,
     /// which airs almost live: the slate covers the picture only.
     pub mute_under_slate: bool,
+    /// When the connection to the destination comes back.
+    pub after_reconnect: AfterReconnect,
 }
 
 impl Default for DelayConfig {
@@ -262,6 +278,7 @@ impl Default for DelayConfig {
             keep_buffer: true,
             mask_margin_ms: 1_500,
             mute_under_slate: true,
+            after_reconnect: AfterReconnect::Keep,
         }
     }
 }

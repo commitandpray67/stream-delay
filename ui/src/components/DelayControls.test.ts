@@ -77,6 +77,7 @@ function config(delay: Partial<DelayConfig> = {}): LimitedConfig {
         ram_cap_mb: 1024,
         mask_margin_ms: 1500,
         mute_under_slate: true,
+        after_reconnect: "keep",
         keep_buffer: true,
         ...delay,
       },

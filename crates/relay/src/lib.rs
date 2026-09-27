@@ -191,6 +191,7 @@ pub(crate) enum Control {
     EndAfterAir(oneshot::Sender<()>),
     Resume(oneshot::Sender<()>),
     SetKeepHistory(bool),
+    SetRestoreAfterReconnect(bool),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -284,6 +285,15 @@ impl RelayHandle {
     pub fn set_keep_history(&self, keep: bool) -> Result<(), RelayError> {
         self.control
             .send(Control::SetKeepHistory(keep))
+            .map_err(|_| RelayError::Closed)
+    }
+
+    /// After the destination connection comes back: go back to the delay set
+    /// (`true`), or resume where it left off with the delay longer by the
+    /// outage. Takes effect from the next reconnect.
+    pub fn set_restore_after_reconnect(&self, restore: bool) -> Result<(), RelayError> {
+        self.control
+            .send(Control::SetRestoreAfterReconnect(restore))
             .map_err(|_| RelayError::Closed)
     }
 

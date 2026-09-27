@@ -436,6 +436,10 @@ impl Core {
                 self.engine.set_keep_history(keep);
                 self.publish_state();
             }
+            Control::SetRestoreAfterReconnect(restore) => {
+                info!(restore, "after-reconnect setting changed");
+                self.engine.set_restore_after_reconnect(restore);
+            }
             Control::Resume(reply) => {
                 let mut fx = Vec::new();
                 self.life.resume(&mut fx);

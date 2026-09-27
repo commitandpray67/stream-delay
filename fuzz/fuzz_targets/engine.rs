@@ -43,6 +43,7 @@ enum Op {
 struct Input {
     keep_history: bool,
     mute_under_slate: bool,
+    restore_after_reconnect: bool,
     ops: Vec<Op>,
 }
 
@@ -50,6 +51,7 @@ fuzz_target!(|input: Input| {
     let Input {
         keep_history,
         mute_under_slate,
+        restore_after_reconnect,
         ops,
     } = input;
     let mut e = Engine::new(EngineConfig {
@@ -59,6 +61,7 @@ fuzz_target!(|input: Input| {
         mask_margin_ms: 500,
         mute_under_slate,
         keep_history,
+        restore_after_reconnect,
     });
     let mut connected = true;
     let mut end_mark: Option<u64> = None;

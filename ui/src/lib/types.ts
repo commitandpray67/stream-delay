@@ -100,6 +100,8 @@ export interface DelayConfig {
   ram_cap_mb: number;
   mask_margin_ms: number;
   mute_under_slate: boolean;
+  /** When the connection to the destination comes back: resume where it left off, or go back to the delay set. */
+  after_reconnect: "keep" | "restore";
   /** Keep a rolling buffer so Rewind can add delay instantly. */
   keep_buffer: boolean;
 }

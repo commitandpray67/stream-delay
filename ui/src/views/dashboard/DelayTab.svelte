@@ -90,6 +90,13 @@
         Wait for OBS to reconnect after a crash or dropped connection (s)
         <input type="number" min="0" max="600" bind:value={grace} />
       </label>
+      <label>
+        When the connection to the destination comes back
+        <select bind:value={form.after_reconnect}>
+          <option value="keep">Resume where it left off (the delay gets longer)</option>
+          <option value="restore">Go back to the delay set (viewers miss the gap)</option>
+        </select>
+      </label>
     </div>
     <label class="inline">
       <input type="checkbox" bind:checked={form.mute_under_slate} />
@@ -99,8 +106,11 @@
       The buffer needs about bitrate × maximum delay of memory: 6 Mbps × 120 s ≈ 90 MB. The slate margin is how
       long Mask waits after putting the slate up before what OBS sends counts as covered; raise it if gameplay
       shows through when a Mask change starts. After a dump, what the slate covers airs almost live: the slate
-      hides the picture, not the sound, unless it is left out. Changing the maximum delay, memory cap, slate
-      margin, sound setting or reconnect time takes effect after a restart.
+      hides the picture, not the sound, unless it is left out. After a dropped connection, resuming where it left
+      off shows viewers everything and makes the delay longer by the outage (up to the maximum, and the dock offers
+      to go back); going back to the delay set keeps it, and viewers miss what happened while it was down.
+      Changing the maximum delay, memory cap, slate margin, sound setting or reconnect time takes effect after a
+      restart.
     </p>
     {#if form.ram_cap_mb < memoryFor(form.max_seconds)}
       <p class="warn small" role="status">

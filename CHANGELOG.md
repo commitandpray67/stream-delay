@@ -11,6 +11,12 @@ All notable changes to stream-delay are listed here. The format follows
 - `streamdelayd health` exits with 0 when an instance is running and answering
   (no token needed), and the Docker image uses it as its health check, so
   `docker ps` shows `healthy`.
+- **When the connection to the destination comes back** (Delay settings tab,
+  `delay.after_reconnect`): *Resume where it left off* (`keep`, the default,
+  as before: viewers miss nothing and the delay grows by the outage), or *Go
+  back to the delay set* (`restore`: at the first keyframe old enough, so
+  viewers miss what was recorded while it was down). Takes effect without a
+  restart.
 - `--token-file` (or `STREAMDELAY_TOKEN_FILE`) gives `streamdelayd run`,
   `streamdelayd urls` and the client commands their API token from a file (a
   Docker or systemd secret, for example). Like `STREAMDELAY_TOKEN`, it keeps the

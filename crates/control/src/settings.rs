@@ -7,7 +7,7 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use streamdelay_config::{
-    Config, DelayConfig, DestinationConfig, HotkeyConfig, OverlayConfig, SERVICES,
+    AfterReconnect, Config, DelayConfig, DestinationConfig, HotkeyConfig, OverlayConfig, SERVICES,
 };
 use streamdelay_relay::RtmpUrl;
 use tracing::info;
@@ -207,6 +207,7 @@ fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
 /// cover.
 struct Applied {
     keep_buffer_changed: bool,
+    after_reconnect_changed: bool,
     /// Takes effect at the next start.
     restart: bool,
 }
@@ -215,6 +216,7 @@ impl SettingsUpdate {
     fn apply(&self, c: &mut Config) -> Applied {
         let mut applied = Applied {
             keep_buffer_changed: false,
+            after_reconnect_changed: false,
             restart: false,
         };
         if let Some(d) = &self.destination {
@@ -226,6 +228,7 @@ impl SettingsUpdate {
                 || d.mask_margin_ms != c.delay.mask_margin_ms
                 || d.mute_under_slate != c.delay.mute_under_slate;
             applied.keep_buffer_changed = d.keep_buffer != c.delay.keep_buffer;
+            applied.after_reconnect_changed = d.after_reconnect != c.delay.after_reconnect;
             c.delay = d.clone();
         }
         if let Some(o) = &self.overlay {
@@ -292,6 +295,10 @@ async fn update_config(
     if applied.keep_buffer_changed {
         st.relay().set_keep_history(config.delay.keep_buffer)?;
     }
+    if applied.after_reconnect_changed {
+        st.relay()
+            .set_restore_after_reconnect(config.delay.after_reconnect == AfterReconnect::Restore)?;
+    }
     drop(lock);
     Ok(Json(public_config(&st)))
 }
@@ -354,6 +361,12 @@ mod tests {
         );
         // In effect right away.
         assert_eq!(apply(delay("keep_buffer", false.into())), (false, true));
+        let u: SettingsUpdate =
+            serde_json::from_value(delay("after_reconnect", "restore".into())).unwrap();
+        let mut c = current.clone();
+        let a = u.apply(&mut c);
+        assert!(!a.restart && a.after_reconnect_changed);
+        assert_eq!(c.delay.after_reconnect, AfterReconnect::Restore);
         assert_eq!(apply(delay("start_seconds", 5.into())), (false, false));
         let same_grace = current.ingest.grace_seconds;
         assert_eq!(

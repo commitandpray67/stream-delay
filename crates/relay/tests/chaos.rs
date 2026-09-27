@@ -658,9 +658,10 @@ async fn a_destination_connection_that_goes_silent_is_replaced() {
 }
 
 /// The destination goes down for 3 s while streaming with `delay_ms` of delay,
-/// at most `max_ms`, keeping 1 s of history past the maximum. Returns the video
-/// frames the sink got before and after, and the delay at the end.
-async fn outage(max_ms: u64, delay_ms: u64) -> (Vec<u32>, Vec<u32>, u64) {
+/// at most `max_ms`, keeping 1 s of history past the maximum; with `restore`,
+/// the delay goes back to the one set after. Returns the video frames the sink
+/// got before and after, and the delay at the end.
+async fn outage(max_ms: u64, delay_ms: u64, restore: bool) -> (Vec<u32>, Vec<u32>, u64) {
     let (sink, log, _kill) = start_sink().await;
     let proxy = FaultProxy::start(sink).await;
     let mut config = relay_config(
@@ -671,6 +672,7 @@ async fn outage(max_ms: u64, delay_ms: u64) -> (Vec<u32>, Vec<u32>, u64) {
     config.engine.max_delay_ms = max_ms;
     config.engine.headroom_ms = 1_000;
     let relay = start_relay_with(config).await;
+    relay.set_restore_after_reconnect(restore).unwrap();
     relay.set_delay(delay_ms, DelayMode::Rewind).await.unwrap();
     let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
     p.stream_for(Duration::from_millis(delay_ms) + Duration::from_secs(3))
@@ -724,7 +726,7 @@ fn skips(frames: &[u32]) -> Vec<(u32, u32)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_outage_at_the_maximum_delay_comes_back_to_it_and_airs_every_frame() {
     const MAX_MS: u64 = 4_000;
-    let (before, after, delay) = outage(MAX_MS, MAX_MS).await;
+    let (before, after, delay) = outage(MAX_MS, MAX_MS, false).await;
     let skipped = skips(&after);
     assert!(skipped.len() <= 1, "the output kept skipping: {skipped:?}");
     assert!(
@@ -749,7 +751,7 @@ async fn an_outage_at_the_maximum_delay_comes_back_to_it_and_airs_every_frame() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_outage_below_the_maximum_delay_misses_nothing() {
     const DELAY_MS: u64 = 3_000;
-    let (before, after, delay) = outage(12_000, DELAY_MS).await;
+    let (before, after, delay) = outage(12_000, DELAY_MS, false).await;
     let last_aired = *before.last().unwrap();
     // From the keyframe before what was on its way: at most a keyframe
     // interval (30 frames) back, never ahead.
@@ -763,6 +765,25 @@ async fn an_outage_below_the_maximum_delay_misses_nothing() {
         delay >= DELAY_MS + 2_500,
         "the delay did not grow by the outage: {delay} ms"
     );
+}
+
+/// The same outage, set to go back to the delay set after a reconnect (turned
+/// on while running): viewers miss the outage, and the delay is the one set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outage_set_to_restore_goes_back_to_the_delay_set() {
+    const DELAY_MS: u64 = 3_000;
+    let (before, after, delay) = outage(12_000, DELAY_MS, true).await;
+    let skipped = skips(&after);
+    // Once forward, at a keyframe, past what aired while it was down.
+    assert!(skipped.len() <= 1, "{skipped:?}");
+    assert!(
+        after.last().unwrap() - before.last().unwrap() > after.len() as u32 + 60,
+        "nothing was skipped: aired to {}, then {} frames up to {}",
+        before.last().unwrap(),
+        after.len(),
+        after.last().unwrap()
+    );
+    assert!(delay <= DELAY_MS + 1_500, "the delay stayed at {delay} ms");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

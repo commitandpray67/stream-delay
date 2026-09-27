@@ -175,8 +175,10 @@ work the same. The switch takes effect immediately.
   was in the buffer, so viewers miss nothing; the delay grows by however long the
   outage lasted, up to the maximum delay. Past the maximum, it skips ahead to the
   maximum at the next keyframe, so what aired during the longest part of the
-  outage is skipped. Press a preset to bring it back to the delay you want. A
-  connection that dies without either side noticing (after your computer switched
+  outage is skipped. Press a preset to bring it back to the delay you want, or
+  set **When the connection to the destination comes back** to *Go back to the
+  delay set* on the Delay settings tab to have it go back by itself (viewers
+  then miss what was recorded while it was down). A connection that dies without either side noticing (after your computer switched
   networks, say) counts as dropped once Twitch has taken no data for 20 s.
 - **When you click *Stop Streaming* in OBS,** stream-delay airs what is still
   buffered (the last D seconds) and then ends the Twitch broadcast cleanly. With

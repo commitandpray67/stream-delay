@@ -1924,10 +1924,12 @@ proptest! {
         audio in any::<bool>(),
         jitter in 0u64..4_000,
         keep_history in any::<bool>(),
+        restore_after_reconnect in any::<bool>(),
     ) {
         let mut s = Sim::new(EngineConfig {
             max_delay_ms: 60_000,
             keep_history,
+            restore_after_reconnect,
             ..Default::default()
         });
         s.audio = audio;
@@ -2739,6 +2741,84 @@ fn a_delay_grown_by_an_outage_says_so_until_it_is_set_again() {
     assert!((30_000..=32_100).contains(&snap.effective_ms), "{snap:?}");
     assert_eq!(snap.excess_ms, 0);
     assert!(snap.warnings.is_empty(), "{snap:?}");
+}
+
+/// The destination is down for `down`, `delay_ms` into a broadcast, with
+/// `restore_after_reconnect`. Returns the sim, 5 s after the reconnect, and
+/// where the new connection starts in `sent`.
+fn reconnect_after(delay_ms: u64, down: Time, restore: bool) -> (Sim, usize) {
+    let mut s = Sim::new(EngineConfig {
+        max_delay_ms: 60_000,
+        restore_after_reconnect: restore,
+        ..config()
+    });
+    s.connect();
+    s.advance(80 * SEC);
+    if delay_ms > 0 {
+        s.cmd(Command::SetDelay {
+            ms: delay_ms,
+            mode: DelayMode::Rewind,
+        });
+    }
+    s.advance(20 * SEC);
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    s.advance(down);
+    let from = s.sent.len();
+    s.connect();
+    s.advance(5 * SEC);
+    (s, from)
+}
+
+/// The shortest time anything sent from `from` on waited after it arrived.
+fn least_wait(s: &Sim, from: usize) -> Time {
+    s.media_sent_in(from..s.sent.len())
+        .map(|(_, sent, info)| sent.at - info.arrival)
+        .min()
+        .expect("nothing sent")
+}
+
+#[test]
+fn restoring_after_a_reconnect_goes_back_to_the_delay_set_and_never_below() {
+    let (s, from) = reconnect_after(30_000, 10 * SEC, true);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert!((30_000..=32_100).contains(&snap.effective_ms), "{snap:?}");
+    assert_eq!(snap.excess_ms, 0, "{snap:?}");
+    assert!(snap.warnings.is_empty(), "{snap:?}");
+    assert!(least_wait(&s, from) >= 30_000 * MS);
+    s.check_invariants_in(from..s.sent.len());
+
+    // Kept (the default): it resumes where it left off, 10 s longer.
+    let (s, _) = reconnect_after(30_000, 10 * SEC, false);
+    let snap = s.snapshot();
+    assert!(snap.effective_ms >= 40_000, "{snap:?}");
+    assert!(snap.excess_ms >= 9_000, "{snap:?}");
+}
+
+#[test]
+fn restoring_after_a_reconnect_past_the_maximum_goes_to_the_delay_set() {
+    // 30 s, then down for 40 s: 70 s, past the 60 s maximum.
+    let (s, from) = reconnect_after(30_000, 40 * SEC, true);
+    let snap = s.snapshot();
+    assert!((30_000..=32_100).contains(&snap.effective_ms), "{snap:?}");
+    assert!(least_wait(&s, from) >= 30_000 * MS);
+    s.check_invariants_in(from..s.sent.len());
+    // Kept: only back to the maximum.
+    let (s, _) = reconnect_after(30_000, 40 * SEC, false);
+    let snap = s.snapshot();
+    assert!((60_000..=62_100).contains(&snap.effective_ms), "{snap:?}");
+}
+
+#[test]
+fn restoring_after_a_reconnect_without_a_delay_goes_live_again() {
+    let (s, from) = reconnect_after(0, 10 * SEC, true);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Live, "{snap:?}");
+    assert!(snap.effective_ms < 2_100, "{snap:?}");
+    s.check_invariants_in(from..s.sent.len());
+    let (s, _) = reconnect_after(0, 10 * SEC, false);
+    assert!(s.snapshot().effective_ms >= 10_000);
 }
 
 #[test]
