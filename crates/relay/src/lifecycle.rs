@@ -605,6 +605,73 @@ mod tests {
     }
 
     #[test]
+    fn end_stream_after_air_waits_only_when_something_can_still_air() {
+        // (facts, egress running, whether the end waits for the rest to air)
+        let live = Facts {
+            destination: true,
+            has_mark: true,
+            output_wanted: true,
+            connected: true,
+            ..Default::default()
+        };
+        let cases = [
+            // Buffered content to air.
+            (live, true, true),
+            // Nothing buffered, but the connection may still have some queued.
+            (
+                Facts {
+                    drained: true,
+                    ..live
+                },
+                true,
+                true,
+            ),
+            // Nothing buffered and no connection: nothing left.
+            (
+                Facts {
+                    drained: true,
+                    ..live
+                },
+                false,
+                false,
+            ),
+            // Buffered, but no destination to air it.
+            (
+                Facts {
+                    destination: false,
+                    ..live
+                },
+                false,
+                false,
+            ),
+            // Nothing received, so no mark to end at.
+            (
+                Facts {
+                    has_mark: false,
+                    ..live
+                },
+                true,
+                false,
+            ),
+        ];
+        for (i, (f, egress, waits)) in cases.into_iter().enumerate() {
+            let mut life = Lifecycle::new(GRACE);
+            let now = Instant::now();
+            let mut fx = Vec::new();
+            life.publishing(now, false, &f, &mut fx);
+            if egress {
+                assert_eq!(life.tick(now, &f, &mut fx), Tick::Start, "case {i}");
+                life.started(now);
+            }
+            fx.clear();
+            life.end_after_air(now, &f, &mut fx);
+            assert_eq!(life.ending(), waits, "case {i}: {fx:?}");
+            assert_eq!(life.ended(), !waits, "case {i}");
+            assert_eq!(fx.contains(&Effect::MarkEnd), waits, "case {i}: {fx:?}");
+        }
+    }
+
+    #[test]
     fn end_stream_during_a_restart_ends_after_the_previous_end() {
         let mut life = Lifecycle::new(GRACE);
         let now = Instant::now();
