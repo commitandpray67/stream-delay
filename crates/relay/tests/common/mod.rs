@@ -366,6 +366,14 @@ impl Publisher {
         drop(self.tcp);
     }
 
+    /// Stops publishing but keeps the connection, as an encoder that is about to
+    /// publish again on it.
+    pub async fn unpublish(&mut self) {
+        self.session.close();
+        let o = self.session.take_output();
+        self.tcp.write_all(&o).await.unwrap();
+    }
+
     pub async fn stop(mut self) {
         self.session.close();
         let o = self.session.take_output();

@@ -393,6 +393,29 @@ async fn connections_that_never_publish_are_closed() {
     relay.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_encoder_that_stops_has_the_publish_time_to_start_again() {
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "127.0.0.1:0".parse().unwrap(),
+        publish_timeout: Duration::from_secs(2),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_millis(200)).await;
+    p.unpublish().await;
+    assert!(
+        !p.closed_by_relay(Duration::from_millis(500)).await,
+        "closed as soon as it stopped"
+    );
+    assert!(
+        p.closed_by_relay(Duration::from_secs(10)).await,
+        "kept open after the publish time"
+    );
+    relay.shutdown().await;
+}
+
 /// Waits until the relay sees no encoder.
 async fn until_encoder_gone(relay: &streamdelay_relay::RelayHandle) {
     for _ in 0..100 {

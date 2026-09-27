@@ -82,7 +82,7 @@ pub(crate) async fn listen(
         match accepted {
             Ok((tcp, peer)) => {
                 let ip = peer.ip().to_canonical();
-                if !ip.is_loopback() && bad_keys.blocked(addr_key(ip)) {
+                if bad_keys.blocked(ip) {
                     debug!(%peer, "address is cooling down after wrong stream keys; refusing");
                     continue;
                 }
@@ -212,7 +212,18 @@ impl Drop for ConnSlot {
     }
 }
 
-/// Wrong stream keys per address, and from all addresses together.
+/// The encoder's `connect` properties to pass on to the destination: all but
+/// those we set ourselves. Enhanced RTMP's `fourCcList`, for one, says which
+/// codecs may follow.
+fn forwarded_props(props: Vec<(String, Amf0Value)>) -> Vec<(String, Amf0Value)> {
+    props
+        .into_iter()
+        .filter(|(k, _)| !OWN_CONNECT_PROPS.contains(&k.as_str()))
+        .collect()
+}
+
+/// Wrong stream keys per address (see [`addr_key`]), and from all addresses
+/// together. Loopback peers are not counted: they are local programs.
 #[derive(Clone, Default)]
 struct BadKeys(Arc<Mutex<BadKeyLog>>);
 
@@ -248,8 +259,10 @@ impl BadKeyLog {
 }
 
 impl BadKeys {
-    /// True while `addr` has used up its tries.
-    fn blocked(&self, addr: IpAddr) -> bool {
+    /// True while the address of `ip` has used up its tries (never for loopback
+    /// peers, whose wrong keys are not recorded).
+    fn blocked(&self, ip: IpAddr) -> bool {
+        let addr = addr_key(ip);
         let Ok(mut log) = self.0.lock() else {
             return false;
         };
@@ -260,9 +273,14 @@ impl BadKeys {
             .is_some_and(|(n, last)| *n >= tries && now.duration_since(*last) < cooldown)
     }
 
-    /// Records a wrong key from `addr`. Returns how long it has to wait, when this
-    /// one used up its tries.
-    fn record(&self, addr: IpAddr) -> Option<Duration> {
+    /// Records a wrong key from `ip`. Returns how long its address has to wait,
+    /// when this one used up its tries.
+    fn record(&self, ip: IpAddr) -> Option<Duration> {
+        let ip = ip.to_canonical();
+        if ip.is_loopback() {
+            return None;
+        }
+        let addr = addr_key(ip);
         let Ok(mut log) = self.0.lock() else {
             return None;
         };
@@ -421,10 +439,7 @@ async fn handle(
                         encoder = %untrusted(encoder),
                         "encoder sent connect"
                     );
-                    connect_props = props
-                        .into_iter()
-                        .filter(|(k, _)| !OWN_CONNECT_PROPS.contains(&k.as_str()))
-                        .collect();
+                    connect_props = forwarded_props(props);
                 }
                 ServerEvent::PublishRequest { app, stream_key } => {
                     info!(%peer, app = %untrusted(&app), "encoder asked to publish");
@@ -450,10 +465,8 @@ async fn handle(
                         Ok(Err(rejection)) => {
                             slot.publishing.store(false, Ordering::Relaxed);
                             warn!(%peer, "rejected publish: {}", rejection.reason);
-                            let ip = peer.ip().to_canonical();
                             if rejection.bad_key
-                                && !ip.is_loopback()
-                                && let Some(wait) = bad_keys.record(addr_key(ip))
+                                && let Some(wait) = bad_keys.record(peer.ip())
                             {
                                 warn!(
                                     %peer,
@@ -585,6 +598,62 @@ mod tests {
             log.per_addr.get_mut(&a).unwrap().1 = Instant::now() - BAD_KEY_COOLDOWN;
         }
         assert!(!bad.blocked(a));
+    }
+
+    #[test]
+    fn wrong_keys_count_per_address_but_not_from_this_computer() {
+        let bad = BadKeys::default();
+        for local in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            let ip: IpAddr = local.parse().unwrap();
+            for _ in 0..MAX_BAD_KEYS * 2 {
+                assert_eq!(bad.record(ip), None, "{local}");
+            }
+            assert!(!bad.blocked(ip), "{local}");
+        }
+        assert!(bad.0.lock().unwrap().per_addr.is_empty());
+        // Addresses in one IPv6 /64 share their tries.
+        for i in 1..=MAX_BAD_KEYS {
+            bad.record(format!("2001:db8:1:2::{i}").parse().unwrap());
+        }
+        assert!(bad.blocked("2001:db8:1:2::ffff".parse().unwrap()));
+        assert!(!bad.blocked("2001:db8:1:3::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_addresses_remembered_are_bounded() {
+        let bad = BadKeys::default();
+        for i in 0..MAX_TRACKED_ADDRESSES as u32 + 10 {
+            bad.record(IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + i)));
+        }
+        assert_eq!(bad.0.lock().unwrap().per_addr.len(), MAX_TRACKED_ADDRESSES);
+    }
+
+    #[test]
+    fn the_destination_gets_the_encoders_own_connect_properties() {
+        let props = [
+            "app",
+            "tcUrl",
+            "flashVer",
+            "swfUrl",
+            "type",
+            "fourCcList",
+            "videoCodecs",
+        ]
+        .map(|k| (k.to_string(), Amf0Value::Null));
+        let kept: Vec<String> = forwarded_props(props.to_vec())
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(kept, ["fourCcList", "videoCodecs"]);
+    }
+
+    #[test]
+    fn a_closed_connection_leaves_only_its_own_slot() {
+        let conns = Conns::default();
+        let mut slots: Vec<ConnSlot> = (0..3).map(|id| conns.admit(id).unwrap()).collect();
+        drop(slots.remove(1));
+        let ids: Vec<u64> = conns.0.lock().unwrap().iter().map(|e| e.id).collect();
+        assert_eq!(ids, [0, 2]);
     }
 
     #[test]
