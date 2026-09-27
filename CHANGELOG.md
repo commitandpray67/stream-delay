@@ -53,6 +53,19 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- Wrong ingest keys could lock the streamer's own encoder out: five from one
+  address refused every connection from it for a minute (ten minutes while
+  keys came from many addresses), and a fifth connection from one address was
+  refused. Behind Docker's port forwarding, a proxy or carrier-grade NAT, the
+  encoder shares its address with everyone else. A correct key is now never
+  refused: past its tries, an address's wrong keys are answered after 10 s
+  (30 s while keys come from many addresses) instead of being turned away, and
+  a new connection closes the oldest idle one from its address (one that was
+  refused first) instead of being refused itself. The dashboard shows how many
+  wrong keys came in the last 10 minutes, and from where.
+- An ingest key that is a pattern (`aaaa…`, `abab…`, `abcd…`) is refused like a
+  short one, and one weaker than about 80 bits gets a warning on the dashboard
+  (it still works, so settings from earlier versions keep starting).
 - After the connection to Twitch dropped, the delay stayed longer by the
   outage, but the dock and the overlay's badge still showed the delay set. They
   now show the real one whenever it is more than keyframe rounding explains,

@@ -333,15 +333,40 @@ async fn network_ingest_requires_a_key() {
     .await;
     assert!(matches!(
         weak,
-        Err(streamdelay_relay::RelayError::WeakIngestKey(_))
+        Err(streamdelay_relay::RelayError::WeakIngestKey { .. })
     ));
-    let relay = streamdelay_relay::start(RelayConfig {
+    // So is a pattern, however long.
+    let pattern = streamdelay_relay::start(RelayConfig {
         ingest_bind: "0.0.0.0:0".parse().unwrap(),
         ingest_key: Some("k".repeat(streamdelay_relay::MIN_INGEST_KEY_LEN)),
         ..Default::default()
     })
+    .await;
+    assert!(matches!(
+        pattern,
+        Err(streamdelay_relay::RelayError::WeakIngestKey { .. })
+    ));
+    // One long enough but guessable in time still works (keys set before the
+    // strength rule must not stop stream-delay from starting), with a warning
+    // for the dashboard.
+    let guessable = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "0.0.0.0:0".parse().unwrap(),
+        ingest_key: Some("mysecretstreamkey".into()),
+        ..Default::default()
+    })
     .await
     .unwrap();
+    let warning = guessable.state().ingest.key_warning;
+    assert!(warning.is_some_and(|w| w.contains("bits")));
+    guessable.shutdown().await;
+    let relay = streamdelay_relay::start(RelayConfig {
+        ingest_bind: "0.0.0.0:0".parse().unwrap(),
+        ingest_key: Some("Xk3-9fQ2-mP7z-Lw4R".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(relay.state().ingest.key_warning, None);
     relay.shutdown().await;
     // Only reachable from this computer, any key will do.
     let local = streamdelay_relay::start(RelayConfig {

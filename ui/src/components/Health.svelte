@@ -45,6 +45,19 @@
       <dt>OBS connection</dt>
       <dd class="error">{state.ingest.last_error}</dd>
     {/if}
+    {#if state.ingest.bad_keys_recent}
+      <dt>Wrong keys</dt>
+      <dd class="warn">
+        {state.ingest.bad_keys_recent} wrong ingest {state.ingest.bad_keys_recent === 1 ? "key" : "keys"} in the last
+        10 minutes{#if state.ingest.bad_key_from}, the latest from {state.ingest.bad_key_from}{/if}. If that isn't
+        your encoder, someone may be guessing the key: change it (the <code>ingest.key</code> setting) and firewall
+        the RTMP port to your encoder's address.
+      </dd>
+    {/if}
+    {#if state.ingest.key_warning}
+      <dt>Ingest key</dt>
+      <dd class="warn">{state.ingest.key_warning}</dd>
+    {/if}
   </dl>
 {/if}
 

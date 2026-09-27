@@ -38,16 +38,22 @@ it is built to be safe by default:
   name you list under `allowed_hosts` in the `[api]` section of the settings
   file, such as one on your own DNS.
 - **The RTMP input also listens on `127.0.0.1` only** by default. When it can be
-  reached from your network, an ingest key of at least 16 characters is
-  required so nobody else can stream to it; if you don't set one, stream-delay
-  generates one and shows it with the OBS server address. A wrong key is only
-  refused after a second, an address that sends five wrong keys has to wait a
-  minute, and while wrong keys come from many addresses at once, each gets one
-  try every 10 minutes. These limits are for other devices: connections from
-  this computer are not limited. A tunnel or proxy on this computer that
-  forwards the input (an SSH tunnel, ngrok, a reverse proxy) makes every
-  encoder look local, so nothing slows down guessing: expose the port directly
-  instead, and keep the generated key.
+  reached from your network, an ingest key is required so nobody else can
+  stream to it; if you don't set one, stream-delay generates one (128 bits) and
+  shows it with the OBS server address. A key you choose must have at least 16
+  characters and not be a pattern (`aaaa…`, `abab…`, `abcd…`), or stream-delay
+  won't start; one that is weaker than about 80 bits (16 lower-case letters are
+  75) works, but the dashboard warns. What keeps it from being guessed is its
+  strength: a wrong key is answered after a second, and once an address has
+  sent five, after 10 s (30 s while wrong keys come from many addresses at
+  once), but a correct key is never refused, since the streamer's encoder may
+  share its address with whoever is guessing (Docker's port forwarding, a
+  proxy, carrier-grade NAT). The dashboard shows how many wrong keys came in the
+  last 10 minutes and from where. Where you can, firewall the RTMP port so only
+  your encoder's address reaches it. Connections from this computer are not
+  counted: a tunnel or proxy on this computer that forwards the input (an SSH
+  tunnel, ngrok, a reverse proxy) makes every encoder look local, so keep the
+  generated key there.
 - **Hostile network input:** the RTMP, AMF0 and FLV parsers have hard limits on
   memory use, and are fuzzed and property-tested so malformed data can't crash
   them. Until an encoder has started publishing it may only send small

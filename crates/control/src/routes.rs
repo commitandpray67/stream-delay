@@ -118,6 +118,9 @@ async fn get_state(
 fn visible_state(mut state: RelayState, scope: Scope) -> RelayState {
     if scope < Scope::Admin {
         state.ingest.peer = None;
+        state.ingest.bad_keys_recent = 0;
+        state.ingest.bad_key_from = None;
+        state.ingest.key_warning = None;
         state.egress.last_error = None;
     }
     state
@@ -445,14 +448,21 @@ mod tests {
     fn only_the_dashboard_sees_the_encoder_address_and_destination_replies() {
         let mut state = RelayState::default();
         state.ingest.peer = Some("192.168.1.20:50123".into());
+        state.ingest.bad_keys_recent = 12;
+        state.ingest.bad_key_from = Some("203.0.113.9".into());
+        state.ingest.key_warning = Some("weak".into());
         state.egress.last_error = Some("destination refused the stream".into());
         let admin = visible_state(state.clone(), Scope::Admin);
         assert!(admin.ingest.peer.is_some());
         assert!(admin.egress.last_error.is_some());
+        assert_eq!(admin.ingest.bad_keys_recent, 12);
+        assert!(admin.ingest.bad_key_from.is_some() && admin.ingest.key_warning.is_some());
         for scope in [Scope::Control, Scope::Read] {
             let s = visible_state(state.clone(), scope);
             assert_eq!(s.ingest.peer, None);
             assert_eq!(s.egress.last_error, None);
+            assert_eq!(s.ingest.bad_keys_recent, 0);
+            assert_eq!((s.ingest.bad_key_from, s.ingest.key_warning), (None, None));
         }
     }
 }

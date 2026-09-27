@@ -7,7 +7,7 @@
 # Then stream from OBS to rtmp://<host>:1935/live with the ingest key, and open
 # the dashboard link `streamdelayd urls` shows (they are not written to the logs).
 # The ingest key is generated and saved in /data; to choose one, set
-# STREAMDELAY_INGEST_KEY to at least 16 characters.
+# STREAMDELAY_INGEST_KEY to at least 16 characters (not a pattern such as aaaa… or abcd…).
 # Port 7788 (dashboard and API, plain HTTP) stays on this machine; see the user
 # guide before publishing it more widely.
 

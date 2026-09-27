@@ -53,6 +53,11 @@ export interface RelayState {
     peer: string | null;
     app: string | null;
     last_error: string | null;
+    /** Dashboard only: wrong stream keys in the last 10 minutes, and where the latest came from. */
+    bad_keys_recent?: number;
+    bad_key_from?: string | null;
+    /** Dashboard only: why the ingest key could be stronger. */
+    key_warning?: string | null;
   };
   egress: {
     status: EgressStatus;

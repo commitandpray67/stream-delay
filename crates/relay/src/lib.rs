@@ -117,11 +117,10 @@ pub enum RelayError {
     )]
     IngestKeyRequired(SocketAddr),
     #[error(
-        "the RTMP input on {0} can be reached from other devices, so its ingest key must \
-         be at least {MIN_INGEST_KEY_LEN} characters long, or it could be guessed; leave it \
-         unset to use a generated one"
+        "the RTMP input on {addr} can be reached from other devices, so its ingest key must \
+         be hard to guess, and it {why}; leave it unset to use a generated one"
     )]
-    WeakIngestKey(SocketAddr),
+    WeakIngestKey { addr: SocketAddr, why: KeyWeakness },
     #[error("the relay has shut down")]
     Closed,
 }
@@ -160,7 +159,16 @@ pub struct IngestState {
     pub peer: Option<String>,
     pub app: Option<String>,
     pub last_error: Option<String>,
+    /// Wrong stream keys in the last [`BAD_KEYS_SHOWN_FOR`], and the address
+    /// the latest came from: someone may be guessing the ingest key.
+    pub bad_keys_recent: u32,
+    pub bad_key_from: Option<String>,
+    /// Why the ingest key, which is accepted, is weaker than it should be.
+    pub key_warning: Option<String>,
 }
+
+/// How far back [`IngestState::bad_keys_recent`] counts.
+pub const BAD_KEYS_SHOWN_FOR: Duration = Duration::from_secs(600);
 
 /// Everything the UI needs, published a few times per second.
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
@@ -313,6 +321,86 @@ impl RelayHandle {
 /// devices, as for API tokens: generated keys have 32 characters.
 pub const MIN_INGEST_KEY_LEN: usize = 16;
 
+/// Estimated strength an ingest key reachable from other devices should have,
+/// in bits: guessing it is then hopeless at any speed, since wrong keys are
+/// only slowed down, never locked out (a correct one must always get in).
+pub const STRONG_INGEST_KEY_BITS: u32 = 80;
+
+/// How an ingest key falls short of being hard to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyWeakness {
+    /// Fewer than [`MIN_INGEST_KEY_LEN`] characters: refused.
+    TooShort,
+    /// A few characters over and over (`aaaa…`, `abab…`), or a run like
+    /// `abcdef…`: refused.
+    Pattern,
+    /// About this many bits, under [`STRONG_INGEST_KEY_BITS`]: accepted (keys
+    /// set before this rule keep working), with a warning.
+    Guessable(u32),
+}
+
+impl KeyWeakness {
+    /// Whether the relay refuses to start with it (see [`RelayError::WeakIngestKey`]).
+    pub fn refused(self) -> bool {
+        !matches!(self, Self::Guessable(_))
+    }
+}
+
+impl std::fmt::Display for KeyWeakness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooShort => write!(f, "is shorter than {MIN_INGEST_KEY_LEN} characters"),
+            Self::Pattern => f.write_str("is a pattern (a few characters repeated, or a run)"),
+            Self::Guessable(bits) => write!(
+                f,
+                "has only about {bits} bits of strength (it should have {STRONG_INGEST_KEY_BITS}: \
+                 more characters, or a mix of letters, digits and symbols)"
+            ),
+        }
+    }
+}
+
+/// How `key` falls short of being hard to guess, if it does. The strength is
+/// estimated from its length and the kinds of characters in it (lower case,
+/// upper case, digits, others).
+pub fn ingest_key_weakness(key: &str) -> Option<KeyWeakness> {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() < MIN_INGEST_KEY_LEN {
+        return Some(KeyWeakness::TooShort);
+    }
+    let repeats = (1..=4).any(|p| chars.iter().skip(p).zip(&chars).all(|(a, b)| a == b));
+    let run = |step: i64| chars.windows(2).all(|w| w[1] as i64 - w[0] as i64 == step);
+    if repeats || run(1) || run(-1) {
+        return Some(KeyWeakness::Pattern);
+    }
+    let has = |f: fn(&char) -> bool| chars.iter().any(f);
+    let pool = [
+        (has(char::is_ascii_lowercase), 26),
+        (has(char::is_ascii_uppercase), 26),
+        (has(char::is_ascii_digit), 10),
+        (has(|c| !c.is_ascii_alphanumeric()), 33),
+    ]
+    .iter()
+    .filter(|(used, _)| *used)
+    .map(|(_, n)| n)
+    .sum::<u32>();
+    let bits = (chars.len() as f64 * f64::from(pool).log2()) as u32;
+    (bits < STRONG_INGEST_KEY_BITS).then_some(KeyWeakness::Guessable(bits))
+}
+
+/// What the dashboard says about an ingest key reachable from other devices
+/// that is accepted but could be stronger.
+pub(crate) fn key_warning(config: &RelayConfig) -> Option<String> {
+    if config.ingest_bind.ip().to_canonical().is_loopback() {
+        return None;
+    }
+    let why = ingest_key_weakness(config.ingest_key.as_deref()?)?;
+    Some(format!(
+        "The ingest key {why}. Other devices can reach the RTMP input, so it should be \
+         hard to guess: remove it from the settings to use a generated one."
+    ))
+}
+
 /// Starts the relay on the current tokio runtime.
 pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     if let Some(d) = &config.destination {
@@ -322,10 +410,20 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     if !config.ingest_bind.ip().to_canonical().is_loopback() {
         match &config.ingest_key {
             None => return Err(RelayError::IngestKeyRequired(config.ingest_bind)),
-            Some(k) if k.chars().count() < MIN_INGEST_KEY_LEN => {
-                return Err(RelayError::WeakIngestKey(config.ingest_bind));
-            }
-            Some(_) => {}
+            Some(k) => match ingest_key_weakness(k) {
+                Some(why) if why.refused() => {
+                    return Err(RelayError::WeakIngestKey {
+                        addr: config.ingest_bind,
+                        why,
+                    });
+                }
+                Some(why) => tracing::warn!(
+                    "the RTMP input on {} can be reached from other devices, and its ingest \
+                     key {why}; leave it unset to use a generated one",
+                    config.ingest_bind
+                ),
+                None => {}
+            },
         }
     }
     let listener = TcpListener::bind(config.ingest_bind)
@@ -343,6 +441,7 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     let initial = RelayState {
         ingest: IngestState {
             listen: ingest_addr.to_string(),
+            key_warning: key_warning(&config),
             ..Default::default()
         },
         ..Default::default()
@@ -379,4 +478,40 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
         ingest_addr,
         arena,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingest_keys_must_be_hard_to_guess() {
+        use KeyWeakness::*;
+        // Generated keys (32 hex digits), and a strong one of the shortest length.
+        assert_eq!(
+            ingest_key_weakness("3f9a1c7e5b2d4f60a8c1e3b5d7f90a2c"),
+            None
+        );
+        assert_eq!(ingest_key_weakness("Xk3-9fQ2-mP7z-Lw"), None);
+        // Refused.
+        assert_eq!(ingest_key_weakness("choose-a-secret"), Some(TooShort));
+        for pattern in [
+            "aaaaaaaaaaaaaaaa",
+            "abababababababab",
+            "abcdabcdabcdabcd",
+            "abcdefghijklmnop",
+            "ponmlkjihgfedcba",
+        ] {
+            let w = ingest_key_weakness(pattern);
+            assert!(w.is_some_and(KeyWeakness::refused), "{pattern}: {w:?}");
+        }
+        // Accepted with a warning: 16 lower-case letters are about 75 bits.
+        assert_eq!(ingest_key_weakness("correcthorsebatt"), Some(Guessable(75)));
+        assert!(!Guessable(75).refused());
+        assert_eq!(
+            ingest_key_weakness("correcthorsebatterys"),
+            None,
+            "20 of them are 94"
+        );
+    }
 }

@@ -69,8 +69,12 @@ stream with that key (Settings → Stream → Stream Key), and nobody else can
 publish to your relay. stream-delay generates one and saves it in
 `/data/config.toml`; `streamdelayd urls` shows it. To choose your own, set
 `STREAMDELAY_INGEST_KEY` (`-e STREAMDELAY_INGEST_KEY=…`) to at least 16
-characters: a shorter one could be guessed, and is refused. Anyone who guesses
-it could stream to your channel while you are not live.
+characters, mixing letters, digits and symbols: a shorter one or a pattern is
+refused, and one weaker than about 80 bits gets a warning on the dashboard.
+Anyone who guesses it could stream to your channel while you are not live, and
+with Docker's port forwarding every encoder can reach stream-delay from the
+same address, so wrong keys only slow an address down, never lock it out:
+where you can, firewall port 1935 to your encoder's address.
 
 Port 7788 is the dashboard and control API. The command above makes it reachable
 only from the machine running Docker. To use the dashboard from other devices on
@@ -83,7 +87,8 @@ computer) or a VPN.
 ### Two-PC setups
 
 On the streaming PC, run stream-delay with `--ingest 0.0.0.0:1935 --ingest-key …`
-(at least 16 characters; or the Docker image). In OBS on the gaming PC, use
+(at least 16 characters, not a pattern; or the Docker image), and where you
+can, firewall port 1935 so only the gaming PC reaches it. In OBS on the gaming PC, use
 `rtmp://<streaming-pc-ip>:1935/live` and the ingest key. If you leave out
 `--ingest-key`, one is generated; `streamdelayd urls` and the Setup tab show it. To control it from
 another device, or for OBS on the gaming PC to load the overlay, stream-delay's

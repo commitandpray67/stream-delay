@@ -1,5 +1,6 @@
 //! The core task: owns the delay engine and wires ingest, egress and commands together.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -220,6 +221,8 @@ struct Core {
     engine: Engine,
     clock: Instant,
     publisher: Option<Publisher>,
+    /// When wrong stream keys came, within [`crate::BAD_KEYS_SHOWN_FOR`].
+    bad_keys: VecDeque<Instant>,
     /// Key and connect properties of the most recent publisher (for passthrough).
     last_publisher: Option<(String, Vec<(String, Amf0Value)>)>,
     /// When broadcasts start and end.
@@ -267,6 +270,7 @@ pub(crate) async fn run(
         state: RelayState {
             ingest: IngestState {
                 listen: ingest_addr.to_string(),
+                key_warning: crate::key_warning(&config),
                 ..Default::default()
             },
             egress: EgressState {
@@ -284,6 +288,7 @@ pub(crate) async fn run(
         config,
         clock: now,
         publisher: None,
+        bad_keys: VecDeque::new(),
         last_publisher: None,
         egress_ctl,
         media_tx,
@@ -484,6 +489,14 @@ impl Core {
                     self.state.ingest.last_error = None;
                 } else if let Err(e) = &result {
                     self.state.ingest.last_error = Some(e.reason.clone());
+                    if e.bad_key {
+                        // Enough to count what the state shows.
+                        if self.bad_keys.len() >= 10_000 {
+                            self.bad_keys.pop_front();
+                        }
+                        self.bad_keys.push_back(Instant::now());
+                        self.state.ingest.bad_key_from = Some(peer.ip().to_canonical().to_string());
+                    }
                 }
                 let _ = reply.send(result);
                 self.publish_state();
@@ -842,6 +855,17 @@ impl Core {
             self.last_rate_at = Instant::now();
         }
         self.state.egress.backlog_bytes = self.counters.backlog.load(Ordering::Relaxed);
+        while self
+            .bad_keys
+            .front()
+            .is_some_and(|t| t.elapsed() >= crate::BAD_KEYS_SHOWN_FOR)
+        {
+            self.bad_keys.pop_front();
+        }
+        self.state.ingest.bad_keys_recent = self.bad_keys.len() as u32;
+        if self.bad_keys.is_empty() {
+            self.state.ingest.bad_key_from = None;
+        }
         if self.state.egress.status != EgressStatus::Live {
             self.state.egress.bitrate_kbps = 0;
         }
