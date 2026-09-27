@@ -13,6 +13,13 @@ on:
       hours:
         description: Duration in hours (max 5.5)
         default: "2"
+  # A change to the soak itself gets a half-hour run (one destination outage),
+  # so the nightly run does not find out first.
+  push:
+    branches: [main]
+    paths:
+      - "tests/soak/**"
+      - ".github/workflows/soak.yml"
 
 permissions:
   contents: read
@@ -32,7 +39,7 @@ jobs:
         run: cargo build --release -p streamdelayd
       - name: Soak
         env:
-          HOURS: ${{ inputs.hours || '2' }}
+          HOURS: ${{ inputs.hours || (github.event_name == 'push' && '0.5') || '2' }}
           OUT: ${{ runner.temp }}/soak
         # The input is read as data, never pasted into code.
         run: |
