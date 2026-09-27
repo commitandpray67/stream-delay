@@ -1220,6 +1220,7 @@ fn cancel_leaves_a_dumps_slate_alone() {
         } else {
             s.advance(500 * MS);
         }
+        assert!(!s.snapshot().cancellable, "{:?}", s.snapshot());
         let n = s.sent.len();
         s.cmd(Command::Cancel);
         let snap = s.snapshot();
@@ -1302,6 +1303,7 @@ fn setting_the_delay_a_change_is_bringing_about_changes_nothing() {
         mode: DelayMode::Mask,
     });
     s.advance(SEC);
+    assert!(s.snapshot().cancellable, "{:?}", s.snapshot());
     let change = s.snapshot().slate_change;
     s.confirm_slate();
     s.cmd(Command::SetDelay {
@@ -1313,6 +1315,39 @@ fn setting_the_delay_a_change_is_bringing_about_changes_nothing() {
     let snap = s.snapshot();
     assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
     assert!(!s.e.out.slate_unconfirmed, "{snap:?}");
+}
+
+/// A replay rounds back to a keyframe, so it can run out a moment before what
+/// comes next is due: the output then waits (players show the last frame), and
+/// does not jump back to the replay's last keyframe to hold it.
+#[test]
+fn a_replay_ending_a_moment_early_holds_nothing() {
+    for wait in [0u64, 700, 1_300, 1_900] {
+        let mut s = live_sim();
+        s.advance(60 * SEC + wait * MS);
+        s.cmd(Command::SetDelay {
+            ms: 10_000,
+            mode: DelayMode::Rewind,
+        });
+        s.advance(20 * SEC);
+        let ack = s.cmd(Command::Dump {
+            mode: DelayMode::Rewind,
+            cover: false,
+        });
+        assert_eq!(ack.dump, Some(DumpOutcome::Replay));
+        let n = s.sent.len();
+        s.advance(20 * SEC);
+        let held = s.sent[n..]
+            .iter()
+            .filter(|x| {
+                x.msg.seq.is_none()
+                    && x.msg.kind == Kind::Video
+                    && x.msg.payload.get(1) == Some(&0x01)
+            })
+            .count();
+        assert_eq!(held, 0, "a frame held after {wait} ms");
+        assert_eq!(s.snapshot().phase, Phase::Delayed);
+    }
 }
 
 /// Raising the delay during a dump's replay: what is recorded after the dump

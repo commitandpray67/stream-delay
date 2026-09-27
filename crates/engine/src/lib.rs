@@ -356,6 +356,10 @@ impl Pending {
     }
 }
 
+/// A replay that runs out this long or more before what comes next is due
+/// holds its last keyframe rather than send nothing.
+const REPLAY_GAP_HELD_AFTER: Time = 2 * SEC;
+
 /// How long a change covered by the slate waits for an overlay to confirm that
 /// the slate shows. Without it, a Mask delay change goes ahead (with a warning),
 /// and a dump holds rather than air what nothing may cover.
@@ -699,8 +703,15 @@ impl Engine {
         o.sent_metadata = None;
         o.first_emitted = None;
         // Restart from the keyframe at or before the cursor so the new connection
-        // starts with a decodable frame.
-        if self.out.started {
+        // starts with a decodable frame. While a hold (or a dump waiting for
+        // its slate) sends the last frame, what ends it splices, after it.
+        let holding = matches!(
+            self.out.pending,
+            Pending::Hold { .. } | Pending::Dump { .. }
+        );
+        if holding {
+            self.out.need_sync = true;
+        } else if self.out.started {
             match self.sync_at_or_before(self.out.next_seq) {
                 Some(k) => {
                     let arrival = self.entry(k).map_or(now, |e| e.arrival);
@@ -1634,16 +1645,28 @@ impl Engine {
                 wake = self.emit_hold_frame(now, out);
                 break;
             }
-            // Nor, after a replay, until the keyframe it continues from is due:
-            // if the replay has run out before then (the delay was raised), its
-            // last frame holds.
+            // Nor, after a replay, until the keyframe it continues from is due.
+            // A replay rounds back to a keyframe, so it can run out a moment
+            // early: players show its last frame meanwhile. Well before (the
+            // delay was raised), its last keyframe holds instead.
             if let Pending::Replay { from, delay } = self.out.pending
                 && self.out.next_seq >= from
             {
-                let frame = self.aired_keyframe(now);
-                self.set_pending(Pending::Hold { from, delay });
-                self.out.hold = frame;
-                continue;
+                let due = self
+                    .syncs
+                    .iter()
+                    .find(|&&s| s >= from)
+                    .and_then(|&k| self.entry(k))
+                    .map_or(now + delay, |e| e.arrival + delay);
+                if due > now + REPLAY_GAP_HELD_AFTER {
+                    let frame = self.aired_keyframe(now);
+                    self.set_pending(Pending::Hold { from, delay });
+                    self.out.hold = frame;
+                    // Whatever ends the hold starts again at a keyframe.
+                    self.out.need_sync = true;
+                    continue;
+                }
+                break;
             }
             if self.out.next_seq < self.base_seq {
                 self.out.next_seq = self.base_seq;
