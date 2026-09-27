@@ -1118,6 +1118,55 @@ fn dump_needs_a_delay() {
     assert!(s.media_sent().next().is_some());
 }
 
+#[test]
+fn when_a_dump_is_allowed() {
+    let dump = |s: &mut Sim| s.e.command(s.now, Command::Dump(DelayMode::Mask));
+    // Under half a second, what is in flight airs before anyone could react.
+    for (ms, allowed) in [(400, false), (600, true)] {
+        let mut s = live_sim();
+        s.cmd(Command::SetDelay {
+            ms,
+            mode: DelayMode::Rewind,
+        });
+        s.advance(5 * SEC);
+        assert_eq!(dump(&mut s).is_ok(), allowed, "{ms} ms");
+    }
+
+    // While the delay is being removed, a dump brings the protection back.
+    let mut s = live_sim();
+    s.cmd(Command::SetDelay {
+        ms: 20_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(30 * SEC);
+    s.cmd(Command::GoLive(GoLiveWhen::AfterAir));
+    s.advance(5 * SEC);
+    let dumped = unaired(&s);
+    let n = s.sent.len();
+    let ack = s.cmd(Command::Dump(DelayMode::Mask));
+    assert!((20_000..=22_100).contains(&ack.target_ms), "{ack:?}");
+    s.advance(30 * SEC);
+    let after: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
+    assert!(!after.is_empty());
+    assert!(
+        after
+            .iter()
+            .all(|(_, _, i)| !dumped.contains(&id_of_input(&s, i))),
+        "dumped content aired"
+    );
+
+    // Before the destination has connected, with no delay: nothing has aired,
+    // and nothing recorded before the dump will.
+    let mut s = Sim::new(config());
+    s.advance(5 * SEC);
+    let dumped_at = s.now;
+    dump(&mut s).expect("refused before anything aired");
+    s.connect();
+    s.advance(5 * SEC);
+    assert!(s.media_sent().next().is_some());
+    assert!(s.media_sent().all(|(_, i)| i.arrival >= dumped_at));
+}
+
 /// Ids of what is waiting to air: recorded after the last thing sent. (What an
 /// earlier change skipped is not waiting; a rewind may still show it.)
 fn unaired(s: &Sim) -> std::collections::HashSet<u32> {
