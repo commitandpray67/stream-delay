@@ -63,6 +63,9 @@ pub struct Snapshot {
     pub buffered_bytes: u64,
     /// The overlay should show the mask slate.
     pub mask_visible: bool,
+    /// Numbers the changes the slate covers: an overlay page confirms that it
+    /// painted the slate for this one (see [`crate::Command::SlateShown`]).
+    pub slate_change: u64,
     pub history_short: bool,
     /// The memory limit keeps the delay shorter than the one asked for.
     pub memory_short: bool,
@@ -204,6 +207,16 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
             o.target as f64 / 1e6
         ));
     }
+    if o.slate_unconfirmed {
+        warnings.push(
+            "No overlay confirmed that the slate showed, so the Mask change went ahead without it: viewers may have seen some of the stream twice. Check that the overlay is in your live scene.".into(),
+        );
+    }
+    if o.cover_lost {
+        warnings.push(
+            "No overlay confirmed that the slate showed, so instead of covering the stream after the dump, viewers see the last frame, still, until the delay is back.".into(),
+        );
+    }
     if o.history_short {
         warnings.push(format!(
             "Only {:.0} s of the stream was buffered, so the delay is {:.0} s instead of {:.0} s.",
@@ -220,6 +233,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         history_ms,
         buffered_bytes: (e.bytes + e.session_bytes) as u64,
         mask_visible: o.mask_visible,
+        slate_change: o.slate_change,
         history_short: o.history_short,
         memory_short: o.memory_short,
         ingest,

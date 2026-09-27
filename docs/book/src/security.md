@@ -13,10 +13,14 @@ it is built to be safe by default:
 - **Every API call needs a random token** created on first run. Only the
   dashboard link can change settings, stream keys and OBS. The dock link
   controls the stream: it changes or removes the delay, dumps the buffer, ends
-  the stream and resumes it. The overlay link can only show the delay. So a
-  leaked dock or overlay link cannot reveal or redirect your stream key, but
-  anyone with the dock link can control your broadcast: keep it as private as
-  the dashboard link, and don't show either on stream.
+  the stream and resumes it. The overlay link shows the delay and the slate,
+  and tells stream-delay whether OBS has the overlay on stream and when the
+  slate shows, which decides whether a dump covers the stream with the slate
+  or holds the last frame. So a leaked dock or overlay link cannot reveal or
+  redirect your stream key, but anyone with the dock link can control your
+  broadcast, and anyone with the overlay link could make a dump rely on a
+  slate that isn't on stream: keep both as private as the dashboard link, and
+  don't show them on stream.
 - **Your stream key is sent encrypted:** Twitch and YouTube are reached over
   RTMPS. Their RTMP addresses are there for networks where RTMPS doesn't get
   through, marked *unencrypted*.

@@ -14,6 +14,7 @@ mod changes;
 mod dest_key;
 pub mod diagnostics;
 mod obs_routes;
+mod overlays;
 mod routes;
 mod settings;
 mod ui;
@@ -68,9 +69,10 @@ pub(crate) struct Shared {
     /// Port clients use in the Host header.
     pub port: u16,
     pub restart_required: AtomicBool,
-    /// Overlay pages connected (see the events route): how many there are tells
-    /// the dock, and a dump, whether the slate can cover the stream.
-    pub overlays: watch::Sender<usize>,
+    /// Overlay pages connected (see the events route), and which of them OBS
+    /// shows on stream: that tells the dock, and a dump, whether the slate can
+    /// cover the stream.
+    pub overlays: Arc<overlays::Overlays>,
     /// Set by the desktop app: checks for an update and offers to install it.
     pub update_check: RwLock<Option<UpdateCheck>>,
     /// The destination (address and key) last given to the relay; see
@@ -115,7 +117,7 @@ impl AppState {
 
     /// Throws away what has not aired yet (see [`RelayHandle::dump`]): `asked`,
     /// else the default mode. The slate counts as covering the stream only while
-    /// an overlay page is connected, unless the caller takes that on
+    /// OBS shows an overlay page on stream, unless the caller takes that on
     /// (`allow_uncovered`); without it a dump replays or holds, and never airs
     /// the stream uncovered.
     pub(crate) async fn dump(
@@ -124,7 +126,7 @@ impl AppState {
         allow_uncovered: bool,
     ) -> Result<streamdelay_relay::Ack, streamdelay_relay::RelayError> {
         let mode = asked.unwrap_or(self.config().delay.default_mode);
-        let cover = allow_uncovered || *self.shared.overlays.borrow() > 0;
+        let cover = allow_uncovered || self.shared.overlays.counts().active > 0;
         self.relay().dump(mode, cover).await
     }
 
@@ -185,7 +187,7 @@ pub(crate) fn state(
             config_tx,
             port,
             restart_required: AtomicBool::new(false),
-            overlays: watch::channel(0).0,
+            overlays: overlays::Overlays::new(),
             update_check: RwLock::new(None),
             applied_destination: Mutex::new(None),
             obs_lock: tokio::sync::Mutex::new(()),

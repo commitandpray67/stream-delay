@@ -299,7 +299,7 @@ impl App {
                 config_tx,
                 port: api_addr.port(),
                 restart_required: AtomicBool::new(false),
-                overlays: watch::channel(0).0,
+                overlays: crate::overlays::Overlays::new(),
                 update_check: RwLock::new(None),
                 applied_destination: std::sync::Mutex::new(None),
                 obs_lock: tokio::sync::Mutex::new(()),

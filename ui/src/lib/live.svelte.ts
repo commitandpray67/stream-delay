@@ -12,7 +12,23 @@ export const live = $state({
   unauthorized: false,
   /** Overlay pages connected, as far as stream-delay knows (null until told). */
   overlays: null as number | null,
+  /** Of them, those OBS said are on stream: only those can cover a dump. */
+  activeOverlays: null as number | null,
 });
+
+let socket: WebSocket | null = null;
+const onOpen: Array<() => void> = [];
+
+/** Sends a message to stream-delay, if connected (the overlay page's reports). */
+export function sendLive(msg: object): void {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
+}
+
+/** Runs `callback` on every connection to stream-delay, including a current one. */
+export function whenConnected(callback: () => void): void {
+  onOpen.push(callback);
+  if (socket?.readyState === WebSocket.OPEN) callback();
+}
 
 /** The overlay page in OBS (not the dashboard's preview of it) says so, to be counted. */
 function role(): string {
@@ -60,17 +76,22 @@ export function connectLive(): void {
     const ws = new WebSocket(
       `${proto}://${location.host}/api/v1/events?token=${encodeURIComponent(getToken())}${role()}`,
     );
+    socket = ws;
     let opened = false;
     ws.onopen = () => {
       opened = true;
       live.connected = true;
       live.unauthorized = false;
       delay = 500;
+      onOpen.forEach((callback) => callback());
     };
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data as string);
       if (msg.type === "state") live.state = msg.state;
-      else if (msg.type === "overlays") live.overlays = msg.count;
+      else if (msg.type === "overlays") {
+        live.overlays = msg.count;
+        live.activeOverlays = msg.active ?? 0;
+      }
       else if (msg.type === "config") {
         live.config = msg.config;
         reloadIfOutdated(msg.config?.ui_build);

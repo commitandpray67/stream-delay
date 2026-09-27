@@ -254,6 +254,12 @@ impl RelayHandle {
         self.command(Command::Dump { mode, cover }).await
     }
 
+    /// An overlay page painted the slate for `change` (see
+    /// [`Command::SlateShown`]).
+    pub async fn slate_shown(&self, change: u64) -> Result<Ack, RelayError> {
+        self.command(Command::SlateShown { change }).await
+    }
+
     /// Starts broadcasting again after [`RelayHandle::end_stream`], from content
     /// received from now on and with the current delay. Before the end has aired,
     /// cancels [`RelayHandle::end_stream_after_air`] instead.

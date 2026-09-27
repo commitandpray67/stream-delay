@@ -47,8 +47,11 @@
   const dumpReplays = $derived(
     !!snap && keepBuffer && effectiveMode === "rewind" && snap.history_ms >= snap.effective_ms + dumpDelayMs + 2000,
   );
-  const noOverlay = $derived(live.overlays === 0);
-  const dumpOutcome = $derived<DumpOutcome>(dumpReplays ? "replay" : noOverlay ? "hold" : "cover");
+  // Only an overlay OBS said is on stream can cover a dump. After OBS starts
+  // it has not said so yet, until the overlay is hidden and shown once.
+  const canCover = $derived((live.activeOverlays ?? 0) > 0);
+  const overlayUnconfirmed = $derived((live.overlays ?? 0) > 0 && !canCover);
+  const dumpOutcome = $derived<DumpOutcome>(dumpReplays ? "replay" : canCover ? "cover" : "hold");
   const muteUnderSlate = $derived(live.config?.config.delay.mute_under_slate ?? true);
   const dumpExpected = $derived.by(() => {
     const delay = formatDelay(dumpDelayMs);
@@ -58,7 +61,7 @@
       case "cover":
         return `${t("action.dump.slate", { delay })} ${t(muteUnderSlate ? "action.dump.slate.muted" : "action.dump.slate.sound")}`;
       case "hold":
-        return t("action.dump.hold", { delay });
+        return `${t(overlayUnconfirmed ? "action.dump.hold.unconfirmed" : "action.dump.hold.noOverlay")} ${t("action.dump.hold", { delay })}`;
     }
   });
   const unaired = $derived(formatDelay(snap?.effective_ms ?? 0));

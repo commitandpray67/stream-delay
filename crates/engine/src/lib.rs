@@ -144,6 +144,12 @@ pub enum Command {
         mode: DelayMode,
         cover: bool,
     },
+    /// An overlay page painted the slate for change `change` (see
+    /// [`Snapshot::slate_change`]). The first confirmation of the current
+    /// change sets when the slate was up; anything else is ignored.
+    SlateShown {
+        change: u64,
+    },
 }
 
 /// What a dump did.
@@ -274,12 +280,18 @@ enum Pending {
         /// Audio is left out until the change is done (see
         /// [`EngineConfig::mute_under_slate`]).
         mute: bool,
+        /// When an overlay confirmed the slate (see [`Command::SlateShown`]).
+        shown: Option<Time>,
     },
-    /// Everything recorded before `started` was thrown away; the output waits for
-    /// a keyframe recorded under the slate, then builds `delay` back up behind it.
+    /// Everything recorded before `started` (from `from` on) was thrown away;
+    /// the output waits for a keyframe recorded under the slate, then builds
+    /// `delay` back up behind it. Without a confirmation that the slate shows,
+    /// it holds instead (see [`SLATE_CONFIRM_WAIT`]).
     Dump {
         delay: u64,
         started: Time,
+        from: u64,
+        shown: Option<Time>,
     },
     /// What had not aired was thrown away, and nothing covers what is recorded
     /// next: nothing from `from` on airs until the first keyframe there is
@@ -304,6 +316,11 @@ impl Pending {
         matches!(self, Pending::Mask { .. } | Pending::Dump { .. })
     }
 }
+
+/// How long a change covered by the slate waits for an overlay to confirm that
+/// the slate shows. Without it, a Mask delay change goes ahead (with a warning),
+/// and a dump holds rather than air what nothing may cover.
+pub const SLATE_CONFIRM_WAIT: Time = 2 * SEC;
 
 /// The last keyframe that aired before a hold, sent again about once a second
 /// so viewers see it still and the destination keeps getting data.
@@ -346,8 +363,14 @@ struct Output {
     history_short: bool,
     /// The memory limit made the delay shorter than the one asked for.
     memory_short: bool,
-    /// During a hold, the frame sent again.
+    /// During a hold (or while a dump waits for its slate), the frame sent again.
     hold: Option<HoldFrame>,
+    /// Numbers the changes the slate covers (see [`Command::SlateShown`]).
+    slate_change: u64,
+    /// The last Mask change went ahead without an overlay confirming the slate.
+    slate_unconfirmed: bool,
+    /// A dump asked for the slate, no overlay confirmed it, and it holds.
+    cover_lost: bool,
     /// Nothing after this sequence number is sent (see [`Engine::end_after`]).
     end_mark: Option<u64>,
     splices: u64,
@@ -412,6 +435,9 @@ impl Engine {
                 history_short: false,
                 memory_short: false,
                 hold: None,
+                slate_change: 0,
+                slate_unconfirmed: false,
+                cover_lost: false,
                 end_mark: None,
                 splices: 0,
                 dropped: 0,
@@ -672,6 +698,8 @@ impl Engine {
         o.history_short = false;
         o.memory_short = false;
         o.hold = None;
+        o.slate_unconfirmed = false;
+        o.cover_lost = false;
         o.gate = None;
         o.end_mark = None;
         if o.pending.covers() {
@@ -811,10 +839,29 @@ impl Engine {
         if let Command::SetDelay { ms, .. } = cmd {
             self.check_memory(ms)?;
         }
-        if !matches!(cmd, Command::Cancel) {
+        if !matches!(cmd, Command::Cancel | Command::SlateShown { .. }) {
             self.out.memory_short = false;
+            self.out.slate_unconfirmed = false;
+            self.out.cover_lost = false;
         }
         match cmd {
+            Command::SlateShown { change } => {
+                if change == self.out.slate_change {
+                    match &mut self.out.pending {
+                        Pending::Mask {
+                            shown,
+                            anchor: None,
+                            ..
+                        }
+                        | Pending::Dump { shown, .. }
+                            if shown.is_none() =>
+                        {
+                            *shown = Some(now);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // A dump's replay or hold is not a change to cancel: its delay is the
             // target, and cancelling a hold would air what it holds back.
             Command::Cancel
@@ -882,7 +929,9 @@ impl Engine {
                                 started: now,
                                 anchor: None,
                                 mute: false,
+                                shown: None,
                             });
+                            self.out.slate_change += 1;
                             self.out.mask_visible = true;
                         }
                     }
@@ -929,21 +978,24 @@ impl Engine {
         let frame = self.aired_keyframe(now);
         // Gone for good, including what a rewind could reach.
         self.drop_buffer();
-        if cover {
+        let from = self.next_seq;
+        let outcome = if cover {
             self.set_pending(Pending::Dump {
                 delay,
                 started: now,
+                from,
+                shown: None,
             });
+            self.out.slate_change += 1;
             self.out.mask_visible = true;
             DumpOutcome::Cover
         } else {
-            self.set_pending(Pending::Hold {
-                from: self.next_seq,
-                delay,
-            });
-            self.out.hold = frame;
+            self.set_pending(Pending::Hold { from, delay });
             DumpOutcome::Hold
-        }
+        };
+        // Shown until what is recorded next airs.
+        self.out.hold = frame;
+        outcome
     }
 
     /// The last video keyframe that aired, ready to send again during a hold.
@@ -993,6 +1045,14 @@ impl Engine {
             seq: None,
         });
         Some(next)
+    }
+
+    /// Stops sending the held frame, which showed until now: the output's
+    /// timestamps carry on from then, so it keeps the clock's pace.
+    fn end_hold(&mut self, now: Time) {
+        if let Some(h) = self.out.hold.take() {
+            self.out.last_out_ts += (now - h.last) / MS;
+        }
     }
 
     /// False when a dump would be refused: live (as the snapshot counts it), what
@@ -1245,11 +1305,22 @@ impl Engine {
                     started,
                     anchor,
                     mute,
+                    shown,
                 } => {
                     let anchor = match anchor {
                         Some(a) => a,
                         None => {
-                            let from = started + self.config.mask_margin_ms * MS;
+                            let margin = self.config.mask_margin_ms * MS;
+                            let from = match shown {
+                                Some(t) => t + margin,
+                                None if now >= started + SLATE_CONFIRM_WAIT => {
+                                    // No overlay said the slate shows: go ahead
+                                    // as if it had from the start, and say so.
+                                    self.out.slate_unconfirmed = true;
+                                    started + margin
+                                }
+                                None => return,
+                            };
                             let found = self
                                 .syncs
                                 .iter()
@@ -1262,6 +1333,7 @@ impl Engine {
                                         started,
                                         anchor: Some(a),
                                         mute,
+                                        shown,
                                     };
                                     a
                                 }
@@ -1280,18 +1352,34 @@ impl Engine {
                     }
                     return;
                 }
-                Pending::Dump { delay, started } => {
+                Pending::Dump {
+                    delay,
+                    started,
+                    from,
+                    shown,
+                } => {
+                    let after = match shown {
+                        Some(t) => t + self.config.mask_margin_ms * MS,
+                        None if now >= started + SLATE_CONFIRM_WAIT => {
+                            // No overlay said the slate shows: nothing may cover
+                            // what is recorded next, so it waits out the delay.
+                            self.out.cover_lost = true;
+                            self.set_pending(Pending::Hold { from, delay });
+                            continue;
+                        }
+                        None => return,
+                    };
                     // The first keyframe recorded once the slate is surely up.
-                    let from = started + self.config.mask_margin_ms * MS;
                     let Some(anchor) = self
                         .syncs
                         .iter()
-                        .find(|&&s| self.entry(s).is_some_and(|e| e.arrival >= from))
+                        .find(|&&s| self.entry(s).is_some_and(|e| e.arrival >= after))
                         .copied()
                     else {
                         return;
                     };
                     let arrival = self.entry(anchor).map_or(now, |e| e.arrival);
+                    self.end_hold(now);
                     // What the slate covers airs now, and the delay builds back up
                     // behind it as in mask mode (the slate stays up).
                     self.splice_to(anchor, now.saturating_sub(arrival));
@@ -1300,6 +1388,7 @@ impl Engine {
                         started,
                         anchor: Some(anchor),
                         mute: self.config.mute_under_slate,
+                        shown,
                     };
                 }
                 Pending::Hold { from, delay } => {
@@ -1312,18 +1401,16 @@ impl Engine {
                             self.out.next_seq = self.out.next_seq.max(m + 1);
                             self.out.pending = Pending::None;
                             self.out.hold = None;
+                            self.out.cover_lost = false;
                         }
                         return;
                     };
                     let arrival = self.entry(k).map_or(now, |e| e.arrival);
                     if now >= arrival + delay {
-                        // The held frame showed until now: carry the timestamps
-                        // on from then, so the output keeps the clock's pace.
-                        if let Some(h) = self.out.hold.take() {
-                            self.out.last_out_ts += (now - h.last) / MS;
-                        }
+                        self.end_hold(now);
                         self.splice_to(k, now - arrival);
                         self.out.pending = Pending::None;
+                        self.out.cover_lost = false;
                     }
                     return;
                 }
@@ -1368,12 +1455,12 @@ impl Engine {
         let mut wake = None;
         let mut emitted = 0usize;
         loop {
-            // After a dump, nothing airs until a keyframe recorded under the slate.
-            if matches!(self.out.pending, Pending::Dump { .. }) {
-                break;
-            }
-            // Nor during a hold, but the frame it shows.
-            if matches!(self.out.pending, Pending::Hold { .. }) {
+            // After a dump, nothing airs until a keyframe recorded under the
+            // slate, or during a hold, but the last frame that aired.
+            if matches!(
+                self.out.pending,
+                Pending::Dump { .. } | Pending::Hold { .. }
+            ) {
                 wake = self.emit_hold_frame(now, out);
                 break;
             }

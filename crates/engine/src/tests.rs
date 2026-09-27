@@ -231,6 +231,15 @@ impl Sim {
         self.e.snapshot(self.now)
     }
 
+    /// An overlay says it painted the slate it is asked to show now.
+    fn confirm_slate(&mut self) {
+        let change = self.snapshot().slate_change;
+        self.e
+            .command(self.now, Command::SlateShown { change })
+            .unwrap();
+        self.poll();
+    }
+
     fn media_sent(&self) -> impl Iterator<Item = (&Sent, InputInfo)> {
         self.media_sent_in(0..self.sent.len())
             .map(|(_, s, i)| (s, i))
@@ -1141,21 +1150,25 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
         mode: DelayMode::Mask,
         cover: true,
     });
+    s.confirm_slate();
     assert!(ack.pending);
     assert_eq!(ack.target_ms, 20_000);
     let snap = s.snapshot();
     assert!(snap.mask_visible, "the slate must go up at once");
     assert_eq!(snap.phase, Phase::Adding);
     // Only what the slate covers airs, starting within the slate margin and a
-    // keyframe interval: the destination keeps getting data.
+    // keyframe interval; until then, the last frame that aired, again: the
+    // destination keeps getting data.
     let margin = config().mask_margin_ms * MS;
     s.advance(margin + 2 * SEC);
     let first = s
         .media_sent_in(n..s.sent.len())
-        .next()
+        .find(|(_, x, _)| x.msg.seq.is_some())
         .expect("nothing aired after the dump");
     assert!(first.1.at - dumped_at <= margin + 2 * SEC);
     assert!(first.2.keyframe);
+    let held: Vec<_> = s.sent[n..first.0].iter().collect();
+    assert!(!held.is_empty() && held.iter().all(|x| x.msg.seq.is_none()));
     s.advance(20 * SEC);
     let snap = s.snapshot();
     assert!(
@@ -1166,7 +1179,7 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
     assert!((20_000..=22_100).contains(&snap.effective_ms), "{snap:?}");
     for (_, sent, i) in s.media_sent_in(n..s.sent.len()) {
         assert!(
-            i.arrival >= dumped_at + margin,
+            i.arrival >= dumped_at + margin || sent.msg.seq.is_none(),
             "content from before the dump (or before the slate was up) aired at {}",
             sent.at
         );
@@ -1179,7 +1192,7 @@ fn dump_throws_away_what_has_not_aired_and_rebuilds_behind_the_slate() {
     s.advance(10 * SEC);
     assert!(
         s.media_sent_in(n..s.sent.len())
-            .all(|(_, _, i)| i.arrival >= dumped_at),
+            .all(|(_, x, i)| i.arrival >= dumped_at || x.msg.seq.is_none()),
         "a rewind aired dumped content"
     );
     s.check_invariants_in(n..s.sent.len());
@@ -1338,6 +1351,7 @@ fn what_the_slate_covers_after_a_dump_airs_without_sound() {
             cover: true,
         });
         assert_eq!(ack.dump, Some(DumpOutcome::Cover));
+        s.confirm_slate();
         s.advance(10 * SEC);
         assert!(s.snapshot().mask_visible);
         let covered: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
@@ -1357,6 +1371,104 @@ fn what_the_slate_covers_after_a_dump_airs_without_sound() {
                 .any(|(_, _, i)| i.kind == Kind::Audio && i.arrival >= dumped_at)
         );
         s.check_invariants_in(n..s.sent.len());
+    }
+}
+
+#[test]
+fn a_dump_no_overlay_confirms_holds_once_the_wait_is_over() {
+    let mut s = dump_sim(config());
+    let dumped = unaired(&s);
+    let dumped_at = s.now;
+    let n = s.sent.len();
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: true,
+    });
+    assert_eq!(ack.dump, Some(DumpOutcome::Cover));
+    // A confirmation for another change counts for nothing.
+    let change = s.snapshot().slate_change;
+    s.e.command(s.now, Command::SlateShown { change: change - 1 })
+        .unwrap();
+    s.advance(SLATE_CONFIRM_WAIT - 100 * MS);
+    assert!(s.snapshot().mask_visible);
+    s.advance(200 * MS);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Holding, "{snap:?}");
+    assert!(!snap.mask_visible);
+    assert!(
+        snap.warnings.iter().any(|w| w.contains("still")),
+        "{snap:?}"
+    );
+    // Too late now.
+    s.confirm_slate();
+    assert_eq!(s.snapshot().phase, Phase::Holding);
+    s.advance(25 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert!(snap.warnings.is_empty(), "{snap:?}");
+    // Meanwhile the frame that aired last, and after it nothing sooner than
+    // the delay.
+    for (_, sent, i) in s.media_sent_in(n..s.sent.len()) {
+        assert!(
+            !dumped.contains(&id_of_input(&s, &i)),
+            "dumped content aired"
+        );
+        if i.arrival >= dumped_at {
+            assert!(
+                sent.at - i.arrival >= 20 * SEC,
+                "aired after {} us",
+                sent.at - i.arrival
+            );
+        } else {
+            assert_eq!(sent.msg.seq, None);
+        }
+    }
+    let held = s.sent[n..].iter().filter(|x| x.msg.seq.is_none()).count();
+    assert!(held >= 20, "{held} frames held");
+    s.check_invariants_in(n..s.sent.len());
+}
+
+/// The keyframe a Mask change will continue from, once chosen.
+fn mask_anchor(s: &Sim) -> Option<Time> {
+    match s.e.out.pending {
+        Pending::Mask {
+            anchor: Some(a), ..
+        } => s.e.entry(a).map(|e| e.arrival),
+        _ => None,
+    }
+}
+
+#[test]
+fn the_slate_margin_counts_from_the_overlays_confirmation() {
+    let margin = config().mask_margin_ms * MS;
+    for confirm_after in [None, Some(100 * MS), Some(1_800 * MS)] {
+        let mut s = live_sim();
+        let started = s.now;
+        s.cmd(Command::SetDelay {
+            ms: 10_000,
+            mode: DelayMode::Mask,
+        });
+        if let Some(after) = confirm_after {
+            s.advance(after);
+            s.confirm_slate();
+        }
+        // Until the confirmation or the end of the wait, nothing is chosen.
+        while mask_anchor(&s).is_none() {
+            assert!(s.now < started + 10 * SEC, "no anchor");
+            s.advance(50 * MS);
+        }
+        let anchor = mask_anchor(&s).unwrap();
+        let from = started + confirm_after.unwrap_or(0) + margin;
+        assert!(anchor >= from, "anchor {} us before {from}", from - anchor);
+        assert!(anchor < from + 2_100 * MS, "the first keyframe after it");
+        s.advance(20 * SEC);
+        let snap = s.snapshot();
+        assert_eq!(snap.phase, Phase::Delayed);
+        let warned = snap.warnings.iter().any(|w| w.contains("twice"));
+        assert_eq!(warned, confirm_after.is_none(), "{snap:?}");
+        // A confirmation once the anchor is chosen changes nothing.
+        s.confirm_slate();
+        s.check_invariants();
     }
 }
 
@@ -1762,6 +1874,8 @@ enum Op {
     Cancel,
     /// A dump, and whether an overlay would cover it.
     Dump(DelayMode, bool),
+    /// The overlay confirms the slate it shows.
+    ConfirmSlate,
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -1783,6 +1897,7 @@ fn change() -> impl Strategy<Value = Op> {
         1 => Just(Op::AfterAir),
         1 => (1u64..60).prop_map(Op::Reduce),
         1 => Just(Op::Cancel),
+        1 => Just(Op::ConfirmSlate),
     ]
 }
 
@@ -1832,6 +1947,7 @@ proptest! {
                 Op::AfterAir => { s.cmd(Command::GoLive(GoLiveWhen::AfterAir)); }
                 Op::Reduce(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Rewind }); }
                 Op::Cancel => { s.cmd(Command::Cancel); }
+                Op::ConfirmSlate => s.confirm_slate(),
                 Op::Dump(mode, cover) => {
                     let waiting = unaired(&s);
                     if let Ok(ack) = s.e.command(s.now, Command::Dump { mode, cover }) {
@@ -1946,6 +2062,7 @@ fn settled(ops: Vec<Op>, jitter: u64, keep_history: bool, connect_after: u64) ->
             Op::Cancel => {
                 s.cmd(Command::Cancel);
             }
+            Op::ConfirmSlate => s.confirm_slate(),
             Op::Dump(mode, cover) => {
                 let _ = s.e.command(s.now, Command::Dump { mode, cover });
                 s.poll();

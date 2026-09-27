@@ -85,7 +85,7 @@ one of the following:
 | `offline` | No encoder is connected. |
 | `live` | No delay. |
 | `delayed` | A delay is in effect. |
-| `adding` | Mask mode (or a dump under the slate) is filling the buffer while the slate is up. |
+| `adding` | Mask mode (or a dump under the slate) is filling the buffer while the slate is up (`mask_visible`; `slate_change` numbers the change, for the overlay's `slate-shown`). |
 | `going-live` | Waiting to remove the delay. |
 | `reducing` | Waiting for a keyframe to shorten the delay. |
 | `holding` | After a dump nothing covered: the last frame shows, still, until the delay is back. |
@@ -96,7 +96,14 @@ one of the following:
 
 - `{"type": "config", "config": {...}}` on connect and whenever settings change. With the dashboard token this is the same body as `GET /api/v1/config` (with `"scope": "admin"`). Dock and overlay tokens get only what those pages display: `{"scope": "control" | "read", "config": {"delay": {...}, "overlay": {...}}, "urls": {"obs_server": "..."}, "version": "...", "ui_build": "..."}`. `ui_build` names the script the built-in pages start from; the pages reload themselves when it changes (after an update, OBS may still run the old ones).
 - `{"type": "state", "state": {...}}` on connect and whenever the state changes (up to 4 times per second).
-- `{"type": "overlays", "count": 1}` on connect and whenever it changes: how many overlay pages are connected. The overlay page adds `&role=overlay` to the socket's address to be counted (its preview on the dashboard does not), so the dock can warn when nothing would cover a Mask change, and a dump holds the last frame instead of airing uncovered.
+- `{"type": "overlays", "count": 1, "active": 1}` on connect and whenever it changes: how many overlay pages are connected (`count`), and how many of them OBS said are on stream, in the program output (`active`). The overlay page adds `&role=overlay` to the socket's address to be counted (its preview on the dashboard does not). Only `active` ones let a dump use the slate (`cover`); with none, it holds the last frame instead of airing uncovered.
+
+The overlay page in OBS (and only a socket with `&role=overlay`) sends two messages; anything else, anything longer than 256 bytes, or more than 10 in a second, is ignored:
+
+- `{"type": "overlay", "active": true | false}` when OBS puts it on stream or takes it off (its `obsSourceActiveChanged` event), and again on reconnecting. OBS doesn't say whether a page is on stream when it loads, so a page says nothing until it changes (hide and show it once).
+- `{"type": "slate-shown", "change": 3}` once it has painted the slate for the change numbered `slate_change` in the state. A Mask change counts what OBS sends from the slate margin after this on as covered; without it within 2 s, the change goes ahead with a warning, and a dump holds instead of using the slate.
+
+Anyone with the overlay link can send these, so it decides whether a dump relies on the slate: keep it as private as the dock link.
 
 The server ignores what clients send, apart from closing the socket; messages over 64 KiB close the connection.
 

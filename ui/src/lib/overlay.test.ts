@@ -17,6 +17,7 @@ function state(
       history_ms: 60_000,
       buffered_bytes: 0,
       mask_visible: false,
+      slate_change: 0,
       history_short: opts.short ?? false,
       memory_short: opts.memory ?? false,
       ingest: {

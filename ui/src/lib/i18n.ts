@@ -36,7 +36,10 @@ const en = {
   "action.dump.slate.muted": "Your sound is left out until then.",
   "action.dump.slate.sound": "Your sound still airs under it.",
   "action.dump.hold":
-    "No overlay is connected to cover the stream, so viewers see the last frame they saw, still and silent, for about {delay}. Then the stream continues with the delay.",
+    "Nothing would cover the stream, so viewers see the last frame they saw, still and silent, for about {delay}. Then the stream continues with the delay.",
+  "action.dump.hold.noOverlay": "No overlay is connected.",
+  "action.dump.hold.unconfirmed":
+    "The overlay hasn't said it's on stream: after OBS starts, hide and show it once in OBS (the eye icon) so it can.",
   "dumped.replay": "Dumped. Viewers see the last {delay} again.",
   "dumped.cover": "Dumped. The slate covers the stream while the delay builds back up.",
   "dumped.hold": "Dumped. Viewers see a still frame until the delay is back.",

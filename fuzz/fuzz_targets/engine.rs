@@ -31,6 +31,8 @@ enum Op {
     PollBudget(u16),
     /// Throw away what has not aired (replaying, under the slate, or holding).
     Dump { mask: bool, cover: bool },
+    /// An overlay confirms the slate for the current change, or an old one.
+    ConfirmSlate { stale: bool },
     /// End the broadcast after what has arrived so far.
     EndAfter,
     /// Start a new broadcast after the end mark.
@@ -140,6 +142,10 @@ fuzz_target!(|input: Input| {
             Op::Dump { mask, cover } => {
                 let mode = if mask { DelayMode::Mask } else { DelayMode::Rewind };
                 let _ = e.command(now, Command::Dump { mode, cover });
+            }
+            Op::ConfirmSlate { stale } => {
+                let change = e.snapshot(now).slate_change.saturating_sub(u64::from(stale));
+                let _ = e.command(now, Command::SlateShown { change });
             }
             Op::EndAfter => {
                 if let Some(seq) = e.last_seq() {

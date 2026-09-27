@@ -11,7 +11,7 @@ All notable changes to stream-delay are listed here. The format follows
 - A dump no longer airs you live when nothing covers the stream. It now does
   the first of three things that can happen: a **replay** of the last stretch
   (Rewind, with enough buffer), the overlay slate covering the stream while the
-  delay builds back up (**cover**, only while an overlay page is connected), or
+  delay builds back up (**cover**, only while OBS has the overlay on stream), or
   else a **hold**: viewers see the last frame they saw, still, until what you
   do after the dump has the full delay. Before, a Mask dump, or a Rewind dump
   without enough buffer, with the rolling buffer off, while the destination was
@@ -29,12 +29,23 @@ All notable changes to stream-delay are listed here. The format follows
   turns this off.
 
 - The Mask slate appears at once instead of fading in over 0.35 s, and what OBS
-  sends counts as covered by it only 1.5 s after it is asked for (was 0.5 s,
-  shorter than the fade plus an encoder's look-ahead, so the first frames after
-  the switch could show gameplay through a half-drawn slate). The margin is a
-  new setting, **Slate margin** on the Delay settings tab (`delay.mask_margin_ms`,
-  500 to 5000 ms); raise it for encoders with look-ahead. Mask changes and dumps
-  show the slate about a second longer.
+  sends counts as covered by it only once the overlay says it has drawn the
+  slate, and 1.5 s after that (was 0.5 s after it was asked for, whether or not
+  any overlay drew it: shorter than the fade plus an encoder's look-ahead, so
+  the first frames after the switch could show gameplay through a half-drawn
+  slate). The margin is a new setting, **Slate margin** on the Delay settings
+  tab (`delay.mask_margin_ms`, 500 to 5000 ms); raise it for encoders with
+  look-ahead. Mask changes and dumps show the slate about a second longer. If
+  no overlay says it drew the slate within 2 s, a Mask change goes ahead with a
+  warning that viewers may have seen some of the stream twice, and a dump holds
+  the last frame instead.
+- The overlay in OBS tells stream-delay whether OBS has it on stream (in the
+  live scene), and only then can a dump use the slate. OBS doesn't say so for
+  an overlay that is already on stream when OBS starts or the overlay is
+  refreshed: hide and show it once (the eye icon); the dock says when that is
+  needed. The `overlays` event gains `active`, the number of overlays on
+  stream; the state gains `slate_change`. Anyone with the overlay link can now
+  report these, so keep it as private as the dock link.
 
 - Building from source needs Rust 1.89 or newer. The declared minimum was 1.88,
   but two dependencies already needed 1.89; CI now checks the minimum. Builds

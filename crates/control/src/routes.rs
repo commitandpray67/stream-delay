@@ -16,9 +16,9 @@ use serde::Deserialize;
 use serde_json::json;
 use streamdelay_config::SecretError;
 use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError, RelayState};
-use tokio::sync::watch;
 
 use crate::auth::{self, Scope};
+use crate::overlays::{Counts, Page};
 use crate::{AppState, diagnostics, obs_routes, settings, ui};
 
 /// Error body: `{"error": "..."}`.
@@ -273,9 +273,13 @@ struct EventsQuery {
 
 /// Pushes `{"type":"state","state":{...}}` whenever the state changes,
 /// `{"type":"config","config":{...}}` on connect and whenever settings change, and
-/// `{"type":"overlays","count":n}` on connect and whenever an overlay page
-/// connects or leaves. The config is the full settings for dashboard links, and
-/// only what the dock and overlay display for other links.
+/// `{"type":"overlays","count":n,"active":m}` on connect and whenever an overlay
+/// page connects, leaves, or goes on or off stream. The config is the full
+/// settings for dashboard links, and only what the dock and overlay display for
+/// other links.
+///
+/// The overlay page in OBS (`role=overlay`) says what OBS tells it (see
+/// [`FromOverlay`]); other connections only send pings and close frames.
 async fn events(
     State(st): State<AppState>,
     Extension(scope): Extension<Scope>,
@@ -283,25 +287,61 @@ async fn events(
     ws: WebSocketUpgrade,
 ) -> Response {
     let overlay = query.role.as_deref() == Some("overlay");
-    // Clients only ever send pings and close frames.
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
         .on_upgrade(move |socket| stream_events(st, scope, overlay, socket))
 }
 
-/// Counts a connected overlay page for as long as it lives.
-struct Counted(watch::Sender<usize>);
+/// What the overlay page in OBS says. Anything else, or more than
+/// [`OVERLAY_MESSAGES_PER_SECOND`], is ignored.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum FromOverlay {
+    /// OBS put the page on stream (`true`) or took it off.
+    Overlay { active: bool },
+    /// The page painted the slate for this change.
+    SlateShown { change: u64 },
+}
 
-impl Counted {
-    fn new(count: &watch::Sender<usize>) -> Self {
-        count.send_modify(|n| *n += 1);
-        Self(count.clone())
+const OVERLAY_MESSAGES_PER_SECOND: u32 = 10;
+/// Longer than any message an overlay page sends.
+const MAX_OVERLAY_MESSAGE: usize = 256;
+
+/// Lets [`OVERLAY_MESSAGES_PER_SECOND`] through each second.
+struct RateLimit {
+    since: tokio::time::Instant,
+    taken: u32,
+}
+
+impl RateLimit {
+    fn new() -> Self {
+        Self {
+            since: tokio::time::Instant::now(),
+            taken: 0,
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let now = tokio::time::Instant::now();
+        if now.duration_since(self.since) >= Duration::from_secs(1) {
+            self.since = now;
+            self.taken = 0;
+        }
+        self.taken += 1;
+        self.taken <= OVERLAY_MESSAGES_PER_SECOND
     }
 }
 
-impl Drop for Counted {
-    fn drop(&mut self) {
-        self.0.send_modify(|n| *n = n.saturating_sub(1));
+async fn from_overlay(st: &AppState, page: &Page, text: &str) {
+    if text.len() > MAX_OVERLAY_MESSAGE {
+        return;
+    }
+    match serde_json::from_str::<FromOverlay>(text) {
+        Ok(FromOverlay::Overlay { active }) => page.set_active(active),
+        Ok(FromOverlay::SlateShown { change }) => {
+            let _ = st.relay().slate_shown(change).await;
+        }
+        Err(_) => {}
     }
 }
 
@@ -310,12 +350,15 @@ const MAX_WS_MESSAGE: usize = 64 * 1024;
 
 async fn stream_events(st: AppState, scope: Scope, overlay: bool, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
-    let _counted = overlay.then(|| Counted::new(&st.shared.overlays));
+    let page = overlay.then(|| st.shared.overlays.join());
+    let mut limit = RateLimit::new();
     let mut state = st.relay().subscribe();
     let mut config = st.shared.config_tx.subscribe();
     let mut overlays = st.shared.overlays.subscribe();
-    let overlays_msg =
-        |n: usize| Message::Text(json!({ "type": "overlays", "count": n }).to_string().into());
+    let overlays_msg = |c: Counts| {
+        let msg = json!({ "type": "overlays", "count": c.count, "active": c.active });
+        Message::Text(msg.to_string().into())
+    };
     let state_msg = |s: &RelayState| {
         let s = visible_state(s.clone(), scope);
         Message::Text(json!({ "type": "state", "state": s }).to_string().into())
@@ -364,6 +407,14 @@ async fn stream_events(st: AppState, scope: Scope, overlay: bool, socket: WebSoc
             }
             incoming = rx.next() => match incoming {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(page) = &page
+                        && limit.allow()
+                    {
+                        from_overlay(&st, page, &text).await;
+                    }
+                    continue;
+                }
                 _ => continue,
             },
             _ = ping.tick() => Message::Ping(Vec::new().into()),
@@ -378,16 +429,16 @@ async fn stream_events(st: AppState, scope: Scope, overlay: bool, socket: WebSoc
 mod tests {
     use super::*;
 
-    #[test]
-    fn overlay_pages_are_counted_while_connected() {
-        let (count, rx) = watch::channel(0);
-        let a = Counted::new(&count);
-        let b = Counted::new(&count);
-        assert_eq!(*rx.borrow(), 2);
-        drop(a);
-        assert_eq!(*rx.borrow(), 1);
-        drop(b);
-        assert_eq!(*rx.borrow(), 0);
+    #[tokio::test(start_paused = true)]
+    async fn an_overlay_page_says_at_most_ten_things_a_second() {
+        let mut limit = RateLimit::new();
+        assert!((0..10).all(|_| limit.allow()));
+        assert!(!limit.allow());
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(!limit.allow());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!((0..10).all(|_| limit.allow()));
+        assert!(!limit.allow());
     }
 
     #[test]

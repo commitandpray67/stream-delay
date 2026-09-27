@@ -2,7 +2,8 @@
   // Transparent browser source for OBS: delay badge, change popups and the mask slate.
   // Add it to your scenes at the canvas size (for example 1920x1080).
   import { formatDelay } from "../lib/format";
-  import { live } from "../lib/live.svelte";
+  import { live, sendLive, whenConnected } from "../lib/live.svelte";
+  import { inObs, OverlayReporter } from "../lib/obs";
   import { badgeDelay, DelayAnnouncer } from "../lib/overlay";
 
   const params = new URLSearchParams(location.search);
@@ -15,6 +16,20 @@
 
   let popup = $state("");
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // In OBS (not a preview, nor a browser tab), the page says whether it is on
+  // stream and when it has painted the slate: only then does the slate count
+  // as covering the stream.
+  const reporter = !preview && inObs() ? new OverlayReporter(sendLive) : null;
+  if (reporter) {
+    reporter.listen(window);
+    whenConnected(() => reporter.connected());
+  }
+  $effect(() => {
+    // Runs once the slate is in the page.
+    const d = live.state?.delay;
+    if (reporter && masked && d?.mask_visible) reporter.slateShown(d.slate_change);
+  });
+
   const announcer = new DelayAnnouncer();
   $effect(() => {
     const message = announcer.update(live.state);

@@ -48,7 +48,10 @@ test channel) to see what viewers see.
 | 10 | Delay 30 s, then **End stream** | The last 30 s air, then the broadcast ends in Inspector. Stopping and starting the stream in OBS starts a new one. |
 | 11 | Delay 30 s, then **End stream now** | The broadcast ends in Inspector at once; the last 30 s never air. |
 | 12 | Setup → turn off the rolling buffer, then preset 30 s | The slate covers the stream while the delay builds (Mask); nothing repeats. |
-| 13 | Stream 1 h with a change every few minutes | No Inspector warnings besides the reconnect in step 9 and the ends in steps 8, 10 and 11; memory in Task Manager/Activity Monitor stays flat. |
+| 13 | Put a running clock (time.is) in the game scene. Mask 20 s, then with the overlay live, **Dump buffer** in Mask mode. Repeat with x264 at *veryfast* and *slow*, NVENC with look-ahead, and Apple VideoToolbox. | On a recording of the channel, no frame of the clock appears after the slate goes up until the delay is back. |
+| 14 | Quit and restart OBS with the overlay in the live scene; open the dock | The dock says the overlay hasn't said it's on stream, and a dump would hold. Hide and show the overlay once (eye icon): the dock now says a dump would use the slate. |
+| 15 | Put the overlay only in the studio-mode preview scene, not the live one | The overlay doesn't count as on stream: a dump would hold. |
+| 16 | Stream 1 h with a change every few minutes | No Inspector warnings besides the reconnect in step 9 and the ends in steps 8, 10 and 11; memory in Task Manager/Activity Monitor stays flat. |
 
 For each step, note anything odd: freezes (and how long), artifacts, audio
 drift, player errors, and whether the low-latency and normal Twitch players

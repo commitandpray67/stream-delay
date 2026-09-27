@@ -39,11 +39,20 @@ for about a minute) and never see any gameplay twice. Mask mode needs the
 obs-websocket.
 
 The slate takes a moment to reach the stream: the overlay has to draw it, and
-your encoder to send the frames that show it. Only what OBS sends at least the
-**slate margin** (1.5 s by default) after you press the button counts as
-covered. Encoders with look-ahead (x264 at slower presets, NVENC with
-look-ahead) take longer; if gameplay shows through at the start of a Mask
-change, raise **Slate margin** on the **Delay settings** tab.
+your encoder to send the frames that show it. The overlay in OBS says when it
+has drawn the slate, and only what OBS sends at least the **slate margin**
+(1.5 s by default) after that counts as covered. Encoders with look-ahead (x264
+at slower presets, NVENC with look-ahead) take longer; if gameplay shows
+through at the start of a Mask change, raise **Slate margin** on the **Delay
+settings** tab. If no overlay says so within 2 s, the change goes ahead as if
+the slate had been up from the start, and the dock warns that viewers may
+have seen some of the stream twice.
+
+The overlay also tells stream-delay whether OBS has it on stream (in the scene
+that is live). OBS says so when that changes, but not when OBS starts or the
+overlay is refreshed while it already is: then, until you hide and show the
+overlay once in OBS (the eye icon next to it), a dump holds the last frame
+instead of using the slate, and the dock says so before you confirm.
 
 ## Removing or lowering delay
 
@@ -78,9 +87,10 @@ same delay. What viewers see meanwhile is the first of these that can happen:
   the buffer to reach back about twice the delay (a minute for a 30 s delay),
   and the connection to Twitch to be up: of what was sent over a connection
   that dropped, stream-delay can't tell what arrived, so it won't replay it.
-- **Cover** (Mask mode, or no replay possible), only while an overlay page is
-  connected: the overlay slate goes up at once and covers the stream while the
-  delay builds back up (about as long as the delay). What it covers airs almost
+- **Cover** (Mask mode, or no replay possible), only while OBS has the
+  overlay on stream (see above): the overlay slate goes up at once and covers
+  the stream while the delay builds back up (about as long as the delay). If
+  the overlay doesn't say it drew the slate within 2 s, the dump holds instead. What it covers airs almost
   live; its sound is left out until the delay is back (**Leave out the sound
   while the slate covers a dump**, on the **Delay settings** tab).
 - **Hold**, otherwise: viewers see the last frame they saw, still and silent,

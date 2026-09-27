@@ -672,10 +672,10 @@ async fn a_mask_dump_throws_away_what_has_not_aired_under_the_slate() {
     let dumped = Instant::now();
     let ack = relay.dump(DelayMode::Mask, true).await.unwrap();
     assert_eq!(ack.dump, Some(DumpOutcome::Cover));
-    assert!(
-        relay.state().delay.mask_visible,
-        "the slate must go up at once"
-    );
+    let state = relay.state();
+    assert!(state.delay.mask_visible, "the slate must go up at once");
+    // The overlay says it shows the slate.
+    relay.slate_shown(state.delay.slate_change).await.unwrap();
     p.stream_for(Duration::from_secs(6)).await;
     let state = relay.state();
     assert!(!state.delay.mask_visible, "the slate stayed up");
@@ -776,6 +776,44 @@ async fn a_rewind_dump_with_the_destination_gone_does_not_replay() {
     let ack = relay.dump(DelayMode::Rewind, false).await.unwrap();
     assert_eq!(ack.dump, Some(DumpOutcome::Hold), "{ack:?}");
     assert!(!relay.state().delay.mask_visible);
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_slate_waits_for_an_overlay_to_confirm_it() {
+    let (sink, _log, _kill) = start_sink().await;
+    let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(2)).await;
+
+    // A Mask change the overlay confirms goes ahead quietly...
+    relay.set_delay(2_000, DelayMode::Mask).await.unwrap();
+    let change = relay.state().delay.slate_change;
+    relay.slate_shown(change).await.unwrap();
+    p.stream_for(Duration::from_secs(7)).await;
+    let state = relay.state();
+    assert_eq!(state.delay.phase, Phase::Delayed, "{:?}", state.delay);
+    assert!(state.delay.warnings.is_empty(), "{:?}", state.delay);
+
+    // ...one it does not confirm goes ahead too, and says so.
+    relay.set_delay(4_000, DelayMode::Mask).await.unwrap();
+    p.stream_for(Duration::from_secs(10)).await;
+    let state = relay.state();
+    assert_eq!(state.delay.phase, Phase::Delayed, "{:?}", state.delay);
+    assert!(
+        state.delay.warnings.iter().any(|w| w.contains("twice")),
+        "{:?}",
+        state.delay
+    );
+
+    // A dump it does not confirm holds rather than air what nothing covers.
+    let ack = relay.dump(DelayMode::Mask, true).await.unwrap();
+    assert_eq!(ack.dump, Some(DumpOutcome::Cover));
+    p.stream_for(Duration::from_millis(2_500)).await;
+    let state = relay.state();
+    assert_eq!(state.delay.phase, Phase::Holding, "{:?}", state.delay);
+    assert!(!state.delay.mask_visible);
     p.stop().await;
     relay.shutdown().await;
 }

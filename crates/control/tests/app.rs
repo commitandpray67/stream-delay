@@ -582,7 +582,10 @@ async fn live_updates_carry_what_each_link_may_see() {
     );
     assert_eq!(next(&mut dashboard, |_| true).await["type"], "state");
     let count = next(&mut dashboard, |_| true).await;
-    assert_eq!(count, serde_json::json!({"type": "overlays", "count": 0}));
+    assert_eq!(
+        count,
+        serde_json::json!({"type": "overlays", "count": 0, "active": 0})
+    );
 
     // The overlay page sees only what it shows, and is counted while open.
     let mut overlay = events(&app, &scoped_token(&admin, Scope::Read), "&role=overlay").await;
@@ -612,5 +615,67 @@ async fn live_updates_carry_what_each_link_may_see() {
     let (s, _) = http(&app, "PUT", "/api/v1/delay", r#"{"seconds": 4}"#).await;
     assert_eq!(s, 200);
     next(&mut dock, |v| v["state"]["delay"]["target_ms"] == 4000).await;
+    app.shutdown().await;
+}
+
+async fn say(ws: &mut Events, text: &str) {
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn only_an_overlay_page_obs_says_is_on_stream_counts_as_covering() {
+    use streamdelay_control::{Scope, scoped_token};
+    let app = App::start(AppOptions {
+        config_path: None,
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    let admin = app.config().api.token;
+    let read = scoped_token(&admin, Scope::Read);
+    let mut dashboard = events(&app, &admin, "").await;
+    next(&mut dashboard, of_type("overlays")).await;
+    let counts = |v: serde_json::Value| (v["count"].clone(), v["active"].clone());
+
+    // Connected, but OBS has not said it is on stream: it does not count yet.
+    let mut overlay = events(&app, &read, "&role=overlay").await;
+    let v = next(&mut dashboard, of_type("overlays")).await;
+    assert_eq!(counts(v), (1.into(), 0.into()));
+    say(&mut overlay, r#"{"type":"overlay","active":true}"#).await;
+    let v = next(&mut dashboard, of_type("overlays")).await;
+    assert_eq!(counts(v), (1.into(), 1.into()));
+    say(&mut overlay, r#"{"type":"overlay","active":false}"#).await;
+    let v = next(&mut dashboard, of_type("overlays")).await;
+    assert_eq!(counts(v), (1.into(), 0.into()));
+
+    // Only overlay pages are listened to; junk and floods are ignored.
+    let dock_token = scoped_token(&admin, Scope::Control);
+    let mut dock = events(&app, &dock_token, "").await;
+    say(&mut dock, r#"{"type":"overlay","active":true}"#).await;
+    say(&mut dashboard, r#"{"type":"overlay","active":true}"#).await;
+    say(&mut overlay, r#"{"type":"overlay","active":"yes"}"#).await;
+    say(&mut overlay, "not json").await;
+    for _ in 0..10 {
+        say(&mut overlay, r#"{"type":"slate-shown","change":0}"#).await;
+    }
+    // Its 13th message in a second: ignored.
+    say(&mut overlay, r#"{"type":"overlay","active":true}"#).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut probe = events(&app, &dock_token, "").await;
+    let v = next(&mut probe, of_type("overlays")).await;
+    assert_eq!(counts(v), (1.into(), 0.into()));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    say(&mut overlay, r#"{"type":"overlay","active":true}"#).await;
+    let v = next(&mut probe, of_type("overlays")).await;
+    assert_eq!(counts(v), (1.into(), 1.into()));
+
+    // Leaving takes it off.
+    drop(overlay);
+    let v = next(&mut probe, of_type("overlays")).await;
+    assert_eq!(counts(v), (0.into(), 0.into()));
     app.shutdown().await;
 }
