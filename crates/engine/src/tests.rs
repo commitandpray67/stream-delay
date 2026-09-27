@@ -776,6 +776,23 @@ fn reconnect(s: &mut Sim) -> usize {
 }
 
 #[test]
+fn nothing_is_recorded_without_a_publisher_or_a_payload() {
+    let mut s = live_sim();
+    let n = s.sent.len();
+    let ts = s.ts_base + s.video_index * FRAME_MS;
+    s.e.ingest(s.now, Kind::Video, ts, Bytes::new());
+    s.stop_encoder();
+    // A message still arriving from a publisher that has gone.
+    let late = payload(&[0x17, 0x01, 0, 0, 0], 999_999);
+    s.e.ingest(s.now, Kind::Video, ts, late);
+    s.advance(SEC);
+    for x in &s.sent[n..] {
+        assert!(!x.msg.payload.is_empty(), "an empty message went out");
+        assert_ne!(id_of(&x.msg.payload), Some(999_999), "a late message aired");
+    }
+}
+
+#[test]
 fn a_repeated_codec_header_still_comes_before_older_keyframes() {
     // Some encoders send their decoder configuration again, unchanged. Keyframes
     // recorded before the repeat still need it, after a reconnect or a splice.
