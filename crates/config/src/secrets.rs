@@ -542,8 +542,10 @@ mod tests {
     fn memory_store_round_trip() {
         let s = MemorySecrets::default();
         assert_eq!(s.get("k"), None);
+        assert_eq!(s.try_get("k").unwrap(), None);
         s.set("k", "live_123").unwrap();
         assert_eq!(s.get("k").as_deref(), Some("live_123"));
+        assert_eq!(s.try_get("k").unwrap().as_deref(), Some("live_123"));
         s.delete("k").unwrap();
         assert_eq!(s.get("k"), None);
     }

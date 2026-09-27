@@ -658,6 +658,37 @@ mod tests {
     }
 
     #[test]
+    fn loading_leaves_a_current_file_as_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "# Mine.\n[api]\ntoken = \"0123456789abcdef\"\n";
+        fs::write(&path, text).unwrap();
+        Config::load_or_create(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        // Without a token, one is made and kept.
+        fs::write(&path, "[api]\ntoken = \"\"\n").unwrap();
+        let c = Config::load_or_create(&path).unwrap();
+        assert_eq!(c.api.token.len(), 32);
+        assert_eq!(
+            Config::load_or_create(&path).unwrap().api.token,
+            c.api.token
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let bytes = b"[api]\ntoken = \"\xff\xfe\"\n";
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            Config::load_or_create(&path),
+            Err(ConfigError::Read { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
     fn invalid_file_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
