@@ -837,6 +837,36 @@ fn a_reconnect_resumes_right_after_what_the_destination_took() {
 }
 
 #[test]
+fn an_encoder_connection_without_a_keyframe_does_not_hold_up_the_start() {
+    // The encoder's first connection drops before its first keyframe; it
+    // reconnects. The broadcast starts from the new connection's first keyframe.
+    for keep_history in [false, true] {
+        let mut s = Sim::new(EngineConfig {
+            keep_history,
+            ..config()
+        });
+        s.encoder_on = false;
+        let first = s.session;
+        for i in 0..30 {
+            s.push(Kind::Video, i * FRAME_MS, &[0x27, 0x01, 0, 0, 0], true);
+            s.video_index += 1;
+            s.now += FRAME_MS * MS;
+        }
+        s.stop_encoder();
+        s.advance(SEC);
+        s.connect();
+        s.start_encoder(0);
+        s.advance(5 * SEC);
+        let (_, video) = s
+            .media_sent()
+            .find(|(_, i)| i.kind == Kind::Video)
+            .expect("nothing aired");
+        assert!(video.session != first && video.keyframe, "{video:?}");
+        s.check_invariants();
+    }
+}
+
+#[test]
 fn a_repeated_codec_header_still_comes_before_older_keyframes() {
     // Some encoders send their decoder configuration again, unchanged. Keyframes
     // recorded before the repeat still need it, after a reconnect or a splice.
