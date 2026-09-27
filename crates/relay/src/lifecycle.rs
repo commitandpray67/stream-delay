@@ -672,6 +672,66 @@ mod tests {
     }
 
     #[test]
+    fn a_new_stream_while_the_end_airs_gets_a_new_broadcast() {
+        // End stream (after air), then the streamer stops and starts the stream
+        // in the encoder while the end is still airing: going on after all.
+        let mut life = Lifecycle::new(GRACE);
+        let now = Instant::now();
+        let f = Facts {
+            destination: true,
+            has_mark: true,
+            output_wanted: true,
+            connected: true,
+            ..Default::default()
+        };
+        let mut fx = Vec::new();
+        life.publishing(now, false, &f, &mut fx);
+        assert_eq!(life.tick(now, &f, &mut fx), Tick::Start);
+        life.started(now);
+        life.end_after_air(now, &f, &mut fx);
+        assert!(life.ending());
+        life.encoder_left(now, true);
+        life.publishing(now, false, &f, &mut fx);
+        assert!(
+            matches!(life.plan(), Plan::RestartAtMark { .. }),
+            "{:?}",
+            life.plan()
+        );
+        // Once the end has aired, the new stream gets its own broadcast.
+        let aired = Facts {
+            end_reached: true,
+            backlog_empty: true,
+            ..f
+        };
+        fx.clear();
+        life.tick(now, &aired, &mut fx);
+        assert!(fx.contains(&Effect::RestartAfterEnd), "{fx:?}");
+        assert_eq!(life.plan(), Plan::Live);
+    }
+
+    #[test]
+    fn a_stream_that_could_not_start_is_discarded_once_the_encoder_is_gone() {
+        // No destination set up while streaming; the encoder leaves for good.
+        let mut life = Lifecycle::new(GRACE);
+        let now = Instant::now();
+        let f = Facts {
+            destination: true,
+            has_mark: true,
+            has_buffered: true,
+            output_wanted: true,
+            ..Default::default()
+        };
+        let mut fx = Vec::new();
+        life.publishing(now, false, &f, &mut fx);
+        life.encoder_left(now, true);
+        let later = now + GRACE;
+        fx.clear();
+        life.start_failed(later, &mut fx);
+        // What it sent must not air once the destination is set up.
+        assert_eq!(fx, vec![Effect::Discard], "{fx:?}");
+    }
+
+    #[test]
     fn end_stream_during_a_restart_ends_after_the_previous_end() {
         let mut life = Lifecycle::new(GRACE);
         let now = Instant::now();
