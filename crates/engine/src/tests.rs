@@ -2027,12 +2027,44 @@ proptest! {
     }
 }
 
-/// Runs `ops` (no destination outages), then nothing for longer than the
-/// largest delay, and returns the state.
-fn settled(ops: Vec<Op>, jitter: u64, keep_history: bool, connect_after: u64) -> Snapshot {
+/// Viewers get the delay asked for: live when that is 0, else no less (unless
+/// the buffer was too short for it, which the state says) and no more than a
+/// keyframe interval over, from rounding back to one (frames coming up to
+/// `jitter` ms late).
+fn settles_at_the_one_asked_for(snap: Snapshot, jitter: u64) -> Result<(), TestCaseError> {
+    prop_assert!(
+        matches!(snap.phase, Phase::Live | Phase::Delayed),
+        "{snap:?}"
+    );
+    let (target, effective) = (snap.target_ms, snap.effective_ms);
+    if target == 0 {
+        // Live, from the newest keyframe: no rounding back.
+        prop_assert_eq!(snap.phase, Phase::Live, "{:?}", snap);
+    } else if !snap.history_short {
+        // A keyframe interval, frames coming up to 2 × jitter late.
+        let gop = GOP_FRAMES * FRAME_MS + GOP_FRAMES * jitter;
+        prop_assert!(
+            effective + 100 >= target && effective <= target + gop + 500,
+            "target {target} ms, effective {effective} ms: {snap:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Runs `ops`, then nothing for longer than the largest delay, and returns
+/// the state. Destination outages only with `restore_after_reconnect`: without
+/// it the delay they add stays, as documented.
+fn settled(
+    ops: Vec<Op>,
+    jitter: u64,
+    keep_history: bool,
+    connect_after: u64,
+    restore_after_reconnect: bool,
+) -> Snapshot {
     let mut s = Sim::new(EngineConfig {
         max_delay_ms: 60_000,
         keep_history,
+        restore_after_reconnect,
         ..Default::default()
     });
     s.jitter = jitter;
@@ -2070,11 +2102,29 @@ fn settled(ops: Vec<Op>, jitter: u64, keep_history: bool, connect_after: u64) ->
                 s.poll();
             }
             Op::EncoderRestart => restart_encoder(&mut s),
-            Op::DropOutput | Op::Outage(_) => unreachable!("outages are left out"),
+            Op::DropOutput | Op::Outage(_) => {
+                assert!(restore_after_reconnect, "outages are left out");
+                let down = match op {
+                    Op::Outage(sec) => sec * SEC,
+                    _ => 1_500 * MS,
+                };
+                let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+                s.e.output_disconnected(s.now, last);
+                s.advance(down);
+                s.connect();
+            }
         }
     }
     // Longer than the largest delay, and a mask or dump building it up.
     s.advance(75 * SEC);
+    // A change under way through outages (airing what is buffered before going
+    // live, say) keeps the delay they added until it is done.
+    for _ in 0..60 {
+        if matches!(s.snapshot().phase, Phase::Live | Phase::Delayed) {
+            break;
+        }
+        s.advance(5 * SEC);
+    }
     s.snapshot()
 }
 
@@ -2090,7 +2140,7 @@ proptest! {
     ///
     /// Left out: a lost destination connection, after which the delay grows by
     /// the outage (up to the maximum) and stays until it is changed, as
-    /// documented; and dumps and
+    /// documented, unless it is set to go back (the next property); and dumps and
     /// encoder restarts, which leave gaps in the buffer: a delay change around
     /// them can still land a few seconds over (see the next property, and the
     /// two gap tests above for the cases that no longer do).
@@ -2101,20 +2151,32 @@ proptest! {
         keep_history in any::<bool>(),
         connect_after in 0u64..4_000,
     ) {
-        let snap = settled(ops, jitter, keep_history, connect_after);
-        prop_assert!(matches!(snap.phase, Phase::Live | Phase::Delayed), "{snap:?}");
-        let (target, effective) = (snap.target_ms, snap.effective_ms);
-        if target == 0 {
-            // Live, from the newest keyframe: no rounding back.
-            prop_assert_eq!(snap.phase, Phase::Live, "{:?}", snap);
-        } else if !snap.history_short {
-            // A keyframe interval, frames coming up to 2 × jitter late.
-            let gop = GOP_FRAMES * FRAME_MS + GOP_FRAMES * jitter;
-            prop_assert!(
-                effective + 100 >= target && effective <= target + gop + 500,
-                "target {target} ms, effective {effective} ms: {snap:?}"
-            );
-        }
+        settles_at_the_one_asked_for(
+            settled(ops, jitter, keep_history, connect_after, false),
+            jitter,
+        )?;
+    }
+
+    /// Set to go back to the delay set after a reconnect: the same, with
+    /// destination outages too.
+    #[test]
+    fn with_restore_the_delay_settles_at_the_one_asked_for_after_outages(
+        ops in prop::collection::vec(
+            prop_oneof![
+                11 => change(),
+                1 => Just(Op::DropOutput),
+                2 => (1u64..40).prop_map(Op::Outage),
+            ],
+            1..25,
+        ),
+        jitter in 0u64..50,
+        keep_history in any::<bool>(),
+        connect_after in 0u64..4_000,
+    ) {
+        settles_at_the_one_asked_for(
+            settled(ops, jitter, keep_history, connect_after, true),
+            jitter,
+        )?;
     }
 
     /// With dumps and encoder restarts too: a change never stays pending once
@@ -2127,7 +2189,7 @@ proptest! {
         keep_history in any::<bool>(),
         connect_after in 0u64..4_000,
     ) {
-        let snap = settled(ops, jitter, keep_history, connect_after);
+        let snap = settled(ops, jitter, keep_history, connect_after, false);
         prop_assert!(matches!(snap.phase, Phase::Live | Phase::Delayed), "{snap:?}");
         if !snap.history_short {
             prop_assert!(snap.effective_ms + 100 >= snap.target_ms, "{snap:?}");
@@ -2776,6 +2838,36 @@ fn least_wait(s: &Sim, from: usize) -> Time {
         .map(|(_, sent, info)| sent.at - info.arrival)
         .min()
         .expect("nothing sent")
+}
+
+#[test]
+fn cancelling_a_change_an_outage_stretched_comes_back_to_the_maximum() {
+    let mut s = Sim::new(EngineConfig {
+        max_delay_ms: 60_000,
+        ..config()
+    });
+    s.connect();
+    s.advance(80 * SEC);
+    s.cmd(Command::SetDelay {
+        ms: 50_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(10 * SEC);
+    // Airing what is buffered before going live: 50 s of it.
+    s.cmd(Command::GoLive(GoLiveWhen::AfterAir));
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    s.advance(30 * SEC);
+    s.connect();
+    s.advance(SEC);
+    // The change under way keeps the delay the outage added: 80 s.
+    assert!(s.snapshot().effective_ms > 75_000, "{:?}", s.snapshot());
+    s.cmd(Command::Cancel);
+    s.advance(5 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.target_ms, 60_000, "{snap:?}");
+    assert_eq!(snap.phase, Phase::Delayed, "{snap:?}");
+    assert!(snap.effective_ms <= 62_100, "{snap:?}");
 }
 
 #[test]

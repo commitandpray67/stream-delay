@@ -897,9 +897,13 @@ impl Engine {
                 ) => {}
             Command::Cancel => {
                 self.set_pending(Pending::None);
-                // An outage can have taken the delay past the maximum; the
-                // output comes back down to it (see `back_under_max`).
+                // An outage during the change can have taken the delay past the
+                // maximum (the change put off coming back to it): it comes back
+                // now, at the next keyframe.
                 self.out.target = self.out.delay.min(self.config.max_delay_ms * MS);
+                if self.out.started {
+                    self.back_under_max();
+                }
             }
             Command::Dump { .. } if !self.can_dump() => return Err(EngineError::NothingToDump),
             Command::Dump { mode, cover } => {

@@ -114,6 +114,10 @@ All notable changes to stream-delay are listed here. The format follows
   now show the real one whenever it is more than keyframe rounding explains,
   the dock warns, and the dock and tray offer **Back to 30 s** (your delay),
   which skips ahead at the next keyframe. The state gains `excess_ms`.
+- Cancelling a change (such as removing the delay after what is buffered has
+  aired) that a connection outage had stretched past the maximum delay left
+  the delay there; it now comes back down to the maximum at the next
+  keyframe, as after any other outage.
 - After a connection outage at a high delay (about 9 s or more at the 120 s
   preset), the output never recovered: each keyframe group was thrown out of
   the buffer just before it aired, so viewers saw a few frames every couple of
