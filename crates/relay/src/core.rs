@@ -974,4 +974,21 @@ mod tests {
         assert!(ingest.reserve(10).await.is_none());
         drop(whole);
     }
+
+    #[tokio::test]
+    async fn an_encoder_may_get_32_mib_ahead_of_the_core_and_no_more() {
+        let (tx, _core) = mpsc::unbounded_channel::<Event>();
+        let ingest = IngestTx::new(tx, INGEST_QUEUE_BUDGET, ArenaPool::unlimited());
+        let wait = Duration::from_millis(50);
+        // Messages of 1 MiB with their overhead; the core takes none in.
+        let mut queued = Vec::new();
+        for _ in 0..32 {
+            let room =
+                tokio::time::timeout(wait, ingest.reserve(1024 * 1024 - QUEUED_OVERHEAD)).await;
+            queued.push(room.expect("less than 32 MiB may wait").unwrap());
+        }
+        let more = tokio::time::timeout(wait, ingest.reserve(0)).await;
+        assert!(more.is_err(), "more than 32 MiB may wait");
+        drop(queued);
+    }
 }
