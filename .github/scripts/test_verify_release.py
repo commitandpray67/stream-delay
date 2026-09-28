@@ -217,6 +217,15 @@ class Release(unittest.TestCase):
         (self.root / f"streamdelayd-v{VERSION}-x86_64-pc-windows-msvc.zip").unlink()
         self.fails("missing assets")
 
+    def test_nothing_else_is_there(self):
+        # The checksums cover, and publishing makes public, whatever the draft
+        # holds: a file left over from another attempt would go out with it.
+        for name in ["leftover.bin", f"stream-delay_{VERSION}_universal.dmg.sig"]:
+            with self.subTest(name):
+                (self.root / name).write_bytes(b"x")
+                self.fails(f"assets this release should not have: {name}")
+                (self.root / name).unlink()
+
     def test_signatures_mode_needs_signatures(self):
         empty = self.root / "empty"
         empty.mkdir()

@@ -8,8 +8,9 @@
 
     verify_release.py release DIR TAG REPOSITORY
         DIR holds every asset of release TAG (for example v0.3.0) of REPOSITORY
-        (owner/name): all installers and headless archives are there, every
-        updater bundle is signed with PUBKEY, and latest.json offers the version
+        (owner/name): all installers and headless archives are there, and
+        nothing else (but SHA256SUMS.txt and release-checks.txt, which the
+        caller leaves out), every updater bundle is signed with PUBKEY, and latest.json offers the version
         in every entry installed copies may use (and no other), with those
         signatures, each downloaded from exactly
         https://github.com/REPOSITORY/releases/download/TAG/<file>.
@@ -232,6 +233,11 @@ def check_release(root: Path, tag: str, repository: str, key):
     missing = [n for n in expected if n not in names]
     if missing:
         raise Invalid("missing assets: " + ", ".join(missing))
+    # The checksums cover, and publishing makes public, whatever the release
+    # holds: nothing else may be there (a file left over from another attempt).
+    extra = sorted(names - set(expected))
+    if extra:
+        raise Invalid("assets this release should not have: " + ", ".join(extra))
     check_signatures(root, key)
 
     try:
