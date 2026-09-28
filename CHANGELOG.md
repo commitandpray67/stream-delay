@@ -157,6 +157,12 @@ All notable changes to stream-delay are listed here. The format follows
   key; if it has none, the setup says so and changes nothing. Running the
   setup again after stream-delay's port changed no longer replaces the backup
   of OBS's original settings with its settings for stream-delay.
+- After setting up OBS on the Setup tab moved a Twitch key in (which makes
+  Twitch the destination, with the key stored), the tab went on showing the
+  destination and passthrough setting from before, and saving it put them
+  back: with passthrough, OBS's key was then stream-delay's own, forwarded to
+  Twitch, which refused the stream. The tab now follows the saved
+  destination, keeping only what is being typed.
 - Once an ingest key is required (the RTMP input reachable from the network),
   an OBS set up before, with the key for this computer only, was shown as set
   up, and setting it up again changed nothing, while stream-delay refused its

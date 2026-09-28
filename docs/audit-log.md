@@ -19,6 +19,24 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 6 again: the Setup tab and the OBS wizard
+
+Read again with the wizard's changes in mind: the Setup, Delay and Advanced
+tabs, the OBS wizard and `lib/types.ts` against what the server sends. One
+finding, fixed with a test that failed first:
+
+- The Setup tab loads its destination fields once. The OBS wizard on the
+  same tab can change the destination (moving a Twitch key in makes Twitch
+  the destination, with the key stored), and the tab went on showing the
+  old one; saving it put the old destination and passthrough back. The
+  fields now follow the saved destination while they have not been edited.
+
+Considered and left as is: the other tabs load their forms once too, but
+nothing on their page changes their settings, and a save from elsewhere is
+replaced by the next save from them, as the last one wins.
+
+Area 6 is due another full pass.
+
 ### 2026-09-28 — Area 7 clean; areas 4 and 5: the OBS wizard's stream key
 
 Area 7, read again in full: every workflow, both Dockerfiles and

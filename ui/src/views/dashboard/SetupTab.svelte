@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import CopyField from "../../components/CopyField.svelte";
   import { clearStreamKey, setStreamKey, updateConfig } from "../../lib/api";
   import { adminConfig, live } from "../../lib/live.svelte";
@@ -11,15 +12,26 @@
   let key = $state("");
   let message = $state("");
   let error = $state("");
-  let loaded = false;
+  // The saved destination the fields were last loaded from. It can change
+  // while the tab is open: setting up OBS below and moving its Twitch key in
+  // makes Twitch the destination, with the key stored.
+  let loaded: [string, string, boolean] | null = null;
+  const same = (a: [string, string, boolean], b: [string, string, boolean]) =>
+    a.every((v, i) => v === b[i]);
 
   $effect(() => {
-    if (pc && !loaded) {
-      loaded = true;
-      service = pc.config.destination.service;
-      url = pc.config.destination.url;
-      passthrough = pc.config.destination.key_mode === "passthrough";
-    }
+    const d = pc?.config.destination;
+    if (!d) return;
+    const saved: [string, string, boolean] = [d.service, d.url, d.key_mode === "passthrough"];
+    untrack(() => {
+      if (loaded && same(loaded, saved)) return;
+      // Fields the streamer has not edited since follow the saved settings;
+      // edits are kept, and saving them is theirs to do.
+      if (!loaded || same(loaded, [service, url, passthrough])) {
+        [service, url, passthrough] = saved;
+      }
+      loaded = saved;
+    });
   });
 
   function pickService(id: string) {
