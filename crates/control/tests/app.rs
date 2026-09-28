@@ -359,14 +359,7 @@ async fn without_a_stream_key_the_state_says_nothing_can_be_sent() {
     })
     .await
     .unwrap();
-    // Once the relay has said how it is (at once, but after starting).
-    let state = loop {
-        let (_, state) = http(&app, "GET", "/api/v1/state", "").await;
-        if state["delay"]["max_delay_ms"] != 0 {
-            break state;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    let (_, state) = http(&app, "GET", "/api/v1/state", "").await;
     assert_eq!(state["egress"]["status"], "disabled", "{state}");
     assert_eq!(
         state["egress"]["destination"], "rtmps://live.twitch.tv/app",

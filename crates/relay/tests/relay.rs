@@ -200,6 +200,29 @@ async fn a_rewind_dump_replays_and_a_mask_dump_shows_the_slate() {
     relay.shutdown().await;
 }
 
+// One thread: the relay has not run yet when `start` returns.
+#[tokio::test]
+async fn a_new_relay_reports_its_settings_at_once_and_after() {
+    let (sink, _log, _kill) = start_sink().await;
+    for (key, status) in [("k", EgressStatus::Idle), ("", EgressStatus::Disabled)] {
+        let relay = start_relay(
+            sink,
+            DestinationKey::Fixed(key.into()),
+            Duration::from_secs(5),
+        )
+        .await;
+        let at_once = relay.state();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        for s in [at_once, relay.state()] {
+            assert_eq!(s.egress.status, status, "{s:?}");
+            assert_eq!(s.egress.destination, Some(format!("rtmp://{sink}/app")));
+            assert_eq!(s.ingest.listen, relay.ingest_addr().to_string());
+            assert_eq!(s.delay.max_delay_ms, 30_000);
+        }
+        relay.shutdown().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn without_a_stream_key_the_state_says_nothing_can_be_sent() {
     let (sink, log, _kill) = start_sink().await;

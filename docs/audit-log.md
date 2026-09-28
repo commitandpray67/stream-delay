@@ -57,15 +57,26 @@ overlay at once. Four findings, each fixed with a test that failed first:
 
 Considered and left as is: after another server was saved while streaming
 and its key entered 5 s later, the delay was 5 s longer, as after any outage
-with *Resume where it left off*, and the dock offered to go back. The relay
-reports its initial state, without the destination, until its first update
-at start (well under a millisecond); nothing reads it that early but a test.
-A warning from the OBS WebSocket library in the log came from `RUST_LOG=info`
-set for the run: the default filter leaves it out.
+with *Resume where it left off*, and the dock offered to go back. A warning
+from the OBS WebSocket library in the log came from `RUST_LOG=info` set for
+the run: the default filter leaves it out.
+
+Mutation testing of the relay change: every mutant of the new `stream_key`
+and `resting_status` was caught, but four of the relay's initial state
+survived (its destination status, listening address and ingest key warning
+left out). The relay built that state twice: once to show until its first
+update, without the destination's status or address, and once to start
+from; tests reading the state at once saw the first, and those reading it
+later did not look. A new relay reported a destination with a key as
+`disabled` until its first update (well under a millisecond). It is now
+built once, and a test reads it both at once and after the first update;
+all eight mutants of it are caught.
 
 Also: one run of the workspace tests had one chaos test fail, under the load
 of a second run, and which one was not recorded. Since, 8 runs alone and 12
-under load (two at once, beside the lifecycle tests) passed. Areas 3 and 6 are due another full pass.
+under load (two at once, beside the lifecycle tests) passed.
+
+Areas 3 and 6 are due another full pass.
 
 ### 2026-09-28 — Exploratory end-to-end runs (areas 1, 3 and 4)
 

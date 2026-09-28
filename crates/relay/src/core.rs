@@ -244,7 +244,6 @@ struct Core {
 
 pub(crate) async fn run(
     config: RelayConfig,
-    ingest_addr: SocketAddr,
     mut control: mpsc::UnboundedReceiver<Control>,
     events_tx: mpsc::UnboundedSender<Event>,
     mut events: mpsc::UnboundedReceiver<Event>,
@@ -265,21 +264,11 @@ pub(crate) async fn run(
     ));
 
     let now = Instant::now();
+    // As `start` made it, from `initial_state`.
+    let state = state_tx.borrow().clone();
     let mut core = Core {
         engine: Engine::new(config.engine.clone()),
-        state: RelayState {
-            ingest: IngestState {
-                listen: ingest_addr.to_string(),
-                key_warning: crate::key_warning(&config),
-                ..Default::default()
-            },
-            egress: EgressState {
-                status: resting_status(config.destination.as_ref()),
-                destination: config.destination.as_ref().map(redacted),
-                ..Default::default()
-            },
-            ..Default::default()
-        },
+        state,
         life: Lifecycle::new(config.encoder_grace),
         config,
         clock: now,
@@ -358,6 +347,26 @@ fn same_key(want: &str, got: &str) -> bool {
     let padded: Vec<u8> = (0..got.len()).map(|i| want[i % want.len()]).collect();
     let lengths = (want.len() as u64).ct_eq(&(got.len() as u64));
     bool::from(padded.ct_eq(got) & lengths)
+}
+
+/// The state of a relay with `config`, listening on `ingest_addr`, before
+/// anything has happened: what it shows until its first update, and where that
+/// update starts from.
+pub(crate) fn initial_state(config: &RelayConfig, ingest_addr: SocketAddr) -> RelayState {
+    RelayState {
+        delay: Engine::new(config.engine.clone()).snapshot(0),
+        ingest: IngestState {
+            listen: ingest_addr.to_string(),
+            key_warning: crate::key_warning(config),
+            ..Default::default()
+        },
+        egress: EgressState {
+            status: resting_status(config.destination.as_ref()),
+            destination: config.destination.as_ref().map(redacted),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 /// The stream key to send to `dest` (at `url`) with: the one set, else one at

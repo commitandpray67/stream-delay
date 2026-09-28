@@ -448,15 +448,7 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     })?;
     let (control_tx, control_rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let initial = RelayState {
-        ingest: IngestState {
-            listen: ingest_addr.to_string(),
-            key_warning: key_warning(&config),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let (state_tx, state_rx) = watch::channel(initial);
+    let (state_tx, state_rx) = watch::channel(core::initial_state(&config, ingest_addr));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Blocks for what the buffer keeps and what waits for the core: whatever
     // pattern of messages a publisher sends, they cannot hold more.
@@ -475,7 +467,6 @@ pub async fn start(mut config: RelayConfig) -> Result<RelayHandle, RelayError> {
     ));
     tokio::spawn(core::run(
         config,
-        ingest_addr,
         control_rx,
         events_tx,
         events_rx,
