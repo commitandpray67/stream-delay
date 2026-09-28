@@ -157,6 +157,10 @@ All notable changes to stream-delay are listed here. The format follows
   the access token, and the commands, and the Docker image's health check,
   failed where the proxy could not reach back. Requests to `localhost` or a
   loopback address now always go directly, as in browsers.
+- With more than five presets (added on the Delay settings tab), giving a
+  hotkey on the Advanced tab to a preset past the sixth while the ones between
+  had none made the tab refuse to save anything, with a message about
+  `null`. The ones between are now saved without a hotkey.
 - With the API on a loopback address other than `127.0.0.1` or `[::1]`
   (such as `127.0.0.2`) and without LAN access, every request was refused as
   naming an unexpected host, the dashboard's own included. Any loopback

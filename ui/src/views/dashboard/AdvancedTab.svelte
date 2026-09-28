@@ -52,7 +52,11 @@
     e.preventDefault();
     message = error = "";
     try {
-      await updateConfig({ hotkeys: $state.snapshot(hotkeys), allow_lan: allowLan });
+      const h = $state.snapshot(hotkeys) as HotkeyConfig;
+      // Typing a hotkey for a preset past those with one leaves the ones between
+      // unset: they have none, rather than being gaps the server refuses.
+      h.presets = Array.from(h.presets, (s) => s ?? "");
+      await updateConfig({ hotkeys: h, allow_lan: allowLan });
       message = "Saved.";
     } catch (err) {
       error = (err as Error).message;
