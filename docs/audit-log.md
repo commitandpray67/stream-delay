@@ -37,6 +37,15 @@ replaced by the next save from them, as the last one wins.
 
 Area 6 is due another full pass.
 
+Area 5, mutation testing of `streamdelayd` (51 mutants): 10 survived in
+`run` and in `shown_to_a_person`, none a bug. Tests were added for what `run`
+prints (an `--ephemeral` run's links carry their tokens, which it has no
+settings file to show otherwise; to a log, the tokens and the OBS key are left
+out and it says where to find them) and for the destination key taken from
+`STREAMDELAY_KEY`, which no test covered. Left untested: `--no-keychain` and
+whether output goes to a person (a terminal, not a container), which need an
+OS keychain or a terminal.
+
 ### 2026-09-28 — Area 7 clean; areas 4 and 5: the OBS wizard's stream key
 
 Area 7, read again in full: every workflow, both Dockerfiles and

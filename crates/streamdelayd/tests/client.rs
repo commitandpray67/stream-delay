@@ -590,3 +590,93 @@ fn round_trip_with_a_running_instance() {
 
     rt.block_on(app.shutdown());
 }
+
+/// What `run` printed as it started: the lines up to the one with `until`,
+/// and any that follow at once.
+fn printed(daemon: &mut Daemon, until: &str) -> String {
+    use std::io::BufRead;
+    let out = daemon.child.stdout.take().expect("stdout is piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut text = String::new();
+    let mut wait = Duration::from_secs(10);
+    while let Ok(line) = rx.recv_timeout(wait) {
+        if line.contains(until) {
+            wait = Duration::from_millis(500);
+        }
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
+#[test]
+fn an_ephemeral_run_prints_its_links_with_their_tokens() {
+    // It has no settings file for `streamdelayd urls` to read: what it prints
+    // is the only way to its token, whether to a terminal or not.
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::start(dir.path(), |c| {
+        c.arg("--ephemeral").stdout(Stdio::piped());
+    });
+    let out = printed(&mut daemon, "Overlay:");
+    daemon.stop();
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("Dashboard:") && l.contains("/?token=")),
+        "{out}"
+    );
+    assert!(!out.contains("not written to logs"), "{out}");
+}
+
+#[test]
+fn run_keeps_the_tokens_and_the_obs_key_out_of_logs() {
+    // Printed to a pipe (a log, `docker logs`) rather than a terminal, with a
+    // settings file that `streamdelayd urls` reads instead.
+    const INGEST_KEY: &str = "ingest-key-kept-out-of-logs-0123";
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::start(dir.path(), |c| {
+        c.arg("--no-keychain")
+            .env("STREAMDELAY_INGEST_KEY", INGEST_KEY)
+            .stdout(Stdio::piped());
+    });
+    let out = printed(&mut daemon, "not written to logs");
+    daemon.stop();
+    assert!(!out.contains("token="), "{out}");
+    assert!(!out.contains(INGEST_KEY), "{out}");
+    assert!(out.contains("OBS key:     (see below)"), "{out}");
+    assert!(out.contains("`streamdelayd urls` shows them"), "{out}");
+}
+
+#[test]
+fn run_takes_the_destination_key_from_the_environment() {
+    const TOKEN: &str = "run-token-for-the-key-0123";
+    for (key, saved) in [("live_1_from_the_env", true), ("", false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, TOKEN).unwrap();
+        let mut daemon = Daemon::start(dir.path(), |c| {
+            c.args([
+                "--ephemeral",
+                "--dest",
+                "rtmp://127.0.0.1:9/app",
+                "--token-file",
+            ])
+            .arg(&file)
+            .env("STREAMDELAY_KEY", key);
+        });
+        let diagnostics =
+            run(cli(dir.path()).args(["diagnostics", "--url", &daemon.url, "--token", TOKEN]));
+        daemon.stop();
+        let bundle: Value = serde_json::from_str(&stdout(&diagnostics)).unwrap();
+        assert_eq!(
+            bundle["settings"]["destination_key_set"], saved,
+            "STREAMDELAY_KEY={key:?}"
+        );
+    }
+}
