@@ -40,11 +40,11 @@ Every other field agrees with its check (the delay limits and steps, presets
 against the maximum, the grace period, colors, the badge position, the
 stream key, the OBS port). Areas 5 and 6 are due a full pass again.
 
-### 2026-09-28 — Area 3, relay (third look, in part)
+### 2026-09-28 — Area 3, relay (third pass)
 
-Read again: `egress.rs` in full, and in `core.rs` how the destination is
-started (`pump`, `manage_egress`, `target`) and how a dump waits for the
-egress (`start_dump`, `finish_dump`, `check_dump`). No real finding.
+Read again in full: `egress.rs`, `ingest.rs`, `core.rs`, `lib.rs`,
+`lifecycle.rs`, `io.rs` and `heap.rs` (`sendq.rs` for the Windows numbers
+below). No real finding.
 
 CI: `a_dump_replays_what_aired_and_never_airs_what_had_not` failed once on
 Windows, the dump holding instead of replaying. When a dump finds media

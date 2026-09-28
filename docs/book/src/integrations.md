@@ -14,7 +14,8 @@ They work while any window has focus, including your game.
 | End stream now (the buffer never airs) | none; set one on the Advanced tab |
 
 On macOS, `Cmd` replaces `Ctrl`. Change or disable them on the dashboard's
-**Advanced** tab; names look like `CmdOrCtrl+Alt+Shift+1`. If another program
+**Advanced** tab; names look like `CmdOrCtrl+Alt+Shift+1`. Each combination can
+have one action: the tab refuses to save one given to two. If another program
 already uses a combination, stream-delay logs a warning and skips it.
 
 On Linux with Wayland, global hotkeys depend on your desktop environment. If they
