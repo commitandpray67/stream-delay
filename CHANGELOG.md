@@ -133,6 +133,10 @@ All notable changes to stream-delay are listed here. The format follows
   dashboard and the diagnostics file: only a URL that parses has its key
   moved to the secret store. It is now shown like OBS's server address,
   without a login, a query or anything after the application.
+- Editing the destination URL as the Setup tab shows it (with `?…` for a
+  hidden query, or `/…` for a hidden stream key) but keeping the `…` saved
+  `…` in place of the credentials or key. Such a URL is now refused, with a
+  message asking for what was hidden.
 - With multitrack video that has more than one track in a message, the size
   of the first track's data was read as its composition time, which is used to
   keep timestamps valid where the delay changes. (Multitrack video is still

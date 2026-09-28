@@ -141,6 +141,9 @@ fn valid_color(c: &str) -> bool {
 /// Longest encoder grace period, in seconds.
 const MAX_GRACE_SECONDS: u64 = 600;
 
+/// What stands for a hidden part of a URL as shown (see [`shown_url`]).
+const HIDDEN: char = '…';
+
 /// Limits that keep the relay working, for settings from any source: the API, the
 /// config file and the command line.
 pub(crate) fn validate_limits(d: &DelayConfig, grace_seconds: u64) -> Result<(), String> {
@@ -168,7 +171,23 @@ fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
     if let Some(d) = &u.destination
         && !d.url.trim().is_empty()
     {
-        RtmpUrl::parse(&d.url).map_err(|e| format!("destination URL: {e}"))?;
+        let url = RtmpUrl::parse(&d.url).map_err(|e| format!("destination URL: {e}"))?;
+        // The URL as shown, but edited: what `…` stood for is not known, and
+        // saving `…` in its place would lose it.
+        if url
+            .stream_key
+            .as_deref()
+            .is_some_and(|k| k.contains(HIDDEN))
+        {
+            return Err(
+                "destination URL: the stream key after the application is hidden (…): enter it \
+                 again, in the URL or the key field"
+                    .into(),
+            );
+        }
+        if url.query().is_some_and(|q| q.contains(HIDDEN)) {
+            return Err("destination URL: what follows the ? is hidden (…): enter it again".into());
+        }
     }
     let grace = u.grace_seconds.unwrap_or(current.ingest.grace_seconds);
     validate_limits(u.delay.as_ref().unwrap_or(&current.delay), grace)?;
@@ -628,6 +647,25 @@ mod transaction_tests {
         let (s, _) = call(&app, "PUT", "/api/v1/config", &dest(other)).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(st.config().destination.url, other);
+    }
+
+    #[tokio::test]
+    async fn a_hidden_key_or_query_is_never_saved_in_its_place() {
+        let (st, app, secrets) = setup(None).await;
+        let url = "rtmps://ingest.example/live?auth=SENTINEL_credential_123";
+        let (s, _) = call(&app, "PUT", "/api/v1/config", &dest(url)).await;
+        assert_eq!(s, StatusCode::OK);
+        // The URL as shown, edited elsewhere: what `…` stood for is not known.
+        for edited in [
+            "rtmps://other.example/live?…",
+            "rtmp://ingest.example:1935/live/…",
+        ] {
+            let (s, body) = call(&app, "PUT", "/api/v1/config", &dest(edited)).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{edited}: {body}");
+            assert!(body.contains("again"), "{body}");
+            assert_eq!(st.config().destination.url, url);
+            assert_eq!(secrets.get(secret::DESTINATION_KEY), None);
+        }
     }
 
     #[tokio::test]
