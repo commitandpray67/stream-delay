@@ -33,10 +33,10 @@ it is built to be safe by default:
 - **Web pages you visit can't control your stream:** requests must name this
   computer in the `Host` header, which blocks DNS rebinding, and cross-origin
   browser requests are refused. Without LAN access that means `localhost` or
-  `127.0.0.1`; with it, also an IP address, a local name (`nas`,
-  `gaming-pc.local`, names under `.home.arpa`, `.internal` or `.lan`), or a
-  name you list under `allowed_hosts` in the `[api]` section of the settings
-  file, such as one on your own DNS.
+  a loopback address (`127.0.0.1`, `[::1]`); with it, also any IP address, a
+  local name (`nas`, `gaming-pc.local`, names under `.home.arpa`, `.internal`
+  or `.lan`), or a name you list under `allowed_hosts` in the `[api]` section
+  of the settings file, such as one on your own DNS.
 - **The RTMP input also listens on `127.0.0.1` only** by default. When it can be
   reached from your network, an ingest key is required so nobody else can
   stream to it; if you don't set one, stream-delay generates one (128 bits) and

@@ -239,6 +239,32 @@ fn a_token_file_wins_over_the_environment() {
 }
 
 #[test]
+fn requests_to_this_computer_never_go_through_a_proxy() {
+    // A proxy set for this computer's other traffic (as in a company network,
+    // or passed into containers by Docker) cannot reach its loopback, and would
+    // see the token: like browsers, the client goes to this computer directly.
+    let dir = tempfile::tempdir().unwrap();
+    let api = Fake::ok(r#"{"status":"ok","app":"stream-delay","version":"9.9.9"}"#);
+    let proxy = Fake::ok("{}");
+    let proxied = |c: &mut Command| {
+        for v in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
+            c.env(v, &proxy.url).env(v.to_lowercase(), &proxy.url);
+        }
+        c.env_remove("NO_PROXY").env_remove("no_proxy");
+    };
+    let mut state = cli(dir.path());
+    state.args(["state", "--url", &api.url, "--token", "t"]);
+    proxied(&mut state);
+    stdout(&run(&mut state));
+    let mut health = cli(dir.path());
+    health.args(["health", "--url", &api.url]);
+    proxied(&mut health);
+    stdout(&run(&mut health));
+    assert!(proxy.seen().is_empty(), "{:?}", proxy.seen());
+    assert_eq!(api.seen().len(), 2);
+}
+
+#[test]
 fn health_says_whether_stream_delay_answers() {
     let dir = tempfile::tempdir().unwrap();
     let api = Fake::ok(r#"{"status":"ok","app":"stream-delay","version":"9.9.9"}"#);

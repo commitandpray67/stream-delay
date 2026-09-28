@@ -150,6 +150,17 @@ All notable changes to stream-delay are listed here. The format follows
   that the troubleshooting page says to attach after a crash, with the running
   copy's log, which then carried on under that name. Opening it again now
   leaves the logs alone.
+- With a proxy set in the environment (`HTTP_PROXY`, `HTTPS_PROXY` or
+  `ALL_PROXY`, as in some company networks, or passed into containers by
+  Docker) and no `NO_PROXY` for this computer, `streamdelayd` sent its
+  requests to stream-delay on this computer through the proxy: the proxy saw
+  the access token, and the commands, and the Docker image's health check,
+  failed where the proxy could not reach back. Requests to `localhost` or a
+  loopback address now always go directly, as in browsers.
+- With the API on a loopback address other than `127.0.0.1` or `[::1]`
+  (such as `127.0.0.2`) and without LAN access, every request was refused as
+  naming an unexpected host, the dashboard's own included. Any loopback
+  address is now accepted.
 - Dock and overlay links got the destination URL (without its key or query)
   in the state, though the settings they get leave the destination out. It
   is now left out of their state too.

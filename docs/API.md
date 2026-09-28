@@ -22,7 +22,7 @@ Pass the token in one of these ways:
 - `X-Stream-Delay-Token: <token>`
 - `?token=<token>` (for browser sources and WebSockets, which cannot set headers)
 
-Requests must also use a loopback `Host` (`127.0.0.1`, `localhost` or `[::1]` with the right port), and browser requests from another origin are refused. Both checks stop malicious web pages from controlling your stream. LAN access can be enabled in settings (it takes effect at the next start); the token is still required.
+Requests must also use a loopback `Host` (`localhost` or a loopback address such as `127.0.0.1` or `[::1]`, with the right port), and browser requests from another origin are refused. Both checks stop malicious web pages from controlling your stream. LAN access can be enabled in settings (it takes effect at the next start); the token is still required.
 
 Run `streamdelayd urls` to print links that already contain their tokens.
 

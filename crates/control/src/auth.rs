@@ -88,10 +88,16 @@ fn is_loopback_host(host: &str, port: u16) -> bool {
     if host_port.is_some_and(|hp| hp != p) {
         return false;
     }
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "127.0.0.1" | "localhost" | "[::1]"
-    )
+    // An address only in brackets if IPv6, as in URLs.
+    let loopback = match name.strip_prefix('[').and_then(|n| n.strip_suffix(']')) {
+        Some(v6) => v6
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback()),
+        None => name
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+    };
+    loopback || name.eq_ignore_ascii_case("localhost")
 }
 
 /// With LAN access, the Host header may name this server by any address, but not
@@ -254,6 +260,13 @@ mod tests {
         assert!(is_loopback_host("localhost:7788", 7788));
         assert!(is_loopback_host("LOCALHOST:7788", 7788));
         assert!(is_loopback_host("[::1]:7788", 7788));
+        // Any loopback address, as when listening on 127.0.0.2: no name, so
+        // nothing for DNS rebinding to point elsewhere.
+        assert!(is_loopback_host("127.0.0.2:7788", 7788));
+        assert!(is_loopback_host("127.0.0.2", 7788));
+        assert!(!is_loopback_host("127.0.0.2:80", 7788));
+        assert!(!is_loopback_host("[127.0.0.1]:7788", 7788));
+        assert!(!is_loopback_host("192.168.1.5:7788", 7788));
         assert!(!is_loopback_host("127.0.0.1:80", 7788));
         assert!(!is_loopback_host("evil.example:7788", 7788));
         assert!(!is_loopback_host("", 7788));
