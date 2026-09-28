@@ -56,8 +56,9 @@ that one click never does what cannot be undone: **Remove saved key** on the
 Setup tab removed the stream key at once, and while streaming that ends the
 broadcast (the relay reconnects without a key, and the destination refuses
 it). It now takes a second click and says so when streaming (test first).
-Setting up and restoring OBS are refused while OBS streams; the other saves
-change nothing that cannot be changed back.
+Setting up and restoring OBS are refused while OBS streams. Saving another
+destination while streaming moves the broadcast there, which the edit and
+Save ask for; the other saves change nothing that cannot be changed back.
 
 Area 5, mutation testing of `streamdelayd` (51 mutants): 10 survived in
 `run` and in `shown_to_a_person`, none a bug. Tests were added for what `run`
