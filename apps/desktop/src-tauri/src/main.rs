@@ -326,6 +326,12 @@ fn updater_configured(app: &AppHandle) -> bool {
         .is_some_and(|k| !k.trim().is_empty())
 }
 
+/// True for a link from the dashboard that opens in the web browser: a web
+/// page, never a file or another program's address.
+fn opens_in_browser(url: &tauri::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+}
+
 /// Opens (or focuses) the dashboard window, optionally on a specific tab.
 pub fn show_dashboard(app: &AppHandle, tab: Option<&str>) {
     if let Some(w) = app.get_webview_window("main") {
@@ -347,6 +353,17 @@ pub fn show_dashboard(app: &AppHandle, tab: Option<&str>) {
         .title("stream-delay")
         .inner_size(1120.0, 820.0)
         .min_inner_size(420.0, 480.0)
+        // Links that open another window (the user guide, the releases page)
+        // open in the web browser. Without a handler the window's web view
+        // decides: on macOS and Linux it opens nothing.
+        .on_new_window(|url, _| {
+            if opens_in_browser(&url)
+                && let Err(e) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>)
+            {
+                warn!("could not open a link in the web browser: {e}");
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
         // Without a handler macOS ignores downloads (the diagnostics file); the
         // default destination is the Downloads folder.
         .on_download(|webview, event| {
@@ -416,6 +433,26 @@ mod tests {
                     assert!(found, "{bind}, allow_lan: {allow_lan}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn only_web_links_open_in_the_browser() {
+        for url in [
+            "https://commitandpray67.github.io/stream-delay/",
+            "https://github.com/commitandpray67/stream-delay/releases/latest",
+            "http://example.com/page",
+        ] {
+            assert!(opens_in_browser(&url.parse().unwrap()), "{url}");
+        }
+        for url in [
+            "file:///etc/passwd",
+            "smb://server/share",
+            "javascript:alert(1)",
+            "ms-settings:privacy",
+            "about:blank",
+        ] {
+            assert!(!opens_in_browser(&url.parse().unwrap()), "{url}");
         }
     }
 

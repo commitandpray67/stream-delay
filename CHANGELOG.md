@@ -150,6 +150,8 @@ All notable changes to stream-delay are listed here. The format follows
   that the troubleshooting page says to attach after a crash, with the running
   copy's log, which then carried on under that name. Opening it again now
   leaves the logs alone.
+- In the desktop app, the dashboard's links to the user guide, the source code
+  and the latest release open in your web browser.
 - With a proxy set in the environment (`HTTP_PROXY`, `HTTPS_PROXY` or
   `ALL_PROXY`, as in some company networks, or passed into containers by
   Docker) and no `NO_PROXY` for this computer, `streamdelayd` sent its

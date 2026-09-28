@@ -19,6 +19,25 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 5 again: the desktop app's Tauri setup
+
+Read: `tauri.conf.json`, `capabilities/default.json`, and how Tauri 2.11
+and wry 0.55 handle a page's requests for a new window. The window gets no
+Tauri permissions, and the updater key is only set by the release workflow.
+One finding:
+
+- The dashboard's links to the user guide, the source code and the latest
+  release open a new window (`target="_blank"`). The app set no handler for
+  that, and Tauri then leaves it to the web view: read from wry's source,
+  macOS and Linux open nothing, and Windows opens a bare web view window.
+  They now open in the web browser (`tauri-plugin-opener`, called from the
+  app, so the page gets no new permission), and only `http` and `https`
+  links do. The test covers which links open; the handler itself runs only
+  in a desktop session, which the tests here do not have.
+
+Also run: the `engine` target fuzzed for 30 minutes (3,324,012 runs), with
+no crash.
+
 ### 2026-09-28 — Areas 5 and 6, full passes
 
 Area 5, read in full: `apps/desktop/src-tauri/src` (`main.rs`, `tray.rs`,
