@@ -454,10 +454,12 @@ pub(crate) fn urls(state: &AppState) -> Urls {
 }
 
 /// A destination URL as it may be shown: without a stream key, and with the
-/// values of its query hidden (see [`RtmpUrl::redacted`]). Invalid URLs are
-/// returned unchanged.
+/// values of its query hidden (see [`RtmpUrl::redacted`]). One that does not
+/// parse (a hand edit) can still hold a key, which could not be moved out of
+/// it: it is shown without a login, a query or anything after the application
+/// (see [`streamdelay_obs::shown_server`]).
 pub(crate) fn shown_url(url: &str) -> String {
-    RtmpUrl::parse(url).map_or_else(|_| url.to_string(), |u| u.redacted())
+    RtmpUrl::parse(url).map_or_else(|_| streamdelay_obs::shown_server(url), |u| u.redacted())
 }
 
 /// Splits a stream key embedded in a destination URL (`rtmp://host/app/<key>`)

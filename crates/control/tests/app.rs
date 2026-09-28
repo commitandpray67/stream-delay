@@ -344,6 +344,37 @@ async fn a_saved_destination_this_version_refuses_does_not_keep_it_from_starting
 }
 
 #[tokio::test]
+async fn a_key_in_a_saved_destination_that_does_not_parse_is_never_shown() {
+    // A hand edit: the key after the application stays in the URL, since only
+    // a URL that parses can have it moved to the secret store.
+    const KEY: &str = "sk_hand_edited_0123456789";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut c = Config::default();
+    c.api.token = "0123456789abcdef".into();
+    c.destination.service = "custom".into();
+    c.destination.url = format!("rtmp://ingest.example.net:0/live/{KEY}");
+    c.save(&path).unwrap();
+    let app = App::start(AppOptions {
+        config_path: Some(path.clone()),
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    let (_, cfg) = http(&app, "GET", "/api/v1/config", "").await;
+    assert_eq!(
+        cfg["config"]["destination"]["url"],
+        "rtmp://ingest.example.net:0/live/…"
+    );
+    for path in ["/api/v1/config", "/api/v1/state", "/api/v1/diagnostics"] {
+        let (_, body) = http(&app, "GET", path, "").await;
+        assert!(!body.to_string().contains(KEY), "{path}: {body}");
+    }
+    app.shutdown().await;
+}
+
+#[tokio::test]
 async fn command_line_settings_are_not_saved_with_dashboard_changes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");

@@ -128,6 +128,11 @@ All notable changes to stream-delay are listed here. The format follows
   from starting. It now starts without sending anywhere, says so in the log,
   and the Setup tab shows the URL and what is wrong with it when it is saved.
   One given on the command line is still refused at once.
+- A destination URL in `config.toml` that does not parse, edited by hand
+  with the stream key after the application, was shown as it was in the
+  dashboard and the diagnostics file: only a URL that parses has its key
+  moved to the secret store. It is now shown like OBS's server address,
+  without a login, a query or anything after the application.
 - With multitrack video that has more than one track in a message, the size
   of the first track's data was read as its composition time, which is used to
   keep timestamps valid where the delay changes. (Multitrack video is still
