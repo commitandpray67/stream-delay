@@ -261,6 +261,34 @@ async fn without_a_stream_key_the_state_says_nothing_can_be_sent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dump_while_the_destination_is_not_connected_never_replays() {
+    // What the destination got before its connection went is not known: a
+    // replay could air frames that never did.
+    let (sink, _log, _kill) = start_sink().await;
+    let dest = |key: &str| Destination {
+        url: format!("rtmp://{sink}/app"),
+        key: DestinationKey::Fixed(key.into()),
+    };
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    relay.set_delay(2_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(8)).await;
+    // The key removed: the connection closes, and OBS goes on streaming.
+    relay.set_destination(Some(dest(""))).unwrap();
+    p.stream_for(Duration::from_secs(1)).await;
+    assert!(!relay.state().delay.output.connected);
+    let ack = relay.dump(DelayMode::Rewind, true).await.unwrap();
+    assert_ne!(ack.dump, Some(DumpOutcome::Replay), "{ack:?}");
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_key_in_the_destination_url_is_used() {
     // As pasted from a service: the key at the end of the URL, none set apart.
     let (sink, log, _kill) = start_sink().await;
