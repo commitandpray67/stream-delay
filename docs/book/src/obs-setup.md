@@ -20,7 +20,8 @@ This uses obs-websocket, which is built into OBS 28 and newer.
      badge and the Mask slate.
 4. Click **Set up OBS automatically**. stream-delay saves a backup of OBS's stream
    settings (in your OS keychain, as they include the stream key) and points OBS
-   at itself.
+   at itself. With **Use the stream key entered in OBS instead (passthrough)**
+   on the Setup tab, OBS keeps its own stream key, which stream-delay forwards.
 
 OBS must not be streaming while you do this; stream-delay refuses rather than
 interrupt a live stream.
@@ -30,8 +31,8 @@ network first (see [Two-PC setups](install.md#two-pc-setups)); the wizard then
 gives OBS this computer's address. To add the overlay there too, its web server
 must listen on the network as well (same section); otherwise the wizard says so
 and changes nothing, and you can run it without the overlay. Running the setup again later (for example
-after stream-delay had to change its port) updates OBS and keeps the backup of
-your original settings.
+after stream-delay had to change its port, or once it requires an ingest key)
+updates OBS and keeps the backup of your original settings.
 
 **Undo:** **Restore my original OBS settings** puts back exactly what OBS had
 before, including the Twitch service and key. It only restores to the OBS the

@@ -150,6 +150,18 @@ All notable changes to stream-delay are listed here. The format follows
   that the troubleshooting page says to attach after a crash, with the running
   copy's log, which then carried on under that name. Opening it again now
   leaves the logs alone.
+- With passthrough (the Setup tab's *Use the stream key entered in OBS
+  instead*), setting up OBS automatically replaced OBS's stream key with
+  stream-delay's own (`streamdelay`), which passthrough then sent to the
+  destination, and the destination refused the stream. OBS now keeps its own
+  key; if it has none, the setup says so and changes nothing. Running the
+  setup again after stream-delay's port changed no longer replaces the backup
+  of OBS's original settings with its settings for stream-delay.
+- Once an ingest key is required (the RTMP input reachable from the network),
+  an OBS set up before, with the key for this computer only, was shown as set
+  up, and setting it up again changed nothing, while stream-delay refused its
+  stream. It is now shown as not set up, and setting it up again gives OBS the
+  ingest key.
 - In the desktop app, the dashboard's links to the user guide, the source code
   and the latest release open in your web browser.
 - With a proxy set in the environment (`HTTP_PROXY`, `HTTPS_PROXY` or

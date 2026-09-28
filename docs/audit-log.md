@@ -19,6 +19,37 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 7 clean; areas 4 and 5: the OBS wizard's stream key
+
+Area 7, read again in full: every workflow, both Dockerfiles and
+`.dockerignore`, `deny.toml`, the Renovate settings and the release scripts
+(`verify_release.py`, `check_image_inputs.py`, `prepare_release.py`,
+`smoke_desktop.py`). No finding: the area is clean for this round. Checked
+too: the nightly job's 5000 property-test cases reach every crate's
+property tests (the relay's lifecycle test fixes its own 2000, on every
+push), and the new `tauri-plugin-opener` passes cargo-deny.
+
+Area 4, read again: `auth.rs`, `routes.rs`, `ui.rs`, `settings.rs`,
+`overlays.rs`, `diagnostics.rs`, `changes.rs`, `dest_key.rs`, `bound.rs`,
+`obs_routes.rs` and parts of `app.rs` and the config crate. Three findings,
+all in the OBS wizard (`obs_routes.rs`, area 5's concern), each fixed with a
+test against the fake OBS that failed first:
+
+- With passthrough, the wizard gave OBS stream-delay's own key
+  (`streamdelay`), which passthrough then sent to the destination. OBS now
+  keeps its own; with none of its own, the wizard refuses (409) and changes
+  nothing.
+- It knew OBS was set up by stream-delay before (an earlier port) only by
+  stream-delay's key in OBS. With passthrough OBS has its own, so running it
+  again would have replaced the backup of OBS's own settings. A server on
+  this computer with application `live`, while a backup for this OBS is
+  kept, now counts too.
+- "Set up" looked at the server only: an OBS with the key for this computer
+  only, once an ingest key is required, showed as set up and was left so.
+  The key now counts where one is required.
+
+Areas 4 and 5 are due another full pass.
+
 ### 2026-09-28 — Area 5 again: the desktop app's Tauri setup
 
 Read: `tauri.conf.json`, `capabilities/default.json`, and how Tauri 2.11

@@ -11,7 +11,7 @@ use axum::response::Response;
 use axum::routing::get;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use streamdelay_config::{Config, SecretStore, Secrets, secret};
+use streamdelay_config::{Config, KeyMode, SecretStore, Secrets, secret};
 use streamdelay_relay::RelayConfig;
 use tower::ServiceExt;
 
@@ -777,4 +777,157 @@ async fn a_restore_that_cannot_be_saved_keeps_the_backup_to_try_again() {
     assert_eq!(secrets.get(secret::OBS_BACKUP), None);
     let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
     assert!(cfg["config"]["obs"]["backup"].is_null());
+}
+
+/// OBS set up for YouTube with its own key, and stream-delay forwarding the key
+/// OBS streams with (passthrough) to that destination.
+async fn passthrough_to_youtube() -> (axum::Router, Shared, Arc<Secrets>, tempfile::TempDir) {
+    setup_with_config(
+        "rtmp_custom",
+        json!({"server": "rtmp://a.rtmp.youtube.com/live2", "key": "yt-key-2468", "use_auth": false}),
+        |c| {
+            c.destination.service = "custom".into();
+            c.destination.url = "rtmp://a.rtmp.youtube.com/live2".into();
+            c.destination.key_mode = KeyMode::Passthrough;
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn with_passthrough_obs_keeps_its_own_stream_key() {
+    // stream-delay forwards the key OBS streams with: stream-delay's own key in
+    // its place would go to the destination, which would refuse the stream.
+    let (app, obs, _secrets, _dir) = passthrough_to_youtube().await;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"import_key": false, "add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["status"]["configured"], true, "{r}");
+    let o = obs.lock().unwrap();
+    assert!(
+        o.settings["server"]
+            .as_str()
+            .unwrap()
+            .starts_with("rtmp://127.0.0.1:"),
+        "{}",
+        o.settings
+    );
+    assert_eq!(o.settings["key"], "yt-key-2468");
+}
+
+#[tokio::test]
+async fn with_passthrough_an_earlier_address_does_not_replace_the_backup() {
+    let (app, obs, secrets, _dir) = passthrough_to_youtube().await;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let current = obs.lock().unwrap().settings["server"].clone();
+    // stream-delay's port changed since: OBS streams to the old address, with
+    // the key it forwards.
+    obs.lock().unwrap().settings = json!({
+        "server": "rtmp://127.0.0.1:1/live", "key": "yt-key-2468", "use_auth": false,
+    });
+    let (_, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+    assert_eq!(status["configured"], false);
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    {
+        let o = obs.lock().unwrap();
+        assert_eq!(o.settings["server"], current);
+        assert_eq!(o.settings["key"], "yt-key-2468");
+    }
+    assert!(
+        secrets
+            .get(secret::OBS_BACKUP)
+            .unwrap()
+            .contains("a.rtmp.youtube.com"),
+        "the backup of OBS's own settings was replaced"
+    );
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(
+        obs.lock().unwrap().settings["server"],
+        "rtmp://a.rtmp.youtube.com/live2"
+    );
+}
+
+#[tokio::test]
+async fn obs_with_an_old_ingest_key_is_given_the_current_one() {
+    // Set up before an ingest key was required: OBS streams to the right
+    // address with stream-delay's key for this computer only.
+    const INGEST_KEY: &str = "ingest-key-0123456789abcdef";
+    let (app, obs, secrets, _dir) = setup_with_config(
+        "rtmp_common",
+        json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+        |c| c.ingest.key = Some(INGEST_KEY.into()),
+    )
+    .await;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    obs.lock().unwrap().settings["key"] = json!("streamdelay");
+    let (_, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+    assert_eq!(status["configured"], false, "its key is refused");
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["status"]["configured"], true, "{r}");
+    assert_eq!(obs.lock().unwrap().settings["key"], INGEST_KEY);
+    assert!(
+        secrets
+            .get(secret::OBS_BACKUP)
+            .unwrap()
+            .contains("live_987_secret"),
+        "the backup of OBS's own settings was replaced"
+    );
+}
+
+#[tokio::test]
+async fn with_passthrough_obs_without_a_key_of_its_own_is_left_alone() {
+    // Nothing to forward: OBS has no key, or only stream-delay's own.
+    for key in ["", "streamdelay"] {
+        let (app, obs, secrets, _dir) = setup_with_config(
+            "rtmp_custom",
+            json!({"server": "rtmp://a.rtmp.youtube.com/live2", "key": key, "use_auth": false}),
+            |c| c.destination.key_mode = KeyMode::Passthrough,
+        )
+        .await;
+        let before = obs.lock().unwrap().settings.clone();
+        let (s, r) = call(
+            &app,
+            "POST",
+            "/api/v1/obs/configure",
+            Some(json!({"add_overlay": false})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{key:?}: {r}");
+        assert_eq!(obs.lock().unwrap().settings, before, "{key:?}");
+        assert_eq!(secrets.get(secret::OBS_BACKUP), None, "{key:?}");
+    }
 }

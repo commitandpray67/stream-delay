@@ -207,18 +207,76 @@ async fn overlay_for_obs(st: &AppState, c: &Config) -> Result<String, ApiError> 
     ))
 }
 
-/// True if OBS streams to a stream-delay already, for example at an earlier
-/// address of this one (its port changed): then OBS's settings are not the
-/// user's own, and backing them up would replace the backup that is.
-fn streams_to_stream_delay(s: &StreamSettings, ingest_key: &str) -> bool {
-    let key = s.settings.get("key").and_then(Value::as_str).unwrap_or("");
-    s.service_type == "rtmp_custom"
-        && s.settings
-            .get("server")
-            .and_then(Value::as_str)
-            .and_then(|u| RtmpUrl::parse(u).ok())
-            .is_some_and(|u| u.app == "live")
-        && (key == LOCAL_KEY || key == ingest_key)
+/// True for one of stream-delay's own stream keys (`obs_key` is the one it
+/// gives OBS now), which OBS only has if stream-delay set it up.
+fn own_key(key: &str, obs_key: &str) -> bool {
+    key == LOCAL_KEY || key == obs_key
+}
+
+fn passthrough(c: &Config) -> bool {
+    c.destination.key_mode == KeyMode::Passthrough
+}
+
+/// True when OBS streams to stream-delay at `server` with a key that works:
+/// stream-delay's own (`obs_key`) where one is required, or, when stream-delay
+/// forwards the key OBS streams with (passthrough), a key of OBS's own.
+fn set_up(s: &StreamSettings, server: &str, c: &Config, obs_key: &str) -> bool {
+    if !s.points_to(server) {
+        return false;
+    }
+    let key = s.key().unwrap_or("");
+    if passthrough(c) {
+        !key.is_empty() && !own_key(key, obs_key)
+    } else {
+        c.ingest.key.as_deref().is_none_or(str::is_empty) || key == obs_key
+    }
+}
+
+/// True if stream-delay set this OBS up before, at an earlier address (its
+/// port changed) or with an earlier key: then OBS's settings are not the
+/// user's own, and backing them up would replace the backup that is. OBS
+/// streams to stream-delay's application, with one of stream-delay's own keys
+/// or, to a server on this computer, while the backup of this OBS's own
+/// settings is kept (with passthrough, OBS keeps a key of its own).
+async fn set_up_before(s: &StreamSettings, c: &Config, obs_key: &str) -> bool {
+    let Some(url) = s
+        .settings
+        .get("server")
+        .and_then(Value::as_str)
+        .and_then(|u| RtmpUrl::parse(u).ok())
+        .filter(|u| s.service_type == "rtmp_custom" && u.app == "live")
+    else {
+        return false;
+    };
+    if s.key().is_some_and(|k| own_key(k, obs_key)) {
+        return true;
+    }
+    let id = obs_id(&c.obs.host, c.obs.port);
+    let backed_up = c
+        .obs
+        .backup
+        .as_ref()
+        .is_some_and(|b| b.obs.as_deref().is_none_or(|from| from == id));
+    backed_up && is_local(&url.host).await
+}
+
+/// The stream key to give OBS: stream-delay's own (`obs_key`), unless
+/// stream-delay forwards the key OBS streams with (passthrough): then OBS
+/// keeps its own, and without one there is nothing to forward.
+fn key_for_obs(s: &StreamSettings, c: &Config, obs_key: &str) -> Result<String, ApiError> {
+    if !passthrough(c) {
+        return Ok(obs_key.to_string());
+    }
+    match s.key() {
+        Some(k) if !own_key(k, obs_key) => Ok(k.to_string()),
+        _ => Err(ApiError(
+            StatusCode::CONFLICT,
+            "stream-delay forwards the stream key OBS streams with (passthrough), but OBS has \
+             no stream key of its own. Enter yours in OBS (Settings → Stream), or turn \
+             passthrough off on this tab and enter the key here."
+                .into(),
+        )),
+    }
 }
 
 /// Moves a backup made by an older version, which kept OBS's settings (all but
@@ -334,7 +392,9 @@ async fn build_status(st: &AppState, obs: Result<Obs, ObsError>) -> ObsStatus {
             s.reachable = true;
             s.version = Some(info.version);
             s.streaming = info.streaming;
-            s.configured = server.is_some_and(|server| info.stream.points_to(&server));
+            let obs_key = urls(st).obs_key;
+            s.configured =
+                server.is_some_and(|server| set_up(&info.stream, &server, &config, &obs_key));
             s.current_server = info.stream.server();
         }
         Err(e) => s.error = Some(e.to_string()),
@@ -456,12 +516,14 @@ async fn configure(
     let mut messages = Vec::new();
     let mut imported_key = false;
 
-    if info.stream.points_to(&server) {
+    if set_up(&info.stream, &server, &config, &links.obs_key) {
         messages.push("OBS already streams through stream-delay.".to_string());
-    } else if streams_to_stream_delay(&info.stream, &links.obs_key) {
-        // An earlier address of stream-delay: keep the backup of OBS's own settings.
-        obs.stream_to(&server, &links.obs_key).await?;
-        info!("OBS now streams to {server} (it streamed to an earlier address)");
+    } else if set_up_before(&info.stream, &config, &links.obs_key).await {
+        // An earlier address or key of stream-delay: keep the backup of OBS's
+        // own settings.
+        let key = key_for_obs(&info.stream, &config, &links.obs_key)?;
+        obs.stream_to(&server, &key).await?;
+        info!("OBS now streams to {server} (it streamed to an earlier address or key)");
         messages.push("OBS now streams to stream-delay's current address.".to_string());
     } else {
         // Back up OBS's settings. They hold the stream key and maybe a server
@@ -485,6 +547,12 @@ async fn configure(
             }
             _ => KeyChange::Keep,
         };
+        // An imported key is stored, and OBS then streams with stream-delay's.
+        let obs_key = if imported_key {
+            links.obs_key.clone()
+        } else {
+            key_for_obs(&info.stream, &config, &links.obs_key)?
+        };
         // Saved with the settings that name it, or not at all.
         st.change_settings_and_secrets(
             &[secret::OBS_BACKUP, secret::OBS_BACKUP_KEY],
@@ -507,7 +575,7 @@ async fn configure(
             },
         )?;
 
-        obs.stream_to(&server, &links.obs_key).await?;
+        obs.stream_to(&server, &obs_key).await?;
         info!("OBS now streams to {server}");
         messages.push("OBS now streams through stream-delay.".to_string());
     }
