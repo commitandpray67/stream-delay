@@ -19,6 +19,20 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — CI: Windows install test, the dashboard window
+
+The Release dry run of 80c1b86 (a commit with tests only) failed once in
+"Install and start (Windows)": the MSI-installed app answered its health
+check, served the dashboard and took RTMP within a second of starting, but
+had not logged "dashboard opened" 20 s later. The same build passed there
+on four commits before it, and none of the 40 Release runs before this one
+failed. It could not be run again from here (no permission), so the cause
+is not known: the web view being slow to start the first time on a fresh
+machine, or never starting. So that the next one tells: the app now logs
+"opening the dashboard window" before building it, and the test waits for
+the window as long as for the start (90 s) and prints how long it took. It
+still fails if the window never opens.
+
 ### 2026-09-28 — Area 6 again: the Setup tab and the OBS wizard
 
 Read again with the wizard's changes in mind: the Setup, Delay and Advanced

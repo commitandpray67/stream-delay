@@ -349,6 +349,9 @@ pub fn show_dashboard(app: &AppHandle, tab: Option<&str>) {
         url.push_str(tab);
     }
     let Ok(url) = url.parse() else { return };
+    // Building the web view can take a while the first time; this and the
+    // line after tell a slow start from one that never finishes.
+    info!("opening the dashboard window");
     let result = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("stream-delay")
         .inner_size(1120.0, 820.0)

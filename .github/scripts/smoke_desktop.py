@@ -116,7 +116,8 @@ def stop(proc: subprocess.Popen) -> None:
 
 
 def check_running(proc: subprocess.Popen, version: str) -> None:
-    deadline = time.monotonic() + START_TIMEOUT
+    started = time.monotonic()
+    deadline = started + START_TIMEOUT
     port = None
     while port is None:
         if proc.poll() is not None:
@@ -140,18 +141,25 @@ def check_running(proc: subprocess.Popen, version: str) -> None:
         raise Failed(f"no RTMP server answers on {INGEST_PORTS}")
     print(f"ok  RTMP ingest answers on port {ingest}")
 
-    # The window opens once the core has started; give it a moment.
+    # The window opens once the core has started. The first web view on a
+    # fresh machine can take a while (WebView2 sets up its profile), so it
+    # gets as long as the start itself; how long it took is printed.
     log = log_file()
-    for _ in range(40):
+    while True:
         text = log.read_text("utf-8", "replace") if log.is_file() else ""
         if "dashboard opened" in text:
             break
+        if proc.poll() is not None:
+            raise Failed(f"the app exited with code {proc.returncode}")
+        if time.monotonic() > deadline:
+            raise Failed(
+                f"the dashboard window did not open within {START_TIMEOUT} s "
+                f"(no 'dashboard opened' in {log})"
+            )
         time.sleep(0.5)
-    else:
-        raise Failed(f"the dashboard window did not open (no 'dashboard opened' in {log})")
     if "panicked" in text:
         raise Failed("the app panicked")
-    print("ok  dashboard window opened")
+    print(f"ok  dashboard window opened, {time.monotonic() - started:.1f} s after start")
     if proc.poll() is not None:
         raise Failed(f"the app exited with code {proc.returncode}")
 
