@@ -139,6 +139,12 @@ All notable changes to stream-delay are listed here. The format follows
   start) until after a stream started, Install ended the stream without
   that warning. The question is now asked again, with the warning, if a
   stream started meanwhile.
+- With the dashboard's API on an address other than `127.0.0.1` (an IPv6
+  address such as `[::1]`, or one address of the computer), starting the
+  desktop app while it was already running did not find the running copy: it
+  moved to other ports and saved them, which broke the OBS server address and
+  the dock link. It now looks for the running copy where the settings say the
+  API listens.
 - Dock and overlay links got the destination URL (without its key or query)
   in the state, though the settings they get leave the destination out. It
   is now left out of their state too.

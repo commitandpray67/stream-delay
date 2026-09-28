@@ -210,7 +210,7 @@ async fn start_core() -> Result<App, AppError> {
                 if matches!(
                     e,
                     AppError::Relay(RelayError::Bind { .. }) | AppError::Bind { .. }
-                ) && stream_delay_answers(config.api.bind.port())
+                ) && stream_delay_answers(config.api.bind)
                 {
                     return Err(AppError::AlreadyRunning);
                 }
@@ -235,15 +235,16 @@ async fn start_core() -> Result<App, AppError> {
     Err(last_err.expect("at least one attempt"))
 }
 
-/// True when stream-delay answers on `port` (its health check names the app).
-fn stream_delay_answers(port: u16) -> bool {
+/// True when stream-delay answers on its API address `api` (its health check
+/// names the app).
+fn stream_delay_answers(api: SocketAddr) -> bool {
     use std::io::{Read, Write};
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = streamdelay_control::reachable(api);
     let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
         return false;
     };
     let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
-    let request = format!("GET /healthz HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let request = format!("GET /healthz HTTP/1.0\r\nHost: {addr}\r\n\r\n");
     if s.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -353,6 +354,38 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    /// Another copy of stream-delay, answering its health check on `bind`.
+    /// `None` where this computer cannot listen there.
+    fn running_copy(bind: &str) -> Option<SocketAddr> {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind(bind).ok()?;
+        let addr = listener.local_addr().ok()?;
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                let _ = s.read(&mut request);
+                let body = r#"{"status":"ok","app":"stream-delay","version":"0.0.0"}"#;
+                let _ = write!(
+                    s,
+                    "HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        Some(addr)
+    }
+
+    #[test]
+    fn a_running_copy_is_found_where_the_settings_say_it_listens() {
+        // Its API on another address than 127.0.0.1 (as on this computer's
+        // network address), or on IPv6 only: where the machine allows it.
+        for bind in ["127.0.0.2:0", "[::1]:0"] {
+            if let Some(addr) = running_copy(bind) {
+                assert!(stream_delay_answers(addr), "{bind}");
+            }
+        }
+    }
 
     #[test]
     fn the_log_file_starts_again_when_full() {
