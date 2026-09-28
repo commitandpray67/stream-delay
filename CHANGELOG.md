@@ -102,6 +102,13 @@ All notable changes to stream-delay are listed here. The format follows
   `[::]` on Windows) or on one address of the computer (`192.168.1.5`) they
   did not connect. It now gives the addresses `run` prints. Nothing changes
   for the default settings or the Docker images.
+- The custom delay field in the dock and on the Control tab, once emptied
+  again after typing, counted as 0: Set (or Enter) removed the delay at once.
+  Set now does nothing until a number is typed.
+- On the Delay settings tab, an emptied "Wait for OBS to reconnect" field
+  was saved as 0 s: from the next start, stream-delay no longer waited for
+  OBS to come back after a crash or a dropped connection. Saving now asks
+  for a number in every field.
 - The slate took the overlay's background color as set, alpha included
   (`#0e0e1080`, which the API and `config.toml` accept; the color picker
   does not offer it), so it could be see-through. What airs under the slate

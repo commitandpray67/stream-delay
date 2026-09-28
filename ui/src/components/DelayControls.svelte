@@ -66,7 +66,10 @@
   });
   const unaired = $derived(formatDelay(snap?.effective_ms ?? 0));
 
-  let custom = $state("");
+  // A number field's value: null when it is empty (also once emptied again) or
+  // holds no number, which must never count as 0, "remove the delay".
+  let custom = $state<number | null>(null);
+  const customSeconds = $derived(typeof custom === "number" && Number.isFinite(custom) ? custom : null);
   let error = $state("");
   // What the last dump did.
   let notice = $state("");
@@ -180,8 +183,9 @@
 
   function submitCustom(e: Event) {
     e.preventDefault();
-    const s = Number(custom);
-    if (!Number.isFinite(s) || s < 0) {
+    const s = customSeconds;
+    if (s === null) return;
+    if (s < 0) {
       error = "Enter a number of seconds.";
       return;
     }
@@ -237,7 +241,7 @@
       placeholder={compact ? "sec" : t("custom.label")}
       bind:value={custom}
     />
-    <button type="submit" disabled={busy || custom === ""}>{t("action.set")}</button>
+    <button type="submit" disabled={busy || customSeconds === null}>{t("action.set")}</button>
   </form>
 
   {#if pending || (!compact && !ended)}

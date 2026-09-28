@@ -26,13 +26,22 @@
     form!.presets.push({ seconds: 45, mode: "rewind" });
   }
 
+  /** Every number in the form. A number field emptied holds null, not 0. */
+  function numbers(f: DelayConfig): unknown[] {
+    return [f.start_seconds, f.max_seconds, f.ram_cap_mb, f.mask_margin_ms, grace, ...f.presets.map((p) => p.seconds)];
+  }
+
   async function save(e: Event) {
     e.preventDefault();
     message = error = "";
+    if (!numbers(form!).every((n) => typeof n === "number" && Number.isFinite(n))) {
+      error = "Enter a number in every field.";
+      return;
+    }
     try {
       // The rolling-buffer switch lives on the Setup tab; keep its current value.
       const delay = { ...$state.snapshot(form), keep_buffer: adminConfig()?.config.delay.keep_buffer ?? true };
-      await updateConfig({ delay, grace_seconds: Number(grace) });
+      await updateConfig({ delay, grace_seconds: grace });
       message = "Saved.";
     } catch (err) {
       error = (err as Error).message;

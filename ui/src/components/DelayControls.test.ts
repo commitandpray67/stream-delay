@@ -319,6 +319,36 @@ describe("cancel", () => {
   });
 });
 
+describe("custom delay", () => {
+  const field = () => screen.getByLabelText(t("custom.label")) as HTMLInputElement;
+  const type = (value: string) => fireEvent.input(field(), { target: { value } });
+  const submit = () => fireEvent.submit(field().form!);
+
+  it("sets what is typed, and 0 removes the delay", async () => {
+    vi.mocked(api.setDelay).mockResolvedValue(ack());
+    vi.mocked(api.goLive).mockResolvedValue(ack({ target_ms: 0 }));
+    dock(state(30, 120));
+    await type("45");
+    await fireEvent.click(button("Set"));
+    expect(api.setDelay).toHaveBeenCalledWith(45, "rewind");
+    await type("0");
+    await submit();
+    expect(api.goLive).toHaveBeenCalledWith("now");
+  });
+
+  it("does nothing with the field emptied: it never removes the delay", async () => {
+    dock(state(30, 120));
+    await type("45");
+    await type("");
+    expect((button("Set") as HTMLButtonElement).disabled).toBe(true);
+    // Enter in the field, whatever the button says.
+    await submit();
+    await vi.runAllTimersAsync();
+    expect(api.goLive).not.toHaveBeenCalled();
+    expect(api.setDelay).not.toHaveBeenCalled();
+  });
+});
+
 describe("a delay that is not the one set", () => {
   it("offers to go back to it after an outage stretched it", async () => {
     vi.mocked(api.setDelay).mockResolvedValue(ack());
