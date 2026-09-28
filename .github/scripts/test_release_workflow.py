@@ -153,7 +153,7 @@ class Release(unittest.TestCase):
         for job, (_, cond) in self.graph.items():
             want = "success" if meant_for(cond, DRY_RUN) else "skipped"
             self.assertEqual(results[job], want, job)
-        for job in ("desktop-dry-run", "headless", "smoke", "container"):
+        for job in ("desktop-dry-run", "headless", "smoke", "container", "source-image"):
             self.assertEqual(results[job], "success", job)
 
     def test_no_checksums_unless_everything_else_passed(self):
@@ -195,6 +195,9 @@ class Simulation(unittest.TestCase):
         self.assertEqual(graph["smoke"][0], ["desktop-dry-run", "publish-headless"])
         self.assertEqual(graph["ci"], ([], "startsWith(github.ref, 'refs/tags/v')"))
         self.assertIn("needs.smoke.result == 'success'", graph["checksums"][1])
+        # The image built from source is checked too, though not published.
+        self.assertIn("source-image", graph["checksums"][0])
+        self.assertIn("needs.source-image.result == 'success'", graph["checksums"][1])
 
     def test_unknown_forms_are_refused(self):
         with self.assertRaises(ValueError):

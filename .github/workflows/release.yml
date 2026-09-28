@@ -428,9 +428,10 @@ jobs:
     # however far back, to have run, and a release skips desktop-dry-run: that
     # skipped this job for v0.3.0. Every job before it passed if these two did
     # (test_release_workflow.py).
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.smoke.result == 'success' && needs.container.result == 'success' }}
-    # Publishing pushes the image, so it must build too.
-    needs: [smoke, container]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.smoke.result == 'success' && needs.container.result == 'success' && needs.source-image.result == 'success' }}
+    # Publishing pushes the image, so it must build too, and so must the image
+    # built from source.
+    needs: [smoke, container, source-image]
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -515,3 +516,20 @@ jobs:
           docker inspect --format '{{json .State.Health}}' stream-delay-check
           docker logs stream-delay-check
           exit 1
+
+  # The image built from source (Dockerfile), for those who build their own.
+  # Nothing else builds it: the release image packages the binaries above.
+  source-image:
+    name: Container image from source (build only)
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false

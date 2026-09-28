@@ -105,6 +105,10 @@ All notable changes to stream-delay are listed here. The format follows
 - The custom delay field in the dock and on the Control tab, once emptied
   again after typing, counted as 0: Set (or Enter) removed the delay at once.
   Set now does nothing until a number is typed.
+- Building the container image from source (`docker build .`, with
+  `Dockerfile`) failed since the desktop app joined the Rust workspace: the
+  build context left the app out, and Cargo could not load the workspace.
+  The release workflow now builds that image too.
 - On the Delay settings tab, an emptied "Wait for OBS to reconnect" field
   was saved as 0 s: from the next start, stream-delay no longer waited for
   OBS to come back after a crash or a dropped connection. Saving now asks
