@@ -19,6 +19,27 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 6, web UI (second full pass)
+
+Read again in full: `lib/` (`api`, `live`, `obs`, `overlay`, `format`,
+`i18n`), the overlay, the dock, `DelayControls`, `StatusBadge`, `Health`,
+`CopyField`, and every dashboard tab with the OBS wizard.
+
+Fixed, each with a test that failed first (cba24a7):
+
+- The custom delay field, typed into and emptied again, removed the delay
+  at once when Set (or Enter) was pressed. Svelte gives an emptied number
+  field `null`, not `""`, so Set stayed enabled, and `Number(null)` is 0,
+  which means "no delay". Set now needs a number.
+- For the same reason the Delay settings tab saved an emptied "Wait for OBS
+  to reconnect" field as 0 s. The other number fields there were refused by
+  the server; the tab now asks for a number in every field before saving.
+
+Checked and sound: the dock shows the encoder connection's last error, which
+holds no address (the dashboard alone gets those); the overlay keeps the
+slate up while it is disconnected; an emptied port in the OBS wizard is sent
+as 0, which cannot connect, and the wizard saves only after connecting.
+
 ### 2026-09-28 — Area 5, clients (second full pass)
 
 Read again in full: `streamdelayd` (`main.rs`, `client.rs`), the desktop
