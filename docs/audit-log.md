@@ -19,6 +19,35 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 3: mutation testing of the relay core
+
+`crates/relay/src/core.rs`, which the earlier mutation runs had left out:
+106 mutants against the relay's unit, `relay` and `lifecycle` tests, the 30
+that survived again with the chaos tests, then those left against the tests
+added meanwhile. Tests were added for each gap that matters:
+
+- The count of wrong ingest keys the dashboard shows, and where the latest
+  came from: nothing checked it; mutants that kept it at 1 or 0 survived.
+- The bitrate shown for the destination: no test looked at its value, nor
+  that it is 0 once nothing is sent.
+- How far an encoder may get ahead of the core (32 MiB): the mechanism was
+  tested with a budget of its own, so a mutant that removed the limit (a
+  budget of 0) survived.
+- A dump while the destination is not connected (after its key was removed,
+  say) must not replay, as what the destination got is not known: with the
+  guard gone, the dump replayed, and no test noticed.
+
+Eleven survive, none a gap worth a test: six change nothing that can be
+seen (the dump path taken when both give the same result, a boundary at
+exactly 2 s, the state published now or at the next tick, the core waking
+early, the averaging window of the bitrate); the check of the RTMP
+application name is never used (`ingest_app` is never set); the numbering of
+dumps, which drops media queued for the destination but not yet written,
+only matters for media caught in the queue at the instant of a dump, which a
+test cannot arrange (the egress side is tested with explicit numbers); and
+the 2 s wait for an egress that never answers a dump is a safety net that
+only a fault could reach.
+
 ### 2026-09-28 — The web UI in a browser (areas 3, 4 and 6)
 
 The dashboard, the dock and the overlay run in Chromium against
