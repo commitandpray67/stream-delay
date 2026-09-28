@@ -19,6 +19,27 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Areas 5 and 6 again: what the dashboard and the app send
+
+Both areas found something in their last pass, so they were looked at
+again, this time from where they meet the settings code: every field the
+dashboard sends against the check the server makes, and how the desktop app
+uses what is saved. Two findings, each fixed with a test that failed first;
+both fixes are in the settings code (area 4):
+
+- a538262: two actions could be given the same hotkey. The desktop app
+  registers a key once, so it went to the first action registered, End
+  stream now before Dump buffer, with only a line in the log. Saving hotkeys
+  like that is now refused, naming both actions; keys compare as the app
+  reads them (case, order and other names of the modifiers).
+- ee27736: the overlay's title and subtitle fields allow 200 and 400
+  characters, but the server counted bytes, so text in another script was
+  refused at about half that. It counts characters now.
+
+Every other field agrees with its check (the delay limits and steps, presets
+against the maximum, the grace period, colors, the badge position, the
+stream key, the OBS port). Areas 5 and 6 are due a full pass again.
+
 ### 2026-09-28 — Area 3, relay (third look, in part)
 
 Read again: `egress.rs` in full, and in `core.rs` how the destination is
