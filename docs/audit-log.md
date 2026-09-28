@@ -26,7 +26,7 @@ The area audited longest ago. Read again: `handshake.rs`, `message.rs` and
 that bound memory. No real finding.
 
 Considered: a publish on a connection that already unpublished is refused
-(it never worked, before 0.3.2 with another message), and the connection is
+(it never worked; until a22c820 the error said "publish before connect"), and the connection is
 then closed; encoders (OBS, FFmpeg) open a new one to publish again.
 
 Checked: the rtmp and flv property tests at 3000 cases; `cargo fuzz` on the
