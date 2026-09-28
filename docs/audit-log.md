@@ -23,15 +23,24 @@ Newest first: date, area, what was found and fixed (or that nothing was).
 
 Read: every workflow (`ci`, `release`, `publish-image`, `soak`, `fuzz`,
 `docs`, `latest-rust`, `real-destinations`), both Dockerfiles, the
-Renovate settings, `check_image_inputs.py`, and the soak and end-to-end
-harnesses. No real finding.
+Renovate settings, the release scripts (`verify_release.py`,
+`check_image_inputs.py`, `prepare_release.py`, `smoke_desktop.py`), the
+fuzz targets, and the soak and end-to-end harnesses.
+
+Fixed, with a test that failed first:
+
+- ea2383d: the release check made sure every expected asset was in the
+  draft, not that nothing else was: a file left over from another attempt
+  would have been checksummed and published. Every release so far holds
+  exactly the expected assets; anything more is now refused.
 
 Checked: actions and base images pinned by digest, and the Rust pin the same
 in `rust-toolchain.toml` and the source Dockerfile (Renovate moves them
 together); least privilege per job, signing secrets only in the `release`
 environment (tags), dry runs signing with a throwaway key; the image pushed
 only for a published full release whose checks name the tag's commit and
-whose archives match their checksums; the release scripts' tests pass (42).
+whose archives match their checksums; the release scripts' tests pass (43);
+the FLV fuzz target, after area 2's change, 42 million runs without a crash.
 
 ### 2026-09-28 — Area 6, web UI
 
