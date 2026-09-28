@@ -260,28 +260,11 @@ fn main() -> Result<()> {
         Cmd::Urls { token, ingest_key } => {
             let path = config_path(&cli.config)?;
             let c = Config::load_or_create(&path)?;
-            let host = format!("127.0.0.1:{}", c.api.bind.port());
             // What `run` uses: what it was given over what is saved.
-            let admin = token.given()?.unwrap_or(c.api.token);
-            let token = |s| scoped_token(&admin, s);
-            println!(
-                "OBS server:  rtmp://127.0.0.1:{}/live",
-                c.ingest.bind.port()
-            );
-            let ingest_key = ingest_key.filter(|k| !k.is_empty()).or(c.ingest.key);
-            match ingest_key.as_deref().filter(|k| !k.is_empty()) {
-                Some(k) => println!("OBS key:     {k}"),
-                None => println!("OBS key:     any"),
+            let admin = token.given()?.unwrap_or_else(|| c.api.token.clone());
+            for line in url_lines(&c, &admin, ingest_key) {
+                println!("{line}");
             }
-            println!("Dashboard:   http://{host}/?token={}", token(Scope::Admin));
-            println!(
-                "OBS dock:    http://{host}/dock?token={}",
-                token(Scope::Control)
-            );
-            println!(
-                "Overlay:     http://{host}/overlay?token={}",
-                token(Scope::Read)
-            );
             Ok(())
         }
         Cmd::Delay { seconds, mask, api } => {
@@ -358,6 +341,33 @@ fn main() -> Result<()> {
             }
         }
     }
+}
+
+/// What `streamdelayd urls` prints for the settings `c`, with the API token
+/// `admin` and the ingest key `ingest_key` if given. The addresses are the ones
+/// `run` prints: where local clients reach what it listens on.
+fn url_lines(c: &Config, admin: &str, ingest_key: Option<String>) -> Vec<String> {
+    let host = reachable(c.api.bind);
+    let token = |s| scoped_token(admin, s);
+    let ingest_key = ingest_key
+        .filter(|k| !k.is_empty())
+        .or_else(|| c.ingest.key.clone());
+    vec![
+        format!("OBS server:  rtmp://{}/live", reachable(c.ingest.bind)),
+        match ingest_key.as_deref().filter(|k| !k.is_empty()) {
+            Some(k) => format!("OBS key:     {k}"),
+            None => "OBS key:     any".into(),
+        },
+        format!("Dashboard:   http://{host}/?token={}", token(Scope::Admin)),
+        format!(
+            "OBS dock:    http://{host}/dock?token={}",
+            token(Scope::Control)
+        ),
+        format!(
+            "Overlay:     http://{host}/overlay?token={}",
+            token(Scope::Read)
+        ),
+    ]
 }
 
 fn run(config: Option<PathBuf>, args: RunArgs) -> Result<()> {
@@ -796,6 +806,50 @@ mod tests {
             token: empty,
         };
         assert_eq!(args.resolve(&config).unwrap().1, "in-the-settings");
+    }
+
+    #[test]
+    fn printed_links_reach_the_addresses_listened_on() {
+        let links = |api: &str, ingest: &str| {
+            let mut c = Config::default();
+            c.api.bind = api.parse().unwrap();
+            c.ingest.bind = ingest.parse().unwrap();
+            url_lines(&c, "0123456789abcdef", None).join("\n")
+        };
+        // Every interface: over loopback, as `run` prints them.
+        let all = links("0.0.0.0:7790", "0.0.0.0:1940");
+        assert!(all.contains("rtmp://127.0.0.1:1940/live"), "{all}");
+        assert!(all.contains("http://127.0.0.1:7790/?token="), "{all}");
+        // IPv6 only, and one address of this computer: 127.0.0.1 would not
+        // connect.
+        let v6 = links("[::1]:7790", "[::]:1940");
+        assert!(v6.contains("rtmp://[::1]:1940/live"), "{v6}");
+        assert!(v6.contains("http://[::1]:7790/?token="), "{v6}");
+        assert!(v6.contains("http://[::1]:7790/dock?token="), "{v6}");
+        assert!(v6.contains("http://[::1]:7790/overlay?token="), "{v6}");
+        let lan = links("192.168.1.5:7790", "192.168.1.5:1940");
+        assert!(lan.contains("rtmp://192.168.1.5:1940/live"), "{lan}");
+        assert!(lan.contains("http://192.168.1.5:7790/?token="), "{lan}");
+    }
+
+    #[test]
+    fn printed_links_carry_the_tokens_and_key_run_uses() {
+        let mut c = Config::default();
+        c.ingest.key = Some("saved-ingest-key".into());
+        let admin = "0123456789abcdef";
+        let text = url_lines(&c, admin, None).join("\n");
+        assert!(text.contains("OBS key:     saved-ingest-key"), "{text}");
+        for s in [Scope::Admin, Scope::Control, Scope::Read] {
+            assert!(text.contains(&scoped_token(admin, s)), "{text}");
+        }
+        // What `run` is given wins; an empty one is none.
+        let given = url_lines(&c, admin, Some("given-ingest-key".into())).join("\n");
+        assert!(given.contains("OBS key:     given-ingest-key"), "{given}");
+        let empty = url_lines(&c, admin, Some(String::new())).join("\n");
+        assert!(empty.contains("OBS key:     saved-ingest-key"), "{empty}");
+        c.ingest.key = None;
+        let any = url_lines(&c, admin, None).join("\n");
+        assert!(any.contains("OBS key:     any"), "{any}");
     }
 
     #[test]

@@ -97,6 +97,11 @@ All notable changes to stream-delay are listed here. The format follows
   were refused. It now reads the same variables (and takes the same options).
   An empty `STREAMDELAY_TOKEN` counts as unset, instead of keeping the client
   from using the settings file's token.
+- `streamdelayd urls` always gave `127.0.0.1` in its links and OBS server
+  address, so with the API or the RTMP input on an IPv6 address (`[::1]`, or
+  `[::]` on Windows) or on one address of the computer (`192.168.1.5`) they
+  did not connect. It now gives the addresses `run` prints. Nothing changes
+  for the default settings or the Docker images.
 - The slate took the overlay's background color as set, alpha included
   (`#0e0e1080`, which the API and `config.toml` accept; the color picker
   does not offer it), so it could be see-through. What airs under the slate
