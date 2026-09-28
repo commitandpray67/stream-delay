@@ -145,6 +145,11 @@ All notable changes to stream-delay are listed here. The format follows
   moved to other ports and saved them, which broke the OBS server address and
   the dock link. It now looks for the running copy where the settings say the
   API listens.
+- Opening the desktop app again while it ran (which only brings up its
+  dashboard) replaced `stream-delay.previous.log`, the log of the run before
+  that the troubleshooting page says to attach after a crash, with the running
+  copy's log, which then carried on under that name. Opening it again now
+  leaves the logs alone.
 - Dock and overlay links got the destination URL (without its key or query)
   in the state, though the settings they get leave the destination out. It
   is now left out of their state too.

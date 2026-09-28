@@ -128,6 +128,8 @@ struct LogFile {
     file: std::fs::File,
     size: u64,
     max: u64,
+    /// Locked for as long as this copy writes the log (see [`open_log`]).
+    _lock: Option<std::fs::File>,
 }
 
 impl LogFile {
@@ -138,6 +140,7 @@ impl LogFile {
             file,
             size: 0,
             max,
+            _lock: None,
         })
     }
 }
@@ -159,19 +162,38 @@ impl std::io::Write for LogFile {
     }
 }
 
+/// Starts this run's log in `dir`. `None` while another copy of the app writes
+/// there: a second start only hands over to the running copy, and must leave
+/// its log, and the one before, alone.
+fn open_log(dir: &std::path::Path, max: u64) -> Option<LogFile> {
+    std::fs::create_dir_all(dir).ok()?;
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("stream-delay.lock"))
+        .ok();
+    // Where files cannot be locked, log as if no other copy ran.
+    if let Some(l) = &lock
+        && let Err(std::fs::TryLockError::WouldBlock) = l.try_lock()
+    {
+        return None;
+    }
+    let path = dir.join("stream-delay.log");
+    // Keep the previous run's log: after a crash, that is the one that matters.
+    let _ = std::fs::rename(&path, dir.join("stream-delay.previous.log"));
+    let mut log = LogFile::create(path, max).ok()?;
+    log._lock = lock;
+    Some(log)
+}
+
 fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info,obws=error".into());
     let dir = Config::default_path()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("logs")));
-    let file = dir.and_then(|d| {
-        std::fs::create_dir_all(&d).ok()?;
-        let path = d.join("stream-delay.log");
-        // Keep the previous run's log: after a crash, that is the one that matters.
-        let _ = std::fs::rename(&path, d.join("stream-delay.previous.log"));
-        LogFile::create(path, MAX_LOG_BYTES).ok()
-    });
+    let file = dir.and_then(|d| open_log(&d, MAX_LOG_BYTES));
     let output = match file {
         Some(f) => tracing_subscriber::fmt::layer()
             .with_ansi(false)
@@ -244,7 +266,9 @@ fn stream_delay_answers(api: SocketAddr) -> bool {
         return false;
     };
     let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
-    let request = format!("GET /healthz HTTP/1.0\r\nHost: {addr}\r\n\r\n");
+    // Its Host check accepts this name whatever the address and LAN setting.
+    let port = addr.port();
+    let request = format!("GET /healthz HTTP/1.0\r\nHost: localhost:{port}\r\n\r\n");
     if s.write_all(request.as_bytes()).is_err() {
         return false;
     }
@@ -355,36 +379,67 @@ mod tests {
 
     use super::*;
 
-    /// Another copy of stream-delay, answering its health check on `bind`.
-    /// `None` where this computer cannot listen there.
-    fn running_copy(bind: &str) -> Option<SocketAddr> {
-        use std::io::Read;
-        let listener = std::net::TcpListener::bind(bind).ok()?;
-        let addr = listener.local_addr().ok()?;
-        std::thread::spawn(move || {
-            if let Ok((mut s, _)) = listener.accept() {
-                let mut request = [0u8; 1024];
-                let _ = s.read(&mut request);
-                let body = r#"{"status":"ok","app":"stream-delay","version":"0.0.0"}"#;
-                let _ = write!(
-                    s,
-                    "HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                );
-            }
-        });
-        Some(addr)
+    /// Another copy of stream-delay, its API on `bind`, and the address it
+    /// listens on. `None` where this computer cannot listen there.
+    fn running_copy(bind: &str, allow_lan: bool) -> Option<(App, SocketAddr)> {
+        let bind: SocketAddr = bind.parse().unwrap();
+        std::net::TcpListener::bind(bind).ok()?;
+        let app = tauri::async_runtime::block_on(App::start(AppOptions {
+            config_path: None,
+            secrets: Arc::new(streamdelay_config::MemorySecrets::default()),
+            overrides: Overrides {
+                api: Some(bind),
+                ingest: Some(SocketAddr::new(bind.ip(), 0)),
+                allow_lan,
+                ..Overrides::default()
+            },
+        }))
+        .unwrap();
+        let dashboard = app.urls().dashboard;
+        let host = dashboard
+            .strip_prefix("http://")
+            .and_then(|u| u.split('/').next());
+        let addr = host.and_then(|h| h.parse().ok()).expect(&dashboard);
+        Some((app, addr))
     }
 
     #[test]
     fn a_running_copy_is_found_where_the_settings_say_it_listens() {
         // Its API on another address than 127.0.0.1 (as on this computer's
-        // network address), or on IPv6 only: where the machine allows it.
+        // network address), or on IPv6 only, with or without control from
+        // other devices: where the machine allows it.
         for bind in ["127.0.0.2:0", "[::1]:0"] {
-            if let Some(addr) = running_copy(bind) {
-                assert!(stream_delay_answers(addr), "{bind}");
+            for allow_lan in [false, true] {
+                if let Some((app, addr)) = running_copy(bind, allow_lan) {
+                    let found = stream_delay_answers(addr);
+                    tauri::async_runtime::block_on(app.shutdown());
+                    assert!(found, "{bind}, allow_lan: {allow_lan}");
+                }
             }
         }
+    }
+
+    #[test]
+    fn starting_again_while_running_leaves_the_logs_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+        std::fs::write(dir.path().join("stream-delay.previous.log"), "crashed\n").unwrap();
+        let mut running = open_log(dir.path(), MAX_LOG_BYTES).unwrap();
+        writeln!(running, "streaming").unwrap();
+        // A second start: the app itself then sends it to the running copy.
+        let second = open_log(dir.path(), MAX_LOG_BYTES);
+        writeln!(running, "still streaming").unwrap();
+        running.flush().unwrap();
+        assert!(second.is_none());
+        assert_eq!(read("stream-delay.previous.log"), "crashed\n");
+        assert_eq!(read("stream-delay.log"), "streaming\nstill streaming\n");
+        // Once it has quit, the next start keeps its log as the one before.
+        drop(running);
+        assert!(open_log(dir.path(), MAX_LOG_BYTES).is_some());
+        assert_eq!(
+            read("stream-delay.previous.log"),
+            "streaming\nstill streaming\n"
+        );
     }
 
     #[test]
