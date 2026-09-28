@@ -50,8 +50,10 @@ what the first pass skipped.
   application (which only a URL that parses can have moved to the secret
   store) reached the dashboard and the diagnostics file. A third look at
   the URL paths this touches (startup, key binding, the relay's
-  destination) found nothing more. Also corrected: a comment claiming only
-  two places use unsafe code (6b47091).
+  destination) found one more, fixed in 6398f8e: an edited URL that kept
+  the `…` standing for a hidden query or key saved `…` in its place; it is
+  refused now. Also corrected: a comment claiming only two places use
+  unsafe code (6b47091).
 - Area 5 (clients): the OBS browser source, `streamdelayd`'s options and
   its HTTP client (no token sent on across redirects). Clean.
 - Area 6 (web UI): the overlay's announcements and badge, and every hint
