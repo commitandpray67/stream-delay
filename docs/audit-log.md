@@ -19,6 +19,59 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Areas 5 and 6, full passes
+
+Area 5, read in full: `apps/desktop/src-tauri/src` (`main.rs`, `tray.rs`,
+`hotkeys.rs`), `crates/streamdelayd/src` (`main.rs`, `client.rs`) and
+`crates/obs/src/lib.rs`. Four findings, each fixed with a test that failed
+first:
+
+- 388ea29, 5b3f3de: before moving to other ports, the desktop app checks
+  whether its port is taken by a running copy. It asked 127.0.0.1 only, so
+  with the API on `[::1]` or a network address a second start moved to
+  other ports and saved them. The first fix named the API's address in the
+  Host header, which the server refuses for a loopback address other than
+  127.0.0.1 without LAN access (found by asking a real server, which the
+  test now does, with and without LAN access); it sends `localhost`.
+- 5b3f3de: opening the app again while it ran renamed the running copy's
+  log to `stream-delay.previous.log`, losing the log of the run before:
+  logging starts in `main`, and the single-instance plugin sends the new
+  start away only later, in its own setup. The log now holds a lock
+  (`stream-delay.lock`); a start that cannot take it leaves the logs alone.
+- 7e6004a: `streamdelayd`'s client takes `HTTP_PROXY`, `HTTPS_PROXY` and
+  `ALL_PROXY` from the environment (ureq's default), and without a
+  `NO_PROXY` for loopback sent its requests to this computer, token
+  included, through the proxy. Requests to `localhost` or a loopback
+  address now go directly.
+- 7e6004a, in area 4's code: without LAN access the Host check accepted
+  `127.0.0.1`, `localhost` and `[::1]` only, so an API on `127.0.0.2`
+  refused every request. Any loopback address literal is accepted.
+
+Area 6, read in full: every file under `ui/src`. Three findings:
+
+- 1234c98: hotkeys exist for the first five presets. Giving one to preset 7
+  left a gap in the list, sent as `null`, and the server refused the whole
+  Advanced tab save.
+- 1147f0b: the Control tab's "stream to" hint used the address the RTMP
+  input listens on (`0.0.0.0` in the Docker image), not the OBS server
+  address the Setup tab and dock give.
+- 1147f0b: without the clipboard API (plain HTTP from another device), Copy
+  fell back to its own field, which for the hidden dashboard link (a
+  password field) copies nothing, and said "Copied" either way.
+
+Considered and left as is: rebuilding the tray menu can leave its status
+line a state behind until the next change; the command line shows a
+refusal the server gives as plain text as "421 Misdirected Request: request
+failed"; the OBS wizard's host and port fields are reset to the saved ones
+when the settings are sent again (after a reconnection) while being edited.
+
+Also run: `chunk_decoder`, `flv` and `sessions` fuzzed for 10 minutes each
+(1,862,376, 150,076,359 and 1,457,883 runs), with no crash; the mutants of
+`check_hotkeys` and `hotkey_keys` all caught (7; four had first failed to
+build for lack of disk space and were run again).
+
+Both areas found something, so both are due another full pass.
+
 ### 2026-09-28 — Areas 5 and 6 again: what the dashboard and the app send
 
 Both areas found something in their last pass, so they were looked at
