@@ -340,9 +340,47 @@ async fn ingest_key_is_enforced() {
             .unwrap()
             .contains("wrong stream key")
     );
+    // The dashboard counts them, and says where the latest came from.
+    let again = tokio::spawn(async move { Publisher::connect(addr, "guess-again").await });
+    assert!(again.await.is_err());
+    let s = relay.state();
+    assert_eq!(s.ingest.bad_keys_recent, 2);
+    assert_eq!(s.ingest.bad_key_from.as_deref(), Some("127.0.0.1"));
     let p = Publisher::connect(addr, "let-me-in").await;
     assert!(relay.state().ingest.connected);
     p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bitrate_shown_for_the_destination_is_what_goes_out() {
+    let (sink, _log, _kill) = start_sink().await;
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_millis(500),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    // About 1 Mbps: frames of 4000 bytes, 30 a second.
+    p.stream_sized(Duration::from_secs(5), 4000).await;
+    let s = relay.state();
+    assert_eq!(s.egress.status, EgressStatus::Live);
+    let (sent, received) = (s.egress.bitrate_kbps, s.delay.ingest.bitrate_kbps);
+    assert!((800..1400).contains(&sent), "{sent} kbps sent");
+    assert!(
+        sent.abs_diff(received) * 5 < received,
+        "{sent} kbps sent, {received} kbps received"
+    );
+    // Once the broadcast is over, nothing is being sent.
+    p.stop().await;
+    let until = Instant::now() + Duration::from_secs(5);
+    while relay.state().egress.status == EgressStatus::Live && Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let s = relay.state();
+    assert_ne!(s.egress.status, EgressStatus::Live);
+    assert_eq!(s.egress.bitrate_kbps, 0);
     relay.shutdown().await;
 }
 
