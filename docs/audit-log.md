@@ -19,6 +19,20 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 7, build and release
+
+Read: every workflow (`ci`, `release`, `publish-image`, `soak`, `fuzz`,
+`docs`, `latest-rust`, `real-destinations`), both Dockerfiles, the
+Renovate settings, `check_image_inputs.py`, and the soak and end-to-end
+harnesses. No real finding.
+
+Checked: actions and base images pinned by digest, and the Rust pin the same
+in `rust-toolchain.toml` and the source Dockerfile (Renovate moves them
+together); least privilege per job, signing secrets only in the `release`
+environment (tags), dry runs signing with a throwaway key; the image pushed
+only for a published full release whose checks name the tag's commit and
+whose archives match their checksums; the release scripts' tests pass (42).
+
 ### 2026-09-28 — Area 6, web UI
 
 Read: `lib/` (`api`, `live`, `obs`, `overlay`, `format`), the overlay, the
