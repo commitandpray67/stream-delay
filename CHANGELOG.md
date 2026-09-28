@@ -161,6 +161,14 @@ All notable changes to stream-delay are listed here. The format follows
   hotkey on the Advanced tab to a preset past the sixth while the ones between
   had none made the tab refuse to save anything, with a message about
   `null`. The ones between are now saved without a hotkey.
+- With the RTMP input listening on every interface (as in the Docker image),
+  the dashboard's Control tab said to stream to `rtmp://0.0.0.0:1935/live` (or
+  `rtmp://[::]:1935/live`), which OBS on Windows cannot connect to. It now
+  gives the server address the Setup tab and the dock give.
+- The dashboard's Copy buttons said "Copied" when nothing was: over plain
+  HTTP from another device, where browsers have no clipboard API, the
+  dashboard link (a hidden field) could not be copied at all. It is now
+  copied from a field made for it, and a copy that fails says so.
 - With the API on a loopback address other than `127.0.0.1` or `[::1]`
   (such as `127.0.0.2`) and without LAN access, every request was refused as
   naming an unexpected host, the dashboard's own included. Any loopback

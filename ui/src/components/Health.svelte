@@ -1,8 +1,13 @@
 <script lang="ts">
   import { formatBitrate, formatBytes } from "../lib/format";
+  import { live } from "../lib/live.svelte";
   import type { RelayState } from "../lib/types";
 
   let { state }: { state: RelayState | null } = $props();
+
+  // Where OBS reaches the RTMP input, as on the Setup tab: not the address it
+  // listens on, which may be every interface (0.0.0.0 or [::]).
+  const obsServer = $derived(live.config?.urls.obs_server ?? `rtmp://${state?.ingest.listen}/live`);
 
   const egressLabel: Record<string, string> = {
     disabled: "No destination set",
@@ -24,7 +29,7 @@
         {#if state.delay.ingest.gop_ms}· keyframe every {(state.delay.ingest.gop_ms / 1000).toFixed(1)} s{/if}
         {#if state.delay.ingest.video_codec}· {state.delay.ingest.video_codec.toUpperCase()}{/if}
       {:else}
-        <span class="muted">Not connected. In OBS, stream to <code>rtmp://{state.ingest.listen}/live</code></span>
+        <span class="muted">Not connected. In OBS, stream to <code>{obsServer}</code></span>
       {/if}
     </dd>
     <dt>To destination</dt>
