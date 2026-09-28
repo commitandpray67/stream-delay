@@ -434,6 +434,15 @@ fn a_client_config_never_shows_its_key() {
     let shown = format!("{cfg:?}");
     assert!(!shown.contains("live_123_secret"), "{shown}");
     assert!(shown.contains("rtmps://live.twitch.tv/app"), "{shown}");
+    // Nor a password in the query, as with RtmpUrl.
+    let cfg = ClientConfig::new(
+        "app?auth=SECRET",
+        "rtmp://relay.example/app?auth=SECRET",
+        "k",
+    );
+    let shown = format!("{cfg:?}");
+    assert!(!shown.contains("SECRET"), "{shown}");
+    assert!(shown.contains("rtmp://relay.example/app?…"), "{shown}");
 }
 
 #[test]

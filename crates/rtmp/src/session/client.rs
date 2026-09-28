@@ -21,9 +21,15 @@ pub struct ClientConfig {
 }
 
 impl fmt::Debug for ClientConfig {
+    // Neither the stream key nor the query, which may hold a password (as
+    // `RtmpUrl::redacted` leaves it out).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tc_url = match self.tc_url.split_once('?') {
+            Some((base, _)) => format!("{base}?…"),
+            None => self.tc_url.clone(),
+        };
         f.debug_struct("ClientConfig")
-            .field("tc_url", &self.tc_url)
+            .field("tc_url", &tc_url)
             .field("stream_key", &"<redacted>")
             .finish()
     }
