@@ -19,6 +19,38 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 3, relay (second pass)
+
+A second full pass, reading for what passes over one file at a time miss:
+how the ingest, core, egress and engine interact. No real finding.
+
+Traced:
+
+- A dump that resets the destination connection. The egress answers the
+  dump before it reports the disconnection, and the core may run the engine
+  in between. The dumped part is gone from the buffer either way: a hold
+  empties it, and a replay cuts it off. So the disconnection can only move
+  the output back to what aired, never into what was dumped. What the
+  engine emits in between carries the old connection's generation, and is
+  dropped and taken off the backlog.
+- What the destination surely has after a reset. The write log counts
+  plaintext RTMP bytes, while the OS reports TCP bytes (TLS overhead, and
+  control messages the log leaves out). Taking the larger from the smaller
+  errs towards "not delivered", so a dump never counts something as aired
+  that may not have.
+- End stream, a destination change or a shutdown while the connection is
+  just coming up. The stop reaches the egress before its first media: the
+  control channel is read first, and queued media is dropped on the way
+  out. Every buffer discard happens with the connection stopping or off.
+- Publisher takeover, eviction for room and shutdown, through the close
+  notification, the connection slots and the IDs events carry.
+- Backpressure: ingest waits for room in the queue budget without
+  reordering one connection's events, and egress writes time out.
+
+Considered and left as designed: a publisher crash-reconnecting before
+anything has aired starts the broadcast from the new connection, without
+what came before the crash (as a restart does; see the first pass).
+
 ### 2026-09-28 — Area 2, protocol parsing (weekly)
 
 The area audited longest ago. Read again: `handshake.rs`, `message.rs` and
