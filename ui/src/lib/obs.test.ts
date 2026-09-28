@@ -31,6 +31,24 @@ describe("OverlayReporter", () => {
     expect(sent).toEqual([{ type: "overlay", active: false }]);
   });
 
+  it("confirms the slate again after a reconnection, which may be to a restarted stream-delay", () => {
+    const { r, sent, nextFrame } = setup();
+    r.slateShown(3);
+    nextFrame();
+    nextFrame();
+    expect(sent).toEqual([{ type: "slate-shown", change: 3 }]);
+    // stream-delay restarted while OBS kept the page open: it numbers its
+    // changes from the start again, and has not been told about this one.
+    r.connected();
+    r.slateShown(3);
+    nextFrame();
+    nextFrame();
+    expect(sent).toEqual([
+      { type: "slate-shown", change: 3 },
+      { type: "slate-shown", change: 3 },
+    ]);
+  });
+
   it("confirms the slate only once it has been painted, once per change", () => {
     const { r, sent, nextFrame } = setup();
     r.slateShown(3);

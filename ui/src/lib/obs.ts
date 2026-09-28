@@ -36,8 +36,13 @@ export class OverlayReporter {
     return () => target.removeEventListener("obsSourceActiveChanged", changed);
   }
 
-  /** Call on every (re)connection to stream-delay. */
+  /**
+   * Call on every (re)connection to stream-delay. It may have restarted, and
+   * numbers the slate's changes from the start again: the slate up now is
+   * confirmed anew.
+   */
   connected(): void {
+    this.confirmed = null;
     this.report();
   }
 

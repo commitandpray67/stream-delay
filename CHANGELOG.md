@@ -106,6 +106,11 @@ All notable changes to stream-delay are listed here. The format follows
   overlay settings it draws the slate with (if they had not arrived), so the
   slate counted as covering the stream while it was not on screen. It now
   reports only a slate it has drawn.
+- After stream-delay restarted while OBS kept the overlay open (quit and
+  started again, not an update, which reloads it), the overlay did not
+  confirm the slate for a change numbered as one it had confirmed before
+  the restart, so that change's slate counted as unconfirmed. It now
+  confirms the slate anew after every reconnection.
 - The desktop app's update question said whether installing ends the stream
   only as it was when the question came up. Left open (it appears at
   start) until after a stream started, Install ended the stream without
