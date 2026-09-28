@@ -202,6 +202,10 @@ fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
             }
         }
     }
+    if let Some(h) = &u.hotkeys {
+        let presets = u.delay.as_ref().unwrap_or(&current.delay).presets.len();
+        check_hotkeys(h, presets)?;
+    }
     if let Some(o) = &u.overlay {
         for c in [&o.accent_color, &o.background_color, &o.text_color] {
             if !valid_color(c) {
@@ -220,6 +224,79 @@ fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Refuses one hotkey for two actions: the desktop app would give it to the
+/// first it registers and ignore the other, so a key meant to dump the
+/// buffer could end the stream. `presets` is how many presets there are (keys
+/// for others are not registered).
+fn check_hotkeys(h: &HotkeyConfig, presets: usize) -> Result<(), String> {
+    let actions = [
+        ("Remove delay now", &h.go_live),
+        ("Remove delay after it airs", &h.go_live_after_air),
+        ("End stream now", &h.end_stream),
+        (
+            "End stream (after the buffer airs)",
+            &h.end_stream_after_air,
+        ),
+        ("Dump buffer", &h.dump),
+    ]
+    .map(|(name, spec)| (name.to_string(), spec));
+    let presets = h
+        .presets
+        .iter()
+        .take(presets)
+        .enumerate()
+        .map(|(i, spec)| (format!("Preset {}", i + 1), spec));
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for (name, spec) in actions.into_iter().chain(presets) {
+        let Some(keys) = hotkey_keys(spec) else {
+            continue;
+        };
+        if let Some((_, other)) = seen.iter().find(|(k, _)| *k == keys) {
+            return Err(format!(
+                "{other} and {name} have the same hotkey ({}): give each its own",
+                spec.trim()
+            ));
+        }
+        seen.push((keys, name));
+    }
+    Ok(())
+}
+
+/// A hotkey as the desktop app reads it, so that two ways of writing the same
+/// keys compare equal: case, spaces, the order of the modifiers and their other
+/// names (`Option` for `Alt`, `Digit1` for `1`) make no difference. `None` for
+/// an unassigned one.
+fn hotkey_keys(spec: &str) -> Option<String> {
+    let mut parts: Vec<String> = spec
+        .split('+')
+        .map(|p| p.trim().to_ascii_uppercase())
+        .collect();
+    let key = parts.pop().filter(|k| !k.is_empty())?;
+    // As the desktop app's shortcut library reads it.
+    let cmd_or_ctrl = if cfg!(target_os = "macos") {
+        "SUPER"
+    } else {
+        "CONTROL"
+    };
+    let mut mods: Vec<&str> = parts
+        .iter()
+        .map(|m| match m.as_str() {
+            "OPTION" | "ALT" => "ALT",
+            "CONTROL" | "CTRL" => "CONTROL",
+            "COMMAND" | "CMD" | "SUPER" => "SUPER",
+            "COMMANDORCONTROL" | "COMMANDORCTRL" | "CMDORCTRL" | "CMDORCONTROL" => cmd_or_ctrl,
+            other => other,
+        })
+        .collect();
+    mods.sort_unstable();
+    mods.dedup();
+    let key = ["DIGIT", "KEY"]
+        .iter()
+        .find_map(|p| key.strip_prefix(p).filter(|k| k.len() == 1))
+        .map_or(key.clone(), str::to_string);
+    Some(format!("{}+{key}", mods.join("+")))
 }
 
 /// What applying a [`SettingsUpdate`] changed that the settings file does not
@@ -457,6 +534,44 @@ mod tests {
         // The encoder grace period.
         assert!(check(serde_json::json!({ "grace_seconds": 600 })).is_ok());
         assert!(check(serde_json::json!({ "grace_seconds": 601 })).is_err());
+    }
+
+    #[test]
+    fn one_hotkey_is_never_given_two_actions() {
+        let current = Config::default();
+        let check = |edit: &dyn Fn(&mut HotkeyConfig)| {
+            let mut h = current.hotkeys.clone();
+            edit(&mut h);
+            let u: SettingsUpdate =
+                serde_json::from_value(serde_json::json!({ "hotkeys": h })).unwrap();
+            validate(&u, &current)
+        };
+        assert!(check(&|_| {}).is_ok());
+        assert!(check(&|h| h.dump = "Ctrl+Alt+D".into()).is_ok());
+        // The app would give the key to one of them, silently: here the
+        // stream would end instead of the buffer being dumped.
+        let e = check(&|h| {
+            h.end_stream = "Ctrl+Alt+D".into();
+            h.dump = "Ctrl+Alt+D".into();
+        })
+        .unwrap_err();
+        assert!(e.contains("Ctrl+Alt+D"), "{e}");
+        // However it is written.
+        for same in ["ctrl + alt + d", "Alt+Control+D", "Ctrl+Option+KeyD"] {
+            let r = check(&|h| {
+                h.end_stream = "Ctrl+Alt+D".into();
+                h.dump = same.into();
+            });
+            assert!(r.is_err(), "{same}");
+        }
+        // A preset's key, as another action's.
+        assert!(check(&|h| h.dump = "CmdOrCtrl+Alt+Shift+1".into()).is_err());
+        assert!(check(&|h| h.presets[1] = "Shift+Alt+CmdOrCtrl+Digit1".into()).is_err());
+        // Unassigned ones, and keys for presets that do not exist, do not count.
+        assert!(check(&|h| h.presets.push("CmdOrCtrl+Alt+Shift+L".into())).is_ok());
+        // Other keys, or other modifiers, are other hotkeys.
+        assert!(check(&|h| h.dump = "CmdOrCtrl+Alt+Shift+9".into()).is_ok());
+        assert!(check(&|h| h.dump = "CmdOrCtrl+Alt+1".into()).is_ok());
     }
 
     #[tokio::test]

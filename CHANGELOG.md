@@ -105,6 +105,10 @@ All notable changes to stream-delay are listed here. The format follows
 - The custom delay field in the dock and on the Control tab, once emptied
   again after typing, counted as 0: Set (or Enter) removed the delay at once.
   Set now does nothing until a number is typed.
+- Two actions could be given the same hotkey, and the desktop app then gave
+  the key to one of them without saying so: with End stream now and Dump
+  buffer on one key, pressing it ended the stream. Saving hotkeys like that
+  is now refused, naming both actions (however the keys are written).
 - Building the container image from source (`docker build .`, with
   `Dockerfile`) failed since the desktop app joined the Rust workspace: the
   build context left the app out, and Cargo could not load the workspace.
