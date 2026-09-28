@@ -404,6 +404,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_obs_password_is_never_shown() {
+        // Connection attempts are logged with the target.
+        let t = ObsTarget {
+            host: "192.168.1.20".into(),
+            port: 4455,
+            password: Some("hunter2-obs".into()),
+        };
+        let shown = format!("{t:?}");
+        assert!(
+            shown.contains("192.168.1.20") && shown.contains("4455"),
+            "{shown}"
+        );
+        assert!(!shown.contains("hunter2"), "{shown}");
+    }
+
+    #[test]
     fn detects_twitch_key_and_our_server() {
         let twitch = StreamSettings {
             service_type: "rtmp_common".into(),

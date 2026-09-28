@@ -901,6 +901,8 @@ async fn small_kept_messages_cannot_hold_more_memory_than_the_buffer_may_use() {
     let limit = 4 * 1024 * 1024 + 32 * 1024 * 1024;
     let held = relay.ingest_block_bytes();
     assert!(held <= limit, "{held} bytes held, limit {limit}");
+    // What the buffer keeps is in blocks: a measure of nothing proves nothing.
+    assert!(held > 0, "no blocks measured");
     assert!(
         relay.state().delay.buffered_bytes > 0,
         "the audio is still kept"

@@ -26,10 +26,14 @@ struct FakeObs {
     inputs: Vec<String>,
     /// The URL of each browser source.
     urls: std::collections::HashMap<String, String>,
-    /// Asks clients for a password (any is accepted).
+    /// Asks clients for a password (any is accepted, unless `reject_auth`).
     auth: bool,
+    /// Refuses the password, as OBS does a wrong one.
+    reject_auth: bool,
     /// The authentication each client sent.
     auth_seen: Vec<Option<String>>,
+    /// Streaming, but reconnecting after the connection dropped.
+    reconnecting: bool,
 }
 
 type Shared = Arc<Mutex<FakeObs>>;
@@ -53,7 +57,20 @@ async fn serve(obs: Shared, mut socket: WebSocket) {
         let reply = match v["op"].as_u64() {
             Some(1) => {
                 let auth = v["d"]["authentication"].as_str().map(String::from);
-                obs.lock().unwrap().auth_seen.push(auth);
+                let reject = {
+                    let mut o = obs.lock().unwrap();
+                    o.auth_seen.push(auth);
+                    o.reject_auth
+                };
+                if reject {
+                    // What obs-websocket does with a wrong password.
+                    let close = axum::extract::ws::CloseFrame {
+                        code: 4009,
+                        reason: "Authentication failed.".into(),
+                    };
+                    let _ = socket.send(Message::Close(Some(close))).await;
+                    return;
+                }
                 json!({"op": 2, "d": {"negotiatedRpcVersion": 1}})
             }
             Some(6) => {
@@ -88,7 +105,7 @@ fn respond(obs: &Shared, ty: &str, data: &Value) -> Value {
             "platformDescription": "test",
         }),
         "GetStreamStatus" => json!({
-            "outputActive": o.streaming, "outputReconnecting": false,
+            "outputActive": o.streaming, "outputReconnecting": o.reconnecting,
             "outputTimecode": "00:00:00.000", "outputDuration": 0, "outputCongestion": 0.0,
             "outputBytes": 0, "outputSkippedFrames": 0, "outputTotalFrames": 0,
         }),
@@ -150,7 +167,9 @@ async fn spawn_obs(service_type: &str, settings: Value) -> (Shared, u16) {
         inputs: vec![],
         urls: Default::default(),
         auth: false,
+        reject_auth: false,
         auth_seen: vec![],
+        reconnecting: false,
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -563,6 +582,64 @@ async fn refuses_while_obs_is_streaming() {
     assert_eq!(s, StatusCode::CONFLICT);
     assert!(r["error"].as_str().unwrap().contains("Stop the stream"));
     assert_eq!(obs.lock().unwrap().service_type, "rtmp_common");
+}
+
+#[tokio::test]
+async fn nothing_is_changed_while_obs_streams_or_reconnects() {
+    // Reconnecting after a dropped connection, OBS is still live for viewers.
+    let (app, obs, _secrets, _dir) = setup().await;
+    obs.lock().unwrap().reconnecting = true;
+    let (_, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+    assert_eq!(status["streaming"], true, "{status}");
+    let (s, r) = call(&app, "POST", "/api/v1/obs/configure", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    assert_eq!(obs.lock().unwrap().service_type, "rtmp_common");
+    // Set up while off air; then the backup is not put back while live either.
+    obs.lock().unwrap().reconnecting = false;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    for (streaming, reconnecting) in [(true, false), (false, true)] {
+        let before = {
+            let mut o = obs.lock().unwrap();
+            (o.streaming, o.reconnecting) = (streaming, reconnecting);
+            o.settings.clone()
+        };
+        let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("Stop the stream"),
+            "{r}"
+        );
+        assert_eq!(obs.lock().unwrap().settings, before);
+    }
+}
+
+#[tokio::test]
+async fn a_wrong_obs_password_is_said_to_be_one() {
+    let (app, obs, _secrets, _dir) = setup().await;
+    {
+        let mut o = obs.lock().unwrap();
+        o.auth = true;
+        o.reject_auth = true;
+    }
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    let port = cfg["config"]["obs"]["port"].as_u64().unwrap();
+    let body = json!({"host": "127.0.0.1", "port": port, "password": "not-it"});
+    let (s, r) = call(&app, "POST", "/api/v1/obs/connect", Some(body)).await;
+    assert_ne!(s, StatusCode::OK, "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("rejected the WebSocket password"),
+        "{r}"
+    );
 }
 
 #[tokio::test]

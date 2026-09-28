@@ -486,6 +486,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_destination_never_shows_its_stream_key() {
+        // Changes of destination are logged with it.
+        for (url, key) in [
+            (
+                "rtmp://live.example.com/app",
+                DestinationKey::Fixed("sk_live_secret".into()),
+            ),
+            (
+                "rtmp://live.example.com/app/sk_live_secret",
+                DestinationKey::Fixed(String::new()),
+            ),
+        ] {
+            let shown = format!(
+                "{:?}",
+                Destination {
+                    url: url.into(),
+                    key
+                }
+            );
+            assert!(shown.contains("live.example.com"), "{shown}");
+            assert!(!shown.contains("sk_live_secret"), "{shown}");
+        }
+    }
+
+    #[test]
     fn ingest_keys_must_be_hard_to_guess() {
         use KeyWeakness::*;
         // Generated keys (32 hex digits), and a strong one of the shortest length.
