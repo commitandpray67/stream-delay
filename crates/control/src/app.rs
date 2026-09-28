@@ -411,8 +411,9 @@ pub fn dump_summary(ack: &Ack) -> String {
         Some(DumpOutcome::Cover) => {
             "Dumped. The overlay slate covers the stream while the delay builds back up.".into()
         }
+        // Only an overlay OBS said is on stream covers a dump.
         Some(DumpOutcome::Hold) if ack.pending => format!(
-            "Dumped. No overlay is connected, so viewers see the last frame, still, for about \
+            "Dumped. No overlay is on stream, so viewers see the last frame, still, for about \
              {secs} s until the delay is back."
         ),
         _ => "Dumped. Nothing that was waiting will air.".into(),
@@ -593,6 +594,9 @@ mod tests {
         assert!(dump_summary(&ack(DumpOutcome::Cover, true)).contains("slate"));
         let hold = dump_summary(&ack(DumpOutcome::Hold, true));
         assert!(hold.contains("still, for about 30 s"), "{hold}");
+        // An overlay can be connected without OBS having said it is on stream
+        // (after OBS starts): only one on stream covers a dump.
+        assert!(hold.contains("No overlay is on stream"), "{hold}");
         let gone = dump_summary(&ack(DumpOutcome::Hold, false));
         assert!(gone.contains("Nothing that was waiting"), "{gone}");
     }

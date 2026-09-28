@@ -217,6 +217,10 @@ All notable changes to stream-delay are listed here. The format follows
   wizard now changes nothing and says so, OBS counts as set up only with the
   ingest key, and the Setup tab explains it. The dashboard's settings gain
   `ingest_key_required`.
+- For a dump that held the last frame, the tray, hotkeys and `streamdelayd
+  dump` said "No overlay is connected", also with an overlay connected that
+  OBS had not said was on stream (after OBS starts, until the overlay is hidden
+  and shown once). They now say that no overlay is on stream.
 - On the Setup tab, saving another setting while typing the OBS address for
   *Connect to OBS* (saving the destination, or the rolling buffer switch) put
   the saved address back in the fields, so Connect went to the old one. What

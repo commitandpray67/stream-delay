@@ -39,6 +39,20 @@ thing. Fixed with tests that failed first:
 - The dashboard's settings did not say whether an ingest key is required
   (the key itself is left out); they gain `ingest_key_required`.
 
+The rest of the pass: the rest of `app.rs`, and the config crate (`lib.rs`
+and `secrets.rs`: loading and saving, private files, the secret store's one
+copy of each value, its undo on failure and the damaged file set aside). One
+more finding, fixed with the tests that pinned the old text changed first:
+for a dump that held the last frame, the tray, hotkeys and `streamdelayd
+dump` said "No overlay is connected", also with an overlay connected that OBS
+had not said was on stream, which only a hide and show fixes. They now say
+that no overlay is on stream. And the settings' description of the API token
+said the dock and overlay links carry it; they carry tokens made from it.
+
+Area 4 is due another full pass. The relay's lifecycle, relay and chaos tests
+ran 15 times side by side with no failure, the three timing tests added today
+among them.
+
 ### 2026-09-28 — Area 3: mutation testing of the relay core
 
 `crates/relay/src/core.rs`, which the earlier mutation runs had left out:

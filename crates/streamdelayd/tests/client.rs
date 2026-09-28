@@ -173,7 +173,7 @@ fn a_dump_says_what_viewers_see() {
         ),
         (
             r#"{"target_ms":29500,"effective_ms":0,"pending":true,"history_short":false,"dump":"hold"}"#,
-            "No overlay is connected, so viewers see the last frame, still, for about 30 s",
+            "No overlay is on stream, so viewers see the last frame, still, for about 30 s",
         ),
         // Before or at the end of a broadcast nothing is held, nothing more airs.
         (

@@ -287,7 +287,8 @@ impl Default for DelayConfig {
 #[serde(default)]
 pub struct ApiConfig {
     pub bind: SocketAddr,
-    /// Generated on first run. Embedded in dock and overlay URLs.
+    /// Generated on first run. The dashboard link carries it; the dock and
+    /// overlay links carry tokens made from it that can do less.
     pub token: String,
     /// Allow other devices on the network to use the API (still token-protected).
     pub allow_lan: bool,
