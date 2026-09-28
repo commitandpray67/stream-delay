@@ -532,8 +532,9 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Windows access lists, through the Win32 API: one of the two places with unsafe
-/// code in the project (the other sets the allocator's threshold, in the relay).
+/// Windows access lists, through the Win32 API. The config and relay crates are
+/// the only ones that allow unsafe code: here, and in the relay to set the
+/// allocator's threshold and to ask the OS what a socket still holds to send.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows_acl {
