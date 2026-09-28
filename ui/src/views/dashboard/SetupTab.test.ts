@@ -73,3 +73,39 @@ describe("where to stream", () => {
     expect(serverUrl().value).toBe("rtmp://other.example/live");
   });
 });
+
+describe("the saved stream key", () => {
+  const withKey = () => {
+    const c = config({ service: "twitch", url: TWITCH, key_mode: "stored" });
+    (c as { destination_key_set: boolean }).destination_key_set = true;
+    return c;
+  };
+  const remove = () => screen.getByRole("button", { name: /Remove saved key|Click again/ });
+
+  afterEach(() => {
+    live.state = null;
+  });
+
+  it("is removed only on a second click, as it cannot be undone", async () => {
+    live.config = withKey();
+    render(SetupTab);
+    await fireEvent.click(remove());
+    expect(api.clearStreamKey).not.toHaveBeenCalled();
+    await fireEvent.click(remove());
+    expect(api.clearStreamKey).toHaveBeenCalledOnce();
+  });
+
+  it("says that removing it while streaming ends the broadcast", async () => {
+    live.config = withKey();
+    live.state = {
+      ended: false,
+      ingest: { connected: true },
+      egress: { status: "live" },
+      delay: { ingest: { bitrate_kbps: 6000 } },
+    } as unknown as typeof live.state;
+    render(SetupTab);
+    await fireEvent.click(remove());
+    expect(screen.getByRole("alert").textContent).toMatch(/ends? (your|the) (stream|broadcast)/i);
+    expect(api.clearStreamKey).not.toHaveBeenCalled();
+  });
+});

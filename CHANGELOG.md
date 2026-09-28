@@ -25,6 +25,9 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Changed
 
+- Removing the saved stream key on the Setup tab takes a second click, and
+  while you are streaming it says that this ends the broadcast: without its
+  key, the destination refuses the stream.
 - A dump no longer airs you live when nothing covers the stream. It now does
   the first of three things that can happen: a **replay** of the last stretch
   (Rewind, with enough buffer), the overlay slate covering the stream while the

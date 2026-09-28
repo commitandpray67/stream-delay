@@ -85,8 +85,27 @@
     return kbps > 0 ? Math.round((kbps * max) / 8 / 1000) : null;
   });
 
+  // Sending to the destination, or about to: without its key, the
+  // connection is refused, and the broadcast ends.
+  const streaming = $derived.by(() => {
+    const s = live.state;
+    return !!s && !s.ended && (s.ingest.connected || ["connecting", "live", "retrying"].includes(s.egress.status));
+  });
+
+  // Removing the key cannot be undone: a second click confirms.
+  let confirmForget = $state(false);
+  let disarmForget: ReturnType<typeof setTimeout> | undefined;
+
   async function forgetKey() {
     error = message = "";
+    if (!confirmForget) {
+      confirmForget = true;
+      clearTimeout(disarmForget);
+      disarmForget = setTimeout(() => (confirmForget = false), 5000);
+      return;
+    }
+    confirmForget = false;
+    clearTimeout(disarmForget);
     try {
       await clearStreamKey();
       message = "Stream key removed.";
@@ -134,7 +153,16 @@
         <div class="row">
           <button class="primary" type="submit">Save</button>
           {#if pc.destination_key_set && !passthrough}
-            <button type="button" class="danger" onclick={forgetKey}>Remove saved key</button>
+            <button type="button" class="danger" class:armed={confirmForget} onclick={forgetKey}>
+              {confirmForget ? "Click again to remove" : "Remove saved key"}
+            </button>
+          {/if}
+          {#if confirmForget}
+            <span class={streaming ? "error" : "muted small"} role={streaming ? "alert" : "status"}>
+              {streaming
+                ? "You are streaming: without the key, the destination refuses the stream, which ends your broadcast now."
+                : "You will need to enter the key again to stream."}
+            </span>
           {/if}
           {#if message}<span class="ok">{message}</span>{/if}
           {#if error}<span class="error" role="alert">{error}</span>{/if}
