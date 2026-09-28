@@ -152,6 +152,8 @@ export interface PublicConfig extends LimitedConfig {
   scope: "admin";
   config: Config;
   destination_key_set: boolean;
+  /** Encoders must stream with the ingest key (`urls.obs_key`); with passthrough, it is what is forwarded. */
+  ingest_key_required: boolean;
   secrets_backend: string;
   urls: { dashboard: string; dock: string; overlay: string; obs_server: string; obs_key: string };
   services: { id: string; name: string; url: string }[];

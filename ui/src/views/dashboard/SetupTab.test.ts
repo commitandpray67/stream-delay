@@ -92,6 +92,35 @@ describe("where to find the stream key", () => {
   });
 });
 
+describe("passthrough where an ingest key is required", () => {
+  /** The stream key "Set up OBS by hand" gives. */
+  const byHandKey = () =>
+    [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.trim().startsWith("Stream Key"))!
+      .querySelector("input")!.value;
+  const warning = () => screen.queryByText(/ingest key/, { selector: "p" });
+  function withIngestKey(required: boolean) {
+    const c = config({ service: "custom", url: "rtmp://relay.example/live", key_mode: "passthrough" });
+    Object.assign(c, { ingest_key_required: required });
+    (c.urls as { obs_key: string }).obs_key = required ? "ingest-key-0123" : "streamdelay";
+    return c;
+  }
+
+  it("says OBS streams with the ingest key, and that it is what is forwarded", () => {
+    live.config = withIngestKey(true);
+    render(SetupTab);
+    expect(warning()?.textContent).toMatch(/forward/);
+    expect(byHandKey()).toBe("ingest-key-0123");
+  });
+
+  it("without one, OBS keeps its own key", () => {
+    live.config = withIngestKey(false);
+    render(SetupTab);
+    expect(warning()).toBeNull();
+    expect(byHandKey()).toBe("(your real stream key)");
+  });
+});
+
 describe("the saved stream key", () => {
   const withKey = () => {
     const c = config({ service: "twitch", url: TWITCH, key_mode: "stored" });

@@ -217,18 +217,26 @@ fn passthrough(c: &Config) -> bool {
     c.destination.key_mode == KeyMode::Passthrough
 }
 
-/// True when OBS streams to stream-delay at `server` with a key that works:
-/// stream-delay's own (`obs_key`) where one is required, or, when stream-delay
-/// forwards the key OBS streams with (passthrough), a key of OBS's own.
+/// True when encoders must stream to stream-delay with its ingest key.
+fn ingest_key_required(c: &Config) -> bool {
+    c.ingest.key.as_deref().is_some_and(|k| !k.is_empty())
+}
+
+/// True when OBS streams to stream-delay at `server` with a key it takes:
+/// stream-delay's own (`obs_key`) where one is required (with passthrough, the
+/// key it then forwards), or else, when stream-delay forwards the key OBS
+/// streams with (passthrough), a key of OBS's own.
 fn set_up(s: &StreamSettings, server: &str, c: &Config, obs_key: &str) -> bool {
     if !s.points_to(server) {
         return false;
     }
     let key = s.key().unwrap_or("");
-    if passthrough(c) {
+    if ingest_key_required(c) {
+        key == obs_key
+    } else if passthrough(c) {
         !key.is_empty() && !own_key(key, obs_key)
     } else {
-        c.ingest.key.as_deref().is_none_or(str::is_empty) || key == obs_key
+        true
     }
 }
 
@@ -262,10 +270,20 @@ async fn set_up_before(s: &StreamSettings, c: &Config, obs_key: &str) -> bool {
 
 /// The stream key to give OBS: stream-delay's own (`obs_key`), unless
 /// stream-delay forwards the key OBS streams with (passthrough): then OBS
-/// keeps its own, and without one there is nothing to forward.
+/// keeps its own, and without one there is nothing to forward. Nor where an
+/// ingest key is required: OBS would have to stream with that, and it would be
+/// forwarded.
 fn key_for_obs(s: &StreamSettings, c: &Config, obs_key: &str) -> Result<String, ApiError> {
     if !passthrough(c) {
         return Ok(obs_key.to_string());
+    }
+    if ingest_key_required(c) {
+        // Its own key would be refused, and the ingest key forwarded.
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "OBS must stream to stream-delay with its ingest key (shown on this tab), and              with passthrough that is the key stream-delay forwards to the destination.              Turn passthrough off on this tab and enter your stream key here."
+                .into(),
+        ));
     }
     match s.key() {
         Some(k) if !own_key(k, obs_key) => Ok(k.to_string()),

@@ -209,6 +209,14 @@ All notable changes to stream-delay are listed here. The format follows
   without saying that a key was needed. The state's `egress.status` is now
   `disabled` whenever there is no key to send with (the destination is still
   given), the dashboard says *No stream key*, and the dock asks for one.
+- With passthrough where an ingest key is required (stream-delay listening on
+  your network, as in Docker), setting up OBS on the Setup tab gave OBS its own
+  stream key, which stream-delay then refused, and said OBS was set up; *Set
+  up OBS by hand* said to use your real key too. OBS has to stream with the
+  ingest key there, and passthrough forwards that key to the destination. The
+  wizard now changes nothing and says so, OBS counts as set up only with the
+  ingest key, and the Setup tab explains it. The dashboard's settings gain
+  `ingest_key_required`.
 - On the Setup tab, saving another setting while typing the OBS address for
   *Connect to OBS* (saving the destination, or the rolling buffer switch) put
   the saved address back in the fields, so Connect went to the old one. What

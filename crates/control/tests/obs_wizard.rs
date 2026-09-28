@@ -943,6 +943,48 @@ async fn with_passthrough_obs_without_a_key_of_its_own_is_left_alone() {
 }
 
 #[tokio::test]
+async fn with_passthrough_and_an_ingest_key_obs_is_left_alone() {
+    // OBS must stream with the ingest key, and passthrough forwards the key OBS
+    // streams with: its own key is refused, and the ingest key would go to the
+    // destination. Nothing is changed, and the reason given.
+    const INGEST_KEY: &str = "ingest-key-0123456789abcdef";
+    let (app, obs, secrets, _dir) = setup_with_config(
+        "rtmp_custom",
+        json!({"server": "rtmp://a.rtmp.youtube.com/live2", "key": "yt-key-2468", "use_auth": false}),
+        |c| {
+            c.destination.service = "custom".into();
+            c.destination.url = "rtmp://a.rtmp.youtube.com/live2".into();
+            c.destination.key_mode = KeyMode::Passthrough;
+            c.ingest.key = Some(INGEST_KEY.into());
+        },
+    )
+    .await;
+    let before = obs.lock().unwrap().settings.clone();
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("ingest key"), "{r}");
+    assert_eq!(obs.lock().unwrap().settings, before);
+    assert_eq!(secrets.get(secret::OBS_BACKUP), None);
+    // Pointed at stream-delay by hand with its own key, which is refused
+    // there: not set up. With the ingest key it is.
+    let (_, cfg) = call(&app, "GET", "/api/v1/config", None).await;
+    let server = cfg["urls"]["obs_server"].as_str().unwrap().to_string();
+    obs.lock().unwrap().settings =
+        json!({"server": server, "key": "yt-key-2468", "use_auth": false});
+    let (_, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+    assert_eq!(status["configured"], false, "{status}");
+    obs.lock().unwrap().settings["key"] = json!(INGEST_KEY);
+    let (_, status) = call(&app, "GET", "/api/v1/obs/status", None).await;
+    assert_eq!(status["configured"], true, "{status}");
+}
+
+#[tokio::test]
 async fn an_rtmp_server_of_its_own_on_this_computer_is_backed_up() {
     // Not stream-delay: another server on this computer, on application
     // `live` too, which OBS streamed to before its first set-up.

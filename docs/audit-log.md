@@ -19,6 +19,26 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 4, closing pass: passthrough with an ingest key
+
+Reading `app.rs` in full for area 4's closing pass: with passthrough where an
+ingest key is required, stream-delay only warns in its log at start. OBS has
+to stream with the ingest key there, and passthrough forwards that key, so
+the destination gets it: it works only if the ingest key is the stream key.
+Refusing the combination would not help (it also comes about with no save,
+when the RTMP input is put on the network, and settings from the file must
+never keep stream-delay from starting), but three places said the wrong
+thing. Fixed with tests that failed first:
+
+- The OBS wizard (area 5's concern) gave OBS its own stream key, which
+  stream-delay refuses, and said OBS was set up; its status counted any key
+  of OBS's own as set up. It now changes nothing and says why (409), and OBS
+  counts as set up only with the ingest key.
+- The Setup tab (area 6) showed nothing of it, and *Set up OBS by hand* said
+  to use the real key. It now explains, and gives the ingest key.
+- The dashboard's settings did not say whether an ingest key is required
+  (the key itself is left out); they gain `ingest_key_required`.
+
 ### 2026-09-28 — Area 3: mutation testing of the relay core
 
 `crates/relay/src/core.rs`, which the earlier mutation runs had left out:

@@ -446,6 +446,38 @@ async fn dock_and_overlay_tokens_are_limited() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn the_dashboard_is_told_whether_encoders_need_the_ingest_key() {
+    // With passthrough, that key is what goes to the destination: the Setup tab
+    // says so. The key itself stays out of the settings shown.
+    for (key, required) in [
+        (None, false),
+        (Some(""), false),
+        (Some("ingest-key-0123456789abcdef"), true),
+    ] {
+        let relay = streamdelay_relay::start(RelayConfig {
+            ingest_bind: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mut config = Config::default();
+        config.api.token = TOKEN.into();
+        config.ingest.key = key.map(String::from);
+        let dir = std::env::temp_dir().join(format!("sd-api-test-{}-ingest", std::process::id()));
+        let app =
+            streamdelay_control::router(relay, config, Arc::new(Secrets::new(&dir, false)), PORT);
+        let (s, body) = send(
+            &app,
+            authed("GET", "/api/v1/config").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(body["ingest_key_required"], required, "{key:?}");
+        assert!(body["config"]["ingest"]["key"].is_null(), "{body}");
+    }
+}
+
 async fn put_config(app: &axum::Router, body: &str) -> (StatusCode, Value) {
     send(
         app,

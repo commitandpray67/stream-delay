@@ -137,6 +137,13 @@
           <input type="checkbox" bind:checked={passthrough} />
           Use the stream key entered in OBS instead (passthrough)
         </label>
+        {#if passthrough && pc.ingest_key_required}
+          <p class="notice small" role="status">
+            OBS has to stream to stream-delay with its ingest key (step 2), and passthrough forwards the key OBS
+            streams with: the destination gets the ingest key, which only works if it is your stream key. Untick
+            passthrough and enter your stream key here instead.
+          </p>
+        {/if}
         {#if !passthrough}
           <label>
             Stream key {pc.destination_key_set ? "(saved, enter a new one to replace it)" : ""}
@@ -191,7 +198,10 @@
             In OBS, open <b>Settings → Stream</b>, set <b>Service</b> to <b>Custom…</b> and paste:
             <div class="stack pad">
               <CopyField label="Server" value={pc.urls.obs_server} />
-              <CopyField label="Stream Key" value={passthrough ? "(your real stream key)" : pc.urls.obs_key} />
+              <CopyField
+                label="Stream Key"
+                value={passthrough && !pc.ingest_key_required ? "(your real stream key)" : pc.urls.obs_key}
+              />
             </div>
           </li>
           <li>In <b>Settings → Output</b>, set the keyframe interval to <b>2 s</b>.</li>

@@ -51,7 +51,11 @@ In OBS, open **Settings → Stream**:
 
 stream-delay uses the key you saved on the Setup tab, not the one in OBS. If you
 prefer to keep the real key in OBS, tick **Use the stream key entered in OBS
-instead (passthrough)** on the Setup tab and put your real key in OBS.
+instead (passthrough)** on the Setup tab and put your real key in OBS. This
+does not work where stream-delay requires an ingest key (when it listens on
+your network): OBS has to stream with the ingest key, and passthrough would
+forward that to your destination. Save your stream key on the Setup tab
+instead.
 
 ## Keyframe interval: set it to 2 seconds
 

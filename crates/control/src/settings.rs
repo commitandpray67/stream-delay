@@ -38,6 +38,9 @@ pub(crate) struct PublicConfig {
     scope: Scope,
     config: Config,
     destination_key_set: bool,
+    /// Encoders must stream with the ingest key (`urls.obs_key`); with
+    /// passthrough, that is the key forwarded to the destination.
+    ingest_key_required: bool,
     secrets_backend: String,
     urls: Urls,
     services: Vec<ServiceInfo>,
@@ -50,6 +53,7 @@ pub(crate) struct PublicConfig {
 pub(crate) fn public_config(st: &AppState) -> PublicConfig {
     let mut config = st.config();
     config.api.token = String::new();
+    let ingest_key_required = config.ingest.key.as_deref().is_some_and(|k| !k.is_empty());
     // Shown as `urls.obs_key` instead, which diagnostics leave out.
     config.ingest.key = None;
     let key_url = split_url_key(&config.destination.url).0;
@@ -65,6 +69,7 @@ pub(crate) fn public_config(st: &AppState) -> PublicConfig {
         scope: Scope::Admin,
         config,
         destination_key_set: key_set,
+        ingest_key_required,
         secrets_backend: st.shared.secrets.describe(),
         urls: urls(st),
         services: SERVICES
