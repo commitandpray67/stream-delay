@@ -289,6 +289,28 @@ async fn a_dump_while_the_destination_is_not_connected_never_replays() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_the_rolling_buffer_off_takes_effect_at_once() {
+    let (sink, _log, _kill) = start_sink().await;
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed("k".into()),
+        Duration::from_secs(5),
+    )
+    .await;
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(5)).await;
+    // No delay: all that is kept is for rewinding.
+    let kept = relay.state().delay.history_ms;
+    assert!(kept >= 4_000, "{kept} ms kept");
+    relay.set_keep_history(false).unwrap();
+    p.stream_for(Duration::from_secs(2)).await;
+    let kept = relay.state().delay.history_ms;
+    assert!(kept < 2_500, "{kept} ms still kept");
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_key_in_the_destination_url_is_used() {
     // As pasted from a service: the key at the end of the URL, none set apart.
     let (sink, log, _kill) = start_sink().await;
