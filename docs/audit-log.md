@@ -19,6 +19,30 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Exploratory end-to-end runs (areas 1, 3 and 4)
+
+Three scenarios the end-to-end test does not have, run with ffmpeg as
+encoder and as destination (which listened again after each broadcast, so
+each broadcast was its own recording), and an overlay emulated over the
+WebSocket. Every recording started on a keyframe, decoded without errors,
+and its timestamps only rose. No finding:
+
+- End after air, resume, the encoder stopping and starting again, end now.
+  The first broadcast held what was sent up to End (18 s, and the 7.9 s a
+  rewind replayed); resuming started a new one with what came after; an
+  encoder that stops (unpublishes) and comes back starts a new broadcast
+  once the old one's end has aired; End now cut the last at once.
+- A delay longer than the buffer (history short), a change cancelled, two
+  dumps in a row, the encoder killed and back within the grace period (the
+  same broadcast went on, the delay absorbing the gap: no gap over 1 s in
+  the recording), and a delay set while Remove delay after it airs was under
+  way.
+- Mask with an overlay: a Mask delay (the slate confirmed, then the delay
+  built), a Mask dump with the overlay on stream (`cover`: the last frame
+  held until the slate was confirmed and its margin passed, then the stream
+  under the slate without its sound), off stream (`hold`: the last frame,
+  still and silent), and a Mask change with no overlay (went ahead).
+
 ### 2026-09-28 — CI: Windows install test, the dashboard window
 
 The Release dry run of 80c1b86 (a commit with tests only) failed once in
