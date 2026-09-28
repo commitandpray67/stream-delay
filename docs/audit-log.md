@@ -19,6 +19,58 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 5, clients (second full pass)
+
+Read again in full: `streamdelayd` (`main.rs`, `client.rs`), the desktop
+app (`main.rs`, `tray.rs`, `hotkeys.rs`, its capabilities and
+`tauri.conf.json`) and `crates/obs`.
+
+Fixed, with a test that failed first:
+
+- dbf71b6: `streamdelayd urls` always gave `127.0.0.1` in its links and
+  OBS server address, while `run` gives where the API and the RTMP input
+  can be reached. With either on an IPv6 address (`[::1]`, or `[::]` on
+  Windows) or on one address of the computer, the links did not connect.
+  The Docker images pass their addresses on the command line, so
+  `docker exec … streamdelayd urls` prints what it did before.
+
+Considered and left as is: once Install is chosen while nothing streams, a
+stream started during the download is ended by the install. The streamer
+has just agreed to an immediate restart, and the download takes seconds.
+
+### 2026-09-28 — Area 4, control and settings (third pass)
+
+Read again: `auth.rs`, `routes.rs`, `lib.rs`, the startup and links in
+`app.rs`, `settings.rs`, `changes.rs`, `dest_key.rs`, `bound.rs`,
+`diagnostics.rs`, `overlays.rs`, `ui.rs`, `obs_routes.rs`, and in
+`crates/config` the settings file, private files (the Windows access list
+included) and the secret store with its keychain. No real finding.
+
+Also traced every log line that could carry a secret: the destination's
+`Debug` shows neither its key nor its query, destination errors are
+redacted before they are logged, and the OBS target hides its password.
+Static files are served through rust-embed, which refuses paths outside
+`ui/dist`.
+
+Considered and left as designed: with the API bound to one address that is
+not loopback and without `--allow-lan`, every request is refused as
+naming an unexpected host, the printed links included. `allow_lan` is what
+lets requests name this server by anything but loopback; accepting the
+bound address without it would undercut that. The documentation and the
+OBS wizard ask for both.
+
+### 2026-09-28 — Area 1, engine (full pass)
+
+Read in full: `lib.rs` (ingest, the output connecting and disconnecting,
+commands, dumps and replays, pending changes, splices and output
+timestamps, headers, eviction and the memory cap) and `snapshot.rs`. No
+real finding: the Mask, Dump, Hold and Replay changes each finish, never
+air what was dumped, and keep timestamps rising across splices; eviction
+works on whole groups of pictures and stays under the memory cap.
+
+Checked: the engine properties at 5000 cases; `cargo fuzz` on the engine
+target for 7 minutes (1,327,760 runs), no crash.
+
 ### 2026-09-28 — Area 3, relay (second pass)
 
 A second full pass, reading for what passes over one file at a time miss:
