@@ -209,6 +209,10 @@ All notable changes to stream-delay are listed here. The format follows
   without saying that a key was needed. The state's `egress.status` is now
   `disabled` whenever there is no key to send with (the destination is still
   given), the dashboard says *No stream key*, and the dock asks for one.
+- On the Setup tab, saving another setting while typing the OBS address for
+  *Connect to OBS* (saving the destination, or the rolling buffer switch) put
+  the saved address back in the fields, so Connect went to the old one. What
+  is typed is now kept.
 - The Overlay tab showed a color set as `#rgb` or with an alpha (`#rrggbbaa`,
   both taken in `config.toml`) as black, and picking another dropped the
   alpha. It now shows them, and a color picked keeps the alpha there was.

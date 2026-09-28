@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { obsConfigure, obsConnect, obsRestore, obsStatus } from "../../lib/api";
   import { adminConfig } from "../../lib/live.svelte";
   import type { ObsStatus } from "../../lib/types";
@@ -13,12 +14,18 @@
   let error = $state("");
   let message = $state("");
 
+  // The saved OBS address the fields were last loaded from. The settings come
+  // again whenever any is saved: the fields follow the address until edited.
+  let loaded: [string, number] | null = null;
   $effect(() => {
     const c = adminConfig()?.config.obs;
-    if (c) {
-      host = c.host;
-      port = c.port;
-    }
+    if (!c) return;
+    const saved: [string, number] = [c.host, c.port];
+    untrack(() => {
+      if (loaded && loaded[0] === saved[0] && loaded[1] === saved[1]) return;
+      if (!loaded || (host === loaded[0] && Number(port) === loaded[1])) [host, port] = saved;
+      loaded = saved;
+    });
   });
 
   async function refresh() {

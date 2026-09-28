@@ -61,6 +61,15 @@ with *Resume where it left off*, and the dock offered to go back. A warning
 from the OBS WebSocket library in the log came from `RUST_LOG=info` set for
 the run: the default filter leaves it out.
 
+Then area 6 read again where the browser could not go without OBS: the OBS
+wizard. One finding, fixed with a test that failed first: its address fields
+took the saved OBS address from every settings update, so saving anything
+else on the Setup tab while typing an address put the saved one back, and
+Connect went there. They now follow it until edited, like the destination
+fields above them. The other tabs load their forms once. Moving a Twitch key
+in with passthrough on turns passthrough off; that is what the checkbox asks
+for, and the destination fields follow it.
+
 Mutation testing of the relay change: every mutant of the new `stream_key`
 and `resting_status` was caught, but four of the relay's initial state
 survived (its destination status, listening address and ingest key warning
