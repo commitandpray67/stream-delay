@@ -105,6 +105,9 @@ All notable changes to stream-delay are listed here. The format follows
 - The custom delay field in the dock and on the Control tab, once emptied
   again after typing, counted as 0: Set (or Enter) removed the delay at once.
   Set now does nothing until a number is typed.
+- The overlay's title and subtitle were refused as too long when written in
+  another script (Cyrillic, Greek, Japanese) at about half the characters
+  the fields allow: the server counted bytes. It counts characters now.
 - Two actions could be given the same hotkey, and the desktop app then gave
   the key to one of them without saying so: with End stream now and Dump
   buffer on one key, pressing it ended the stream. Saving hotkeys like that

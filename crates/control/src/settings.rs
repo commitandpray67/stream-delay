@@ -212,7 +212,12 @@ fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
                 return Err(format!("'{c}' is not a hex color like #9147ff"));
             }
         }
-        if o.mask_title.len() > 200 || o.mask_subtitle.len() > 400 || o.mask_image.len() > 2048 {
+        // In characters, as the dashboard's fields count them.
+        let chars = |s: &str| s.chars().count();
+        if chars(&o.mask_title) > 200
+            || chars(&o.mask_subtitle) > 400
+            || chars(&o.mask_image) > 2048
+        {
             return Err("overlay text is too long".into());
         }
         if !["top-left", "top-right", "bottom-left", "bottom-right"]
@@ -499,6 +504,13 @@ mod tests {
             assert!(check(overlay(key, "x".repeat(max).into())).is_ok(), "{key}");
             assert!(
                 check(overlay(key, "x".repeat(max + 1).into())).is_err(),
+                "{key}"
+            );
+            // Characters, as the fields count them, not bytes: a title in
+            // another script is not refused at half the length.
+            assert!(check(overlay(key, "é".repeat(max).into())).is_ok(), "{key}");
+            assert!(
+                check(overlay(key, "é".repeat(max + 1).into())).is_err(),
                 "{key}"
             );
         }
