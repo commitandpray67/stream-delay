@@ -910,12 +910,22 @@ async fn obs_with_an_old_ingest_key_is_given_the_current_one() {
 
 #[tokio::test]
 async fn with_passthrough_obs_without_a_key_of_its_own_is_left_alone() {
-    // Nothing to forward: OBS has no key, or only stream-delay's own.
-    for key in ["", "streamdelay"] {
+    // Nothing to forward: OBS has no key, or only one of stream-delay's own
+    // (the key for this computer, or the ingest key where one is required).
+    const INGEST_KEY: &str = "ingest-key-0123456789abcdef";
+    for (key, ingest_key) in [
+        ("", None),
+        ("streamdelay", None),
+        ("streamdelay", Some(INGEST_KEY)),
+        (INGEST_KEY, Some(INGEST_KEY)),
+    ] {
         let (app, obs, secrets, _dir) = setup_with_config(
             "rtmp_custom",
             json!({"server": "rtmp://a.rtmp.youtube.com/live2", "key": key, "use_auth": false}),
-            |c| c.destination.key_mode = KeyMode::Passthrough,
+            |c| {
+                c.destination.key_mode = KeyMode::Passthrough;
+                c.ingest.key = ingest_key.map(String::from);
+            },
         )
         .await;
         let before = obs.lock().unwrap().settings.clone();
@@ -930,4 +940,67 @@ async fn with_passthrough_obs_without_a_key_of_its_own_is_left_alone() {
         assert_eq!(obs.lock().unwrap().settings, before, "{key:?}");
         assert_eq!(secrets.get(secret::OBS_BACKUP), None, "{key:?}");
     }
+}
+
+#[tokio::test]
+async fn an_rtmp_server_of_its_own_on_this_computer_is_backed_up() {
+    // Not stream-delay: another server on this computer, on application
+    // `live` too, which OBS streamed to before its first set-up.
+    let (app, obs, secrets, _dir) = setup_with(
+        "rtmp_custom",
+        json!({"server": "rtmp://127.0.0.1:1/live", "key": "own-server-key", "use_auth": false}),
+    )
+    .await;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert!(
+        secrets
+            .get(secret::OBS_BACKUP)
+            .is_some_and(|b| b.contains("own-server-key")),
+        "not backed up"
+    );
+    let (s, r) = call(&app, "POST", "/api/v1/obs/restore", None).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(
+        obs.lock().unwrap().settings["server"],
+        "rtmp://127.0.0.1:1/live"
+    );
+}
+
+#[tokio::test]
+async fn a_server_on_this_computer_for_another_application_is_obs_s_own() {
+    // Set up and backed up; then the streamer pointed OBS at another server on
+    // this computer themselves. Setting up again backs that up instead.
+    let (app, obs, secrets, _dir) = setup().await;
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    obs.lock().unwrap().settings = json!({
+        "server": "rtmp://127.0.0.1:1/other", "key": "other-key", "use_auth": false,
+    });
+    let (s, r) = call(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        Some(json!({"add_overlay": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert!(
+        secrets
+            .get(secret::OBS_BACKUP)
+            .is_some_and(|b| b.contains("other-key")),
+        "OBS's own settings were not backed up"
+    );
 }

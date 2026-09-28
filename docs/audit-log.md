@@ -48,6 +48,13 @@ test against the fake OBS that failed first:
   only, once an ingest key is required, showed as set up and was left so.
   The key now counts where one is required.
 
+Mutation testing of the new code (`is_loopback_host` and the wizard's
+`set_up`, `set_up_before`, `key_for_obs` and `own_key`): 5 of 29 mutants
+survived at first, each a case no test had (a Host of `[::1]` without a port;
+passthrough with an ingest key and OBS holding one of stream-delay's keys;
+another RTMP server on this computer, with no backup or on another
+application). Tests for each were added; all 29 are caught.
+
 Areas 4 and 5 are due another full pass.
 
 ### 2026-09-28 — Area 5 again: the desktop app's Tauri setup

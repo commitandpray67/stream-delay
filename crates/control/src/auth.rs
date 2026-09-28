@@ -260,6 +260,9 @@ mod tests {
         assert!(is_loopback_host("localhost:7788", 7788));
         assert!(is_loopback_host("LOCALHOST:7788", 7788));
         assert!(is_loopback_host("[::1]:7788", 7788));
+        // Without a port (as for port 80): an IPv6 address's colons are not one.
+        assert!(is_loopback_host("[::1]", 7788));
+        assert!(!is_loopback_host("[::1]:80", 7788));
         // Any loopback address, as when listening on 127.0.0.2: no name, so
         // nothing for DNS rebinding to point elsewhere.
         assert!(is_loopback_host("127.0.0.2:7788", 7788));
