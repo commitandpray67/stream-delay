@@ -35,6 +35,21 @@ export function opaque(color: string): string {
 }
 
 /**
+ * `color` (as the settings take it) as a colour field shows it, which holds
+ * `#rrggbb` only: `#rgb` spelled out, without its alpha. Black for anything else.
+ */
+export function swatch(color: string): string {
+  if (/^#[0-9a-f]{3}$/i.test(color)) return `#${[...color.slice(1)].map((c) => c + c).join("")}`;
+  if (/^#([0-9a-f]{6}|[0-9a-f]{8})$/i.test(color)) return color.slice(0, 7);
+  return "#000000";
+}
+
+/** `picked` in a colour field, which has no alpha, for `color`: keeping the alpha it had. */
+export function repicked(color: string, picked: string): string {
+  return /^#[0-9a-f]{8}$/i.test(color) ? picked + color.slice(7) : picked;
+}
+
+/**
  * The dashboard's overlay preview: this server's overlay page with the overlay
  * link's own token, which can only read, never the dashboard's. Relative, so it
  * loads from wherever the dashboard was opened. Null without a usable link.

@@ -318,13 +318,14 @@ async fn a_saved_destination_this_version_refuses_does_not_keep_it_from_starting
     // Other settings can still be changed meanwhile.
     let (s, body) = http(&app, "PUT", "/api/v1/config", r#"{"grace_seconds": 45}"#).await;
     assert_eq!(s, 200, "{body}");
-    // A valid one takes effect.
+    // A valid one takes effect: with its key, the relay is waiting for a stream.
     let body = serde_json::json!({ "destination": {
-        "service": "custom", "url": "rtmp://127.0.0.1:1/live", "key_mode": "stored" } });
+        "service": "custom", "url": "rtmp://127.0.0.1:1/live/its-key", "key_mode": "stored" } });
     let (s, body) = http(&app, "PUT", "/api/v1/config", &body.to_string()).await;
     assert_eq!(s, 200, "{body}");
     let (_, state) = http(&app, "GET", "/api/v1/state", "").await;
     assert_eq!(state["egress"]["status"], "idle");
+    assert_eq!(state["egress"]["destination"], "rtmp://127.0.0.1:1/live");
     app.shutdown().await;
     // One given on the command line is a mistake to point out at once.
     let started = App::start(AppOptions {
@@ -341,6 +342,47 @@ async fn a_saved_destination_this_version_refuses_does_not_keep_it_from_starting
         "{:?}",
         started.as_ref().err()
     );
+}
+
+#[tokio::test]
+async fn without_a_stream_key_the_state_says_nothing_can_be_sent() {
+    // As installed: Twitch, and no key yet.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut c = Config::default();
+    c.api.token = "0123456789abcdef".into();
+    c.save(&path).unwrap();
+    let app = App::start(AppOptions {
+        config_path: Some(path),
+        secrets: Arc::new(MemorySecrets::default()),
+        overrides: overrides("127.0.0.1:0"),
+    })
+    .await
+    .unwrap();
+    // Once the relay has said how it is (at once, but after starting).
+    let state = loop {
+        let (_, state) = http(&app, "GET", "/api/v1/state", "").await;
+        if state["delay"]["max_delay_ms"] != 0 {
+            break state;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(state["egress"]["status"], "disabled", "{state}");
+    assert_eq!(
+        state["egress"]["destination"], "rtmps://live.twitch.tv/app",
+        "{state}"
+    );
+    let (s, body) = http(
+        &app,
+        "PUT",
+        "/api/v1/destination/key",
+        r#"{"key": "live_123"}"#,
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    let (_, state) = http(&app, "GET", "/api/v1/state", "").await;
+    assert_eq!(state["egress"]["status"], "idle", "{state}");
+    app.shutdown().await;
 }
 
 #[tokio::test]

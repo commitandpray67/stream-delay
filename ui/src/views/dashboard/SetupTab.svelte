@@ -34,6 +34,9 @@
     });
   });
 
+  // Where the stream key is found, and Twitch's bandwidth test, depend on the service.
+  const twitch = $derived(service.startsWith("twitch"));
+
   function pickService(id: string) {
     service = id;
     const s = pc?.services.find((x) => x.id === id);
@@ -145,9 +148,17 @@
             />
           </label>
           <p class="muted small">
-            Find it in your Twitch Creator Dashboard → Settings → Stream. It is stored in {pc.secrets_backend}
-            and is never shown again. Tip: add <code>?bandwidthtest=true</code> to the end of a Twitch key to test
-            without going live.
+            {#if twitch}
+              Find it in your Twitch Creator Dashboard → Settings → Stream.
+            {:else if service.startsWith("youtube")}
+              Find it in YouTube Studio, where you go live, under the stream settings.
+            {:else}
+              Your streaming service shows it with its server URL.
+            {/if}
+            It is stored in {pc.secrets_backend} and is never shown again.
+            {#if twitch}
+              Tip: add <code>?bandwidthtest=true</code> to the end of the key to test without going live.
+            {/if}
           </p>
         {/if}
         <div class="row">

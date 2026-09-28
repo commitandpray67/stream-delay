@@ -19,6 +19,54 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — The web UI in a browser (areas 3, 4 and 6)
+
+The dashboard, the dock and the overlay run in Chromium against
+`streamdelayd` with ffmpeg as encoder and destination, the overlay told it
+was on stream as OBS does. Each page's text was read every second next to
+what the API said, through presets, a Rewind and a Mask change, a dump under
+the slate, removing the delay after it aired, End and Resume; then settings
+saved on the dashboard while the dock and overlay stayed open. What the
+pages said matched the state throughout (the slate went up and was confirmed
+for each change, the badge and pop-ups came when the delay settled), no page
+logged an error, and no tab scrolls sideways at phone width. Presets, the
+rolling buffer switch and the overlay's look reached the open dock and
+overlay at once. Four findings, each fixed with a test that failed first:
+
+- Area 6: what the dock said a dump did stayed until the next click there:
+  "The slate covers the stream while the delay builds back up" was still up
+  70 s after the delay was back and had been removed from the dashboard. It
+  now lasts while it holds: until the delay is back (a replay: until the
+  stretch replayed has aired), the delay is changed from anywhere, or the
+  stream ends. "The delay is shorter than asked" follows the same rule,
+  until the state no longer says so.
+- Area 6: the Setup tab told everyone to find the stream key in the Twitch
+  Creator Dashboard and offered Twitch's bandwidth test, whatever the
+  service. It now follows the service chosen.
+- Area 6: the Overlay tab's color fields showed `#fff` and `#0e0e10cc`, both
+  valid settings, as black, and picking a color dropped the alpha. The value
+  saved was right when untouched.
+- Area 3: with a destination but no stream key (as installed, after the key
+  is removed, or after another server is saved, which forgets it) the
+  relay's state said `idle`, waiting for a stream, while OBS streamed: the
+  dashboard said *Waiting for OBS*, and the dock's notice for a missing key
+  never showed, as it waited for `disabled`, which only no destination at
+  all gave. The relay now decides whether it has a key to send with in one
+  place, used both to connect and to report `disabled` (at start, when the
+  destination changes, and when a stopped connection reports idle).
+
+Considered and left as is: after another server was saved while streaming
+and its key entered 5 s later, the delay was 5 s longer, as after any outage
+with *Resume where it left off*, and the dock offered to go back. The relay
+reports its initial state, without the destination, until its first update
+at start (well under a millisecond); nothing reads it that early but a test.
+A warning from the OBS WebSocket library in the log came from `RUST_LOG=info`
+set for the run: the default filter leaves it out.
+
+Also: one run of the workspace tests had one chaos test fail, under the load
+of a second run, and which one was not recorded. Since, 8 runs alone and 12
+under load (two at once, beside the lifecycle tests) passed. Areas 3 and 6 are due another full pass.
+
 ### 2026-09-28 — Exploratory end-to-end runs (areas 1, 3 and 4)
 
 Three scenarios the end-to-end test does not have, run with ffmpeg as

@@ -192,6 +192,26 @@ All notable changes to stream-delay are listed here. The format follows
   HTTP from another device, where browsers have no clipboard API, the
   dashboard link (a hidden field) could not be copied at all. It is now
   copied from a field made for it, and a copy that fails says so.
+- What the dock and the Control tab said a dump did stayed until the next
+  click there: "The slate covers the stream while the delay builds back up"
+  was still shown long after the delay was back, even once it had been
+  removed from the dashboard. It now goes once the delay is back (a replay:
+  once the stretch replayed has aired), the delay is changed from anywhere, or
+  the stream ends. Likewise "the delay is shorter than asked" goes once it no
+  longer is.
+- The Setup tab said to find the stream key in the Twitch Creator Dashboard,
+  and offered Twitch's `?bandwidthtest=true`, whatever the service. It now
+  names the service chosen, and offers the bandwidth test only for Twitch.
+- With a destination but no stream key for it (as installed, after **Remove
+  saved key**, or after saving another server, which forgets the key), the
+  destination's status was `idle`, waiting for a stream, while OBS was
+  streaming: the dashboard said *Waiting for OBS*, and the dock *idle*
+  without saying that a key was needed. The state's `egress.status` is now
+  `disabled` whenever there is no key to send with (the destination is still
+  given), the dashboard says *No stream key*, and the dock asks for one.
+- The Overlay tab showed a color set as `#rgb` or with an alpha (`#rrggbbaa`,
+  both taken in `config.toml`) as black, and picking another dropped the
+  alpha. It now shows them, and a color picked keeps the alpha there was.
 - With the API on a loopback address other than `127.0.0.1` or `[::1]`
   (such as `127.0.0.2`) and without LAN access, every request was refused as
   naming an unexpected host, the dashboard's own included. Any loopback

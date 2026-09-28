@@ -31,3 +31,19 @@ describe("connections", () => {
     }
   });
 });
+
+describe("the destination", () => {
+  const label = (egress: Partial<RelayState["egress"]>) => {
+    const s = waiting("127.0.0.1:1935");
+    s.egress = { ...s.egress, ...egress };
+    const { unmount } = render(Health, { state: s });
+    const text = screen.getByText("To destination").nextElementSibling?.textContent ?? "";
+    unmount();
+    return text;
+  };
+
+  it("says when it has no stream key, apart from when there is none", () => {
+    expect(label({ status: "disabled", destination: "rtmps://live.twitch.tv/app" })).toContain("No stream key");
+    expect(label({ status: "disabled", destination: null })).toContain("No destination set");
+  });
+});

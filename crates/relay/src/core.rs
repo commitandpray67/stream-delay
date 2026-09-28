@@ -274,11 +274,7 @@ pub(crate) async fn run(
                 ..Default::default()
             },
             egress: EgressState {
-                status: if config.destination.is_some() {
-                    EgressStatus::Idle
-                } else {
-                    EgressStatus::Disabled
-                },
+                status: resting_status(config.destination.as_ref()),
                 destination: config.destination.as_ref().map(redacted),
                 ..Default::default()
             },
@@ -364,6 +360,30 @@ fn same_key(want: &str, got: &str) -> bool {
     bool::from(padded.ct_eq(got) & lengths)
 }
 
+/// The stream key to send to `dest` (at `url`) with: the one set, else one at
+/// the end of its URL; with passthrough, the encoder's (`publisher_key`).
+fn stream_key(dest: &Destination, url: &RtmpUrl, publisher_key: String) -> Option<String> {
+    match &dest.key {
+        DestinationKey::Fixed(k) if !k.is_empty() => Some(k.clone()),
+        DestinationKey::Fixed(_) => url.stream_key.clone(),
+        DestinationKey::Passthrough => Some(publisher_key),
+    }
+}
+
+/// The destination's status while nothing is sent: waiting for a stream, or
+/// disabled when there is nothing to send it to (no destination, or no stream
+/// key for it).
+fn resting_status(dest: Option<&Destination>) -> EgressStatus {
+    let usable = dest.is_some_and(|d| {
+        RtmpUrl::parse(&d.url).is_ok_and(|url| stream_key(d, &url, String::new()).is_some())
+    });
+    if usable {
+        EgressStatus::Idle
+    } else {
+        EgressStatus::Disabled
+    }
+}
+
 fn redacted(d: &Destination) -> String {
     RtmpUrl::parse(&d.url)
         .map(|u| u.redacted())
@@ -408,11 +428,7 @@ impl Core {
                 let mut fx = Vec::new();
                 self.life.destination_changed(&mut fx);
                 self.apply(fx);
-                self.state.egress.status = if self.config.destination.is_some() {
-                    EgressStatus::Idle
-                } else {
-                    EgressStatus::Disabled
-                };
+                self.state.egress.status = resting_status(self.config.destination.as_ref());
                 self.publish_state();
             }
             Control::EndStream(reply) => {
@@ -582,9 +598,13 @@ impl Core {
                     // Sent before the egress saw the stop: out of date.
                     return;
                 }
-                if self.config.destination.is_some() || status != EgressStatus::Idle {
-                    self.state.egress.status = status;
-                }
+                // Stopped: whether it can send once there is a stream is
+                // up to the settings it has now.
+                self.state.egress.status = if status == EgressStatus::Idle {
+                    resting_status(self.config.destination.as_ref())
+                } else {
+                    status
+                };
                 // Earlier trouble is over once the destination takes the stream.
                 if status == EgressStatus::Live {
                     self.state.egress.last_error = None;
@@ -826,16 +846,9 @@ impl Core {
             }
         };
         let (publisher_key, props) = self.last_publisher.clone().unwrap_or_default();
-        let key = match &dest.key {
-            DestinationKey::Fixed(k) if !k.is_empty() => k.clone(),
-            DestinationKey::Fixed(_) => match url.stream_key.clone() {
-                Some(k) => k,
-                None => {
-                    self.state.egress.last_error = Some("no stream key configured".into());
-                    return None;
-                }
-            },
-            DestinationKey::Passthrough => publisher_key,
+        let Some(key) = stream_key(dest, &url, publisher_key) else {
+            self.state.egress.last_error = Some("no stream key configured".into());
+            return None;
         };
         Some(Target {
             url,

@@ -3,7 +3,7 @@
   import { backToMs, formatDelay, formatSecondsLabel, setAgainMs } from "../lib/format";
   import { t, type Key } from "../lib/i18n";
   import { live } from "../lib/live.svelte";
-  import type { Ack, DelayMode, DumpOutcome } from "../lib/types";
+  import type { Ack, DelayMode, DumpOutcome, Snapshot } from "../lib/types";
   import StatusBadge from "./StatusBadge.svelte";
 
   let { compact = false }: { compact?: boolean } = $props();
@@ -71,9 +71,47 @@
   let custom = $state<number | null>(null);
   const customSeconds = $derived(typeof custom === "number" && Number.isFinite(custom) ? custom : null);
   let error = $state("");
-  // What the last dump did.
+  // What the last dump did, and that the delay came out shorter than asked:
+  // each shown while it holds (see `lasting`).
   let notice = $state("");
+  let short = $state(false);
   let busy = $state(false);
+
+  // What an action did lasts while the state shows it: `holds` says whether it
+  // does, for the delay the action left (`target`). Until the state first
+  // shows it, it is kept: the answer can come in before that state. After,
+  // it is over once it no longer holds, the delay is changed (from here or
+  // elsewhere) or the stream ends; and after `forMs`, if given.
+  type Lasting = { target: number; holds: (d: Snapshot) => boolean; seen: boolean; over: () => void };
+  let lasting: Lasting[] = [];
+  const timers: ReturnType<typeof setTimeout>[] = [];
+
+  function last(target: number, holds: (d: Snapshot) => boolean, over: () => void, forMs?: number) {
+    lasting.push({ target, holds, seen: false, over });
+    if (forMs !== undefined) timers.push(setTimeout(over, forMs));
+  }
+
+  function forget() {
+    lasting = [];
+    timers.splice(0).forEach(clearTimeout);
+    notice = "";
+    short = false;
+  }
+
+  $effect(() => {
+    const s = live.state;
+    if (!s) return;
+    lasting = lasting.filter((l) => {
+      const shows = !s.ended && s.delay.target_ms === l.target && l.holds(s.delay);
+      if (shows) l.seen = true;
+      else if (l.seen) l.over();
+      return shows || !l.seen;
+    });
+  });
+  $effect(() => () => timers.splice(0).forEach(clearTimeout));
+
+  // The delay being built back up after a dump: under the slate, or behind a still frame.
+  const rebuilding = (d: Snapshot) => d.phase === "adding" || d.phase === "holding";
 
   // A change Cancel stops (not a dump building the delay back up: that cannot be).
   const pending = $derived(snap?.cancellable ?? false);
@@ -93,12 +131,27 @@
 
   async function run(action: () => Promise<unknown>) {
     error = "";
-    notice = "";
+    forget();
     busy = true;
     try {
       const ack = (await action()) as Partial<Ack> | undefined;
-      if (ack?.history_short) error = "Not enough of the stream is buffered yet; the delay is shorter than asked.";
-      if (ack?.dump) notice = dumped(ack);
+      const target = ack?.target_ms ?? 0;
+      if (ack?.history_short) {
+        short = true;
+        last(target, (d) => d.history_short, () => (short = false));
+      }
+      if (ack?.dump) {
+        notice = dumped(ack);
+        const over = () => (notice = "");
+        if (ack.dump === "replay") {
+          // Viewers see the last stretch again while it airs, as long as the delay.
+          last(target, () => true, over, target);
+        } else if (ack.pending) {
+          last(target, rebuilding, over);
+        } else {
+          last(target, () => true, over);
+        }
+      }
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -381,6 +434,7 @@
   {/if}
 
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
+  {#if short}<p class="error" role="alert">Not enough of the stream is buffered yet; the delay is shorter than asked.</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </div>
 

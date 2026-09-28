@@ -27,6 +27,7 @@ function config(destination: { service: string; url: string; key_mode: string })
     secrets_backend: "the OS keychain",
     services: [
       { id: "twitch", name: "Twitch", url: TWITCH },
+      { id: "youtube", name: "YouTube", url: "rtmps://a.rtmps.youtube.com:443/live2" },
       { id: "custom", name: "Custom", url: "" },
     ],
     urls: { obs_server: "rtmp://127.0.0.1:1935/live", obs_key: "streamdelay", dock: "d", overlay: "o" },
@@ -71,6 +72,23 @@ describe("where to stream", () => {
     live.config = config({ service: "twitch", url: TWITCH, key_mode: "stored" });
     await tick();
     expect(serverUrl().value).toBe("rtmp://other.example/live");
+  });
+});
+
+describe("where to find the stream key", () => {
+  const help = () => screen.getByText(/is never shown again/).textContent ?? "";
+  const pick = (id: string) => fireEvent.change(screen.getByLabelText(/Service/), { target: { value: id } });
+
+  it("names the service picked, and offers Twitch's bandwidth test only for Twitch", async () => {
+    live.config = config({ service: "twitch", url: TWITCH, key_mode: "stored" });
+    render(SetupTab);
+    expect(help()).toContain("Twitch");
+    expect(help()).toContain("bandwidthtest");
+    await pick("youtube");
+    expect(help()).toContain("YouTube");
+    expect(help()).not.toMatch(/Twitch|bandwidthtest/);
+    await pick("custom");
+    expect(help()).not.toMatch(/Twitch|YouTube|bandwidthtest/);
   });
 });
 

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
 import { t } from "../lib/i18n";
@@ -118,6 +119,9 @@ const popup = () => screen.getByRole("alertdialog");
 /** What the page says after an action. */
 const notice = () => document.querySelector("p.notice[role=status]")?.textContent ?? null;
 
+/** Lets the answer to an action come in, without running out any timer that follows. */
+const answered = () => vi.advanceTimersByTimeAsync(10);
+
 /** Dumps without the first-time explanation: armed by one click, done by a second. */
 function explained() {
   localStorage.setItem("stream-delay-understood:dump", "1");
@@ -145,7 +149,7 @@ describe("dump", () => {
     await fireEvent.click(within(popup()).getByRole("button", { name: "Dump buffer" }));
     expect(api.dumpBuffer).toHaveBeenCalledOnce();
     expect(api.dumpBuffer).toHaveBeenCalledWith("rewind");
-    await vi.runAllTimersAsync();
+    await answered();
     expect(notice()).toBe(t("dumped.replay", { delay: "30 s" }));
     expect(screen.queryByRole("alertdialog")).toBeNull();
     // Not understood yet: explained again next time.
@@ -252,7 +256,7 @@ describe("dump", () => {
       const view = dock(state(30, 40));
       await fireEvent.click(button("Dump buffer"));
       await fireEvent.click(button("Click again to dump"));
-      await vi.runAllTimersAsync();
+      await answered();
       expect(notice()).toBe(says);
       view.unmount();
     }
@@ -282,6 +286,95 @@ describe("dump", () => {
     idle.egress.status = "idle";
     dock(idle);
     expect(screen.queryByRole("button", { name: "Dump buffer" })).toBeNull();
+  });
+});
+
+describe("what an action did", () => {
+  /** The next state stream-delay sends. */
+  async function next(s: RelayState) {
+    live.state = s;
+    await tick();
+  }
+  /** Building 30 s of delay back up after a dump, `history_s` of it so far. */
+  const building = (history_s: number, phase: "adding" | "holding" = "adding") =>
+    state(30, history_s, { phase, mask_visible: phase === "adding", effective_ms: 0 });
+  async function dump(answer: Ack, overlays = { count: 1, active: 1 }) {
+    explained();
+    vi.mocked(api.dumpBuffer).mockResolvedValue(answer);
+    dock(state(30, 40), overlays);
+    await fireEvent.click(button("Dump buffer"));
+    await fireEvent.click(button("Click again to dump"));
+    await answered();
+  }
+
+  it("the slate covering a dump is told until the delay is back", async () => {
+    await dump(ack({ dump: "cover", pending: true }));
+    // The answer can come in before the state showing the dump.
+    await next(state(30, 41));
+    expect(notice()).toBe(t("dumped.cover"));
+    await next(building(1));
+    await next(building(20));
+    expect(notice()).toBe(t("dumped.cover"));
+    await next(state(30, 31));
+    expect(notice()).toBeNull();
+  });
+
+  it("a still frame is told until the delay is back", async () => {
+    await dump(ack({ dump: "hold", pending: true }), { count: 0, active: 0 });
+    await next(state(30, 41));
+    await next(building(5, "holding"));
+    expect(notice()).toBe(t("dumped.hold"));
+    await next(state(30, 31));
+    expect(notice()).toBeNull();
+  });
+
+  it("a replay is told while the stretch replayed airs", async () => {
+    explained();
+    vi.mocked(api.dumpBuffer).mockResolvedValue(ack({ dump: "replay" }));
+    dock(state(30, 120));
+    await fireEvent.click(button("Dump buffer"));
+    await fireEvent.click(button("Click again to dump"));
+    await answered();
+    await next(state(30, 121));
+    expect(notice()).toBe(t("dumped.replay", { delay: "30 s" }));
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(notice()).toBe(t("dumped.replay", { delay: "30 s" }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(notice()).toBeNull();
+  });
+
+  it("is over once the delay is changed from elsewhere, or the stream ends", async () => {
+    await dump(ack({ dump: "cover", pending: true }));
+    await next(building(3));
+    // Removed from the dashboard or a hotkey while the slate was up.
+    await next(state(0, 10, { phase: "live" }));
+    expect(notice()).toBeNull();
+    cleanup();
+
+    await dump(ack({ dump: "hold", pending: false }), { count: 0, active: 0 });
+    await next(state(30, 41));
+    expect(notice()).toBe(t("dumped.gone"));
+    const ended = state(30, 0);
+    ended.ended = true;
+    await next(ended);
+    expect(notice()).toBeNull();
+  });
+
+  it("a delay shorter than asked is told until it no longer is", async () => {
+    const short = () => screen.queryByRole("alert")?.textContent ?? null;
+    const says = "Not enough of the stream is buffered yet; the delay is shorter than asked.";
+    vi.mocked(api.setDelay).mockResolvedValue(ack({ history_short: true, effective_ms: 12_000 }));
+    dock(state(0, 12));
+    await fireEvent.input(screen.getByLabelText(t("custom.label")), { target: { value: "30" } });
+    await fireEvent.click(button("Set"));
+    await answered();
+    await next(state(0, 12));
+    expect(short()).toBe(says);
+    await next(state(30, 13, { effective_ms: 12_000, history_short: true }));
+    expect(short()).toBe(says);
+    // Set again (from here or elsewhere) once the buffer reached back far enough.
+    await next(state(30, 40));
+    expect(short()).toBeNull();
   });
 });
 

@@ -1,10 +1,16 @@
 <script lang="ts">
   import { updateConfig } from "../../lib/api";
   import { adminConfig, live } from "../../lib/live.svelte";
-  import { previewUrl } from "../../lib/overlay";
+  import { previewUrl, repicked, swatch } from "../../lib/overlay";
   import type { OverlayConfig } from "../../lib/types";
 
   let form = $state<OverlayConfig | null>(null);
+  // A colour field holds #rrggbb only; the settings also take #rgb and an alpha.
+  const colors = [
+    ["accent_color", "Accent"],
+    ["background_color", "Background"],
+    ["text_color", "Text"],
+  ] as const;
   let preview = $state<"mask" | "badge">("mask");
   const previewSrc = $derived(previewUrl(adminConfig()?.urls.overlay, preview));
   let message = $state("");
@@ -47,9 +53,16 @@
       <label>Subtitle <input bind:value={form.mask_subtitle} maxlength="400" /></label>
       <label>Image URL (optional) <input bind:value={form.mask_image} placeholder="https://…/logo.png" /></label>
       <div class="colors">
-        <label>Accent <input type="color" bind:value={form.accent_color} /></label>
-        <label>Background <input type="color" bind:value={form.background_color} /></label>
-        <label>Text <input type="color" bind:value={form.text_color} /></label>
+        {#each colors as [name, label] (name)}
+          <label>
+            {label}
+            <input
+              type="color"
+              value={swatch(form[name])}
+              oninput={(e) => (form![name] = repicked(form![name], e.currentTarget.value))}
+            />
+          </label>
+        {/each}
       </div>
       <div class="row">
         <button class="primary" type="submit">Save</button>

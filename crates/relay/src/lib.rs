@@ -129,7 +129,7 @@ pub enum RelayError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum EgressStatus {
-    /// No destination configured.
+    /// Nothing to send to: no destination, or no stream key for it.
     #[default]
     Disabled,
     /// Waiting for a stream to send.

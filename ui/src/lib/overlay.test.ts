@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeDelay, DelayAnnouncer, opaque, previewUrl, settledDelay } from "./overlay";
+import { badgeDelay, DelayAnnouncer, opaque, previewUrl, repicked, settledDelay, swatch } from "./overlay";
 import type { Phase, RelayState } from "./types";
 
 function state(
@@ -140,5 +140,21 @@ describe("the slate's color", () => {
     // Anything else (not from these settings): black, which covers.
     expect(opaque("transparent")).toBe("#000");
     expect(opaque("")).toBe("#000");
+  });
+});
+
+describe("colour fields", () => {
+  it("show every colour the settings take, as #rrggbb", () => {
+    expect(swatch("#fff")).toBe("#ffffff");
+    expect(swatch("#AbC")).toBe("#AAbbCC");
+    expect(swatch("#0e0e10")).toBe("#0e0e10");
+    expect(swatch("#0e0e10cc")).toBe("#0e0e10");
+    expect(swatch("")).toBe("#000000");
+  });
+
+  it("keep the alpha a colour had when another is picked", () => {
+    expect(repicked("#0e0e10cc", "#223344")).toBe("#223344cc");
+    expect(repicked("#0e0e10", "#223344")).toBe("#223344");
+    expect(repicked("#fff", "#223344")).toBe("#223344");
   });
 });

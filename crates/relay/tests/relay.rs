@@ -201,6 +201,43 @@ async fn a_rewind_dump_replays_and_a_mask_dump_shows_the_slate() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_stream_key_the_state_says_nothing_can_be_sent() {
+    let (sink, log, _kill) = start_sink().await;
+    let dest = |key: &str| Destination {
+        url: format!("rtmp://{sink}/app"),
+        key: DestinationKey::Fixed(key.into()),
+    };
+    let relay = start_relay(
+        sink,
+        DestinationKey::Fixed(String::new()),
+        Duration::from_secs(5),
+    )
+    .await;
+    // Not "idle" (waiting for a stream): there is one, and it cannot be sent.
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(1)).await;
+    let s = relay.state();
+    assert_eq!(s.egress.status, EgressStatus::Disabled);
+    assert_eq!(s.egress.destination, Some(format!("rtmp://{sink}/app")));
+    relay.set_destination(Some(dest("k"))).unwrap();
+    p.stream_for(Duration::from_secs(2)).await;
+    assert_eq!(relay.state().egress.status, EgressStatus::Live);
+    // Removed while live: so it stays once the connection it had has closed.
+    relay.set_destination(Some(dest(""))).unwrap();
+    p.stream_for(Duration::from_secs(2)).await;
+    assert_eq!(relay.state().egress.status, EgressStatus::Disabled);
+    relay.set_destination(Some(dest("k"))).unwrap();
+    p.stream_for(Duration::from_secs(2)).await;
+    assert_eq!(relay.state().egress.status, EgressStatus::Live);
+    assert_eq!(
+        log.lock().unwrap().keys,
+        vec!["k".to_string(), "k".to_string()]
+    );
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_key_in_the_destination_url_is_used() {
     // As pasted from a service: the key at the end of the URL, none set apart.
     let (sink, log, _kill) = start_sink().await;
