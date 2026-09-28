@@ -539,5 +539,7 @@ mod tests {
             None,
             "20 of them are 94"
         );
+        // Exactly at the line: 16 symbols are 80 bits, strong enough.
+        assert_eq!(ingest_key_weakness("!#%&*+-/:;<=>?@^"), None);
     }
 }

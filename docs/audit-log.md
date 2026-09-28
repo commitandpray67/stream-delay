@@ -19,6 +19,37 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Areas 3 and 5: mutation testing of the OBS crate and the relay's lib
+
+The last files no mutation run had covered, but the desktop app's.
+
+`crates/obs` (44 mutants, against its own tests and the control crate's, with
+the fake OBS): 31 caught, 7 unviable, 6 survived. Tests were added for five:
+
+- Restoring OBS's settings is refused while OBS streams: the wizard's route
+  leaves that to the OBS crate, whose check could be dropped unnoticed.
+- OBS reconnecting after a dropped connection is still live: the fake OBS
+  could not say so, so neither the status nor either refusal was tested for
+  it. It now can.
+- A wrong OBS password is said to be one (OBS closes with "Authentication
+  failed."): the fake could not refuse one.
+- The OBS password never shows in what is logged of the connection.
+
+The sixth only changes how OBS's current server is shown for a custom server
+whose settings still name a service: left.
+
+`crates/relay/src/lib.rs` and `heap.rs` (55 mutants, against the relay's
+unit, `relay` and `lifecycle` tests): 33 caught, 12 unviable, 10 survived.
+Tests were added for six: the destination's stream key never shows in what
+is logged of it; the test that memory stays bounded now checks that its
+measure measures something (at 0 it passed); turning the rolling buffer off
+takes effect at once (the dashboard's test only checked that it is saved);
+and an ingest key of exactly 80 bits counts as strong. Setting *Go back to
+the delay set* is caught by a chaos test this run left out. The four in
+`heap.rs`, which keeps the buffer's blocks mapped from the OS, show only as
+memory creeping up over hours: the 12-hour soak watches that, and glibc has
+no way to read the setting back.
+
 ### 2026-09-28 — Area 4, closing pass: passthrough with an ingest key
 
 Reading `app.rs` in full for area 4's closing pass: with passthrough where an
