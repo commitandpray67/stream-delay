@@ -19,6 +19,59 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 3, relay (third look, in part)
+
+Read again: `egress.rs` in full, and in `core.rs` how the destination is
+started (`pump`, `manage_egress`, `target`) and how a dump waits for the
+egress (`start_dump`, `finish_dump`, `check_dump`). No real finding.
+
+CI: `a_dump_replays_what_aired_and_never_airs_what_had_not` failed once on
+Windows, the dump holding instead of replaying. When a dump finds media
+still in the OS it resets the connection, and counts as aired only what
+lies further back than what the OS may hold. Windows adds a segment to that
+while the other end's window is small, and on loopback a segment is 64 KB
+(`Mss 65495` in the numbers of an earlier failed run). The test had sent
+less than that in all, so nothing counted as aired and the dump rightly did
+not replay. Forcing those numbers on Linux failed the old test every time;
+the failure seen is consistent with it. Fixed in the test (677f2b4): frames
+of about 1 Mbps, streamed a little longer, pass with the forced numbers, and
+a failure now says whether the dump reset the connection.
+
+Considered and left as is: that margin, a full segment, is 64 KB only on
+loopback; on a real network a segment is about 1.5 KB, well under a tenth
+of a second of stream.
+
+### 2026-09-28 — Area 2, protocol parsing (third pass)
+
+Read again in full what the weekly pass read only in part or not at all:
+`chunk.rs`, `amf0.rs`, `ts.rs`, `url.rs`, `session/mod.rs`,
+`session/client.rs` and `crates/flv`. No real finding in the parsing.
+
+Hardened, with a test that failed first (64c75d2): the client session's
+settings, when printed for debugging, hid the stream key but not the query
+of the URL, where some servers take a password (`RtmpUrl` hides both).
+Nothing prints them today.
+
+### 2026-09-28 — Area 7, build and release (full pass)
+
+Read: every workflow, both Dockerfiles and `.dockerignore`, the Renovate
+settings and the toolchain pin, `deny.toml`, `CODEOWNERS`, the release
+scripts (`verify_release.py`, `check_image_inputs.py`, `prepare_release.py`,
+`smoke_desktop.py`), the end-to-end harness and the soak's checks.
+
+Fixed (0f1b085), with a test that failed first: building the image from
+source (`Dockerfile`) failed. `.dockerignore` left out `apps/desktop`, a
+workspace member since the desktop app came in, so Cargo could not load the
+workspace; with the build context's files, `cargo metadata` failed. Nothing
+built that Dockerfile: the release image packages the release binaries. The
+release workflow now builds it (amd64, not pushed), and the checksums wait
+for it, as the release workflow's tests now require. It built in the dry
+run of 0f1b085.
+
+Checked and sound: inputs reach scripts through the environment, never
+pasted into them; actions and base images are pinned by digest; each job
+has only the permissions it uses.
+
 ### 2026-09-28 — Area 6, web UI (second full pass)
 
 Read again in full: `lib/` (`api`, `live`, `obs`, `overlay`, `format`,
