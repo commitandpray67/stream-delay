@@ -19,6 +19,20 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 2, protocol parsing (weekly)
+
+The area audited longest ago. Read again: `handshake.rs`, `message.rs` and
+`session/server.rs` in full, with the parts of `chunk.rs` and `amf0.rs`
+that bound memory. No real finding.
+
+Considered: a publish on a connection that already unpublished is refused
+(it never worked, before 0.3.2 with another message), and the connection is
+then closed; encoders (OBS, FFmpeg) open a new one to publish again.
+
+Checked: the rtmp and flv property tests at 3000 cases; `cargo fuzz` on the
+amf0, chunk_decoder and sessions targets for a minute each (2.5 million
+runs), no crash.
+
 ### 2026-09-28 — Second passes: areas 1, 4, 5, 6, 7
 
 The areas whose first pass found something were read again, starting with
