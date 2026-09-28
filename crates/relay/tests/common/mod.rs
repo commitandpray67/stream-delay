@@ -409,8 +409,12 @@ pub fn relay_config(sink: SocketAddr, key: DestinationKey, grace: Duration) -> R
 }
 
 pub async fn start_relay_with(config: RelayConfig) -> RelayHandle {
+    // The relay's log is shown only for a test that fails, where it says what
+    // happened (a dump that reset the connection, say).
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_test_writer()
         .try_init();
     streamdelay_relay::start(config).await.unwrap()

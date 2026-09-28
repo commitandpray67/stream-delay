@@ -617,15 +617,26 @@ async fn a_dump_replays_what_aired_and_never_airs_what_had_not() {
     let relay = start_relay(sink, key(), Duration::from_secs(5)).await;
     relay.set_delay(2_000, DelayMode::Rewind).await.unwrap();
     let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
-    p.stream_for(Duration::from_secs(6)).await;
+    // Frames of about 1 Mbps. A dump can find some of what was sent still in
+    // the OS and reset the connection; Windows then counts up to a segment
+    // more as not acknowledged, 64 KB on loopback. With smaller frames that
+    // is more than the whole broadcast had sent, so nothing would count as
+    // surely aired and the dump would not replay.
+    const FRAME: usize = 4_000;
+    p.stream_sized(Duration::from_secs(8), FRAME).await;
     let dumped = Instant::now();
     let ack = relay.dump(DelayMode::Rewind, false).await.unwrap();
     assert_eq!(ack.target_ms, 2_000);
-    assert_eq!(ack.dump, Some(DumpOutcome::Replay));
     assert!(!relay.state().delay.mask_visible, "a replay needs no slate");
-    p.stream_for(Duration::from_secs(5)).await;
+    p.stream_sized(Duration::from_secs(5), FRAME).await;
     {
         let l = log.lock().unwrap();
+        assert_eq!(
+            ack.dump,
+            Some(DumpOutcome::Replay),
+            "{} connections to the destination (2: the dump reset it)",
+            l.connections
+        );
         assert_dump_kept_the_broadcast(&l);
         assert_monotonic(&l);
         let ids = aired(&l);
