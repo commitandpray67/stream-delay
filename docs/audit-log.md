@@ -19,6 +19,44 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Area 6, web UI
+
+Read: `lib/` (`api`, `live`, `obs`, `overlay`, `format`), the overlay, the
+dock, `DelayControls`, and the dashboard's tabs and OBS wizard.
+
+Fixed, each with a test that failed first:
+
+- 31fef77: the slate took the background color with its alpha (the API and
+  `config.toml` accept `#rrggbbaa`), so it could be see-through while what
+  airs under it is nearly live. It is now always opaque.
+- a3cf895: the overlay reported the slate painted from the state alone,
+  though it draws it only once it has the overlay settings.
+- 54d410e: the overlay remembered the last change it confirmed across
+  reconnections, so after stream-delay restarted (it numbers changes from 0
+  again) with OBS keeping the page open, a change with the same number
+  went unconfirmed.
+
+Checked and sound: the dashboard's token leaves the address bar; dock and
+overlay tokens stay separate; confirmations and the dump explanation follow
+the live state as it changes.
+
+### 2026-09-28 — Area 5, clients
+
+Read: `crates/obs`, the desktop app (`main.rs`, `tray.rs`, `hotkeys.rs`,
+capabilities), `streamdelayd` (`main.rs`, `client.rs`).
+
+Fixed, with a test that failed first:
+
+- 1e3a11f: the desktop app's update question chose its wording when it
+  appeared (at start). Left open until after a stream started, Install
+  ended the stream without saying so. It is asked again, with the
+  warning, if a stream started meanwhile.
+
+Checked and sound: the dashboard window has no Tauri permissions; fallback
+ports never move away from a running copy; the log file is bounded; quit
+while live asks first; `streamdelayd` keeps tokens out of logs when not at
+a terminal.
+
 ### 2026-09-27 — Area 4, control and settings
 
 Read: `auth.rs`, `routes.rs`, `lib.rs`, `ui.rs`, `settings.rs`, `changes.rs`,
