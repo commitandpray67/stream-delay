@@ -19,6 +19,32 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-28 — Second passes: areas 1, 4, 5, 6, 7
+
+The areas whose first pass found something were read again, starting with
+what the first pass skipped.
+
+- Area 1 (engine): the two paths bd9286f changed (a replay that runs out
+  early turning into a hold only 2 s or more before what follows is due,
+  and a reconnect during a hold or a dump waiting for its slate only
+  marking a resync). Clean. Also checked: a repeated slate confirmation
+  changes nothing (only the first is recorded), which 54d410e relies on.
+- Area 4 (control and settings): the OBS wizard's configure and restore,
+  the config file (private, written atomically), the secret store's code,
+  startup and the links. One finding, fixed in 900513f: a destination URL
+  that does not parse was shown unchanged, so a stream key typed after the
+  application (which only a URL that parses can have moved to the secret
+  store) reached the dashboard and the diagnostics file. A third look at
+  the URL paths this touches (startup, key binding, the relay's
+  destination) found nothing more. Also corrected: a comment claiming only
+  two places use unsafe code (6b47091).
+- Area 5 (clients): the OBS browser source, `streamdelayd`'s options and
+  its HTTP client (no token sent on across redirects). Clean.
+- Area 6 (web UI): the overlay's announcements and badge, and every hint
+  and action text against what the engine does in each phase. Clean.
+- Area 7 (build and release): after ea2383d, `prepare_release.py`,
+  `smoke_desktop.py` and the fuzz targets. Clean.
+
 ### 2026-09-28 — Area 7, build and release
 
 Read: every workflow (`ci`, `release`, `publish-image`, `soak`, `fuzz`,
