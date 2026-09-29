@@ -51,6 +51,8 @@ struct Sim {
     jitter: u64,
     /// Byte budget per poll (a destination falling behind), or unlimited.
     budget: Option<usize>,
+    /// Video with B-frames (see [`bframe_cts`]).
+    bframes: bool,
 }
 
 fn payload(prefix: &[u8], id: u32) -> Bytes {
@@ -89,6 +91,7 @@ impl Sim {
             audio: true,
             jitter: 0,
             budget: None,
+            bframes: false,
         };
         s.start_encoder(0);
         s
@@ -178,12 +181,14 @@ impl Sim {
             if self.encoder_on && self.now >= self.next_video {
                 let ts = self.ts_base + self.video_index * FRAME_MS;
                 let key = self.video_index.is_multiple_of(GOP_FRAMES);
-                let prefix: &[u8] = if key {
-                    &[0x17, 0x01, 0, 0, 0]
+                let cts = if self.bframes {
+                    bframe_cts(self.video_index % GOP_FRAMES)
                 } else {
-                    &[0x27, 0x01, 0, 0, 0]
+                    0
                 };
-                self.push(Kind::Video, ts, prefix, true);
+                let [_, c0, c1, c2] = (cts as u32).to_be_bytes();
+                let prefix = [if key { 0x17 } else { 0x27 }, 0x01, c0, c1, c2];
+                self.push(Kind::Video, ts, &prefix, true);
                 self.video_index += 1;
                 self.next_video = self.now + FRAME_MS * MS + (self.video_index % 3) * self.jitter;
             }
@@ -277,6 +282,7 @@ impl Sim {
         let mut last_video: Option<InputInfo> = None;
         let mut last_video_offset: Option<i64> = None;
         let mut last_video_ts: Option<u32> = None;
+        let mut shown: Option<i64> = None;
         for (index, s, info) in self.media_sent_in(range) {
             let ts = s.msg.timestamp;
             // 1. Timestamps never go backwards per kind.
@@ -312,6 +318,18 @@ impl Sim {
                     );
                 }
                 last_video_ts = Some(ts);
+                // 5. A keyframe is presented after every frame sent before it:
+                //    players take one presented before as going back in time.
+                let pts = pts(s);
+                if let Some(prev) = shown
+                    && info.keyframe
+                {
+                    assert!(
+                        pts > prev,
+                        "keyframe presented at {pts} ms, after a frame presented at {prev} ms"
+                    );
+                }
+                shown = shown.max(Some(pts));
                 last_video = Some(info);
                 last_video_offset = Some(offset);
             } else if info.kind == Kind::Audio
@@ -325,6 +343,29 @@ impl Sim {
             }
         }
     }
+}
+
+/// With [`Sim::bframes`], the composition time (PTS - DTS) of the frame `j`
+/// of a keyframe group in decode order, as an encoder with one B-frame gives
+/// it: each P-frame is presented after the B-frame decoded next, and every
+/// frame before the next keyframe.
+fn bframe_cts(j: u64) -> u64 {
+    match j {
+        0 => FRAME_MS,
+        j if j == GOP_FRAMES - 1 => FRAME_MS,
+        j if j % 2 == 1 => 2 * FRAME_MS,
+        _ => 0,
+    }
+}
+
+/// When a video message sent is presented: its timestamp plus its composition time.
+fn pts(x: &Sent) -> i64 {
+    let p = &x.msg.payload;
+    let cts = match p.get(2..5) {
+        Some(&[a, b, c]) => i32::from_be_bytes([a, b, c, 0]) >> 8,
+        _ => 0,
+    };
+    i64::from(x.msg.timestamp) + i64::from(cts)
 }
 
 fn rtmp_meta() -> Bytes {
@@ -1447,6 +1488,50 @@ fn a_hold_carries_on_after_a_reconnect() {
     s.check_invariants_in(n..s.sent.len());
 }
 
+/// A hold starts with the last keyframe that aired, sent again: it must be
+/// presented after every frame sent before it, B-frames included, which are
+/// presented after frames decoded later. It came a millisecond after the last
+/// frame in decode order, before some in presentation order, and players saw
+/// the stream go back in time (the soak's decoder did, when the destination
+/// dropped during a hold).
+#[test]
+fn a_hold_is_presented_after_everything_sent_before_it() {
+    for offset in 0..4 {
+        let mut s = Sim::new(config());
+        s.bframes = true;
+        s.connect();
+        s.advance(10 * SEC);
+        s.cmd(Command::SetDelay {
+            ms: 20_000,
+            mode: DelayMode::Rewind,
+        });
+        s.advance(30 * SEC + offset * FRAME_MS * MS);
+        let n = s.sent.len();
+        let ack = s.cmd(Command::Dump {
+            mode: DelayMode::Mask,
+            cover: false,
+        });
+        assert_eq!(ack.dump, Some(DumpOutcome::Hold));
+        s.advance(3 * SEC);
+        let shown = s.sent[..n]
+            .iter()
+            .filter(|x| x.msg.kind == Kind::Video)
+            .map(pts)
+            .max()
+            .expect("video aired");
+        let held = s.sent[n..]
+            .iter()
+            .find(|x| x.msg.kind == Kind::Video && x.msg.seq.is_none())
+            .expect("a frame held");
+        assert!(
+            pts(held) > shown,
+            "held frame presented at {} ms, after one presented at {shown} ms",
+            pts(held)
+        );
+        s.check_invariants();
+    }
+}
+
 fn dump_sim(config: EngineConfig) -> Sim {
     let mut s = Sim::new(config);
     s.connect();
@@ -2150,6 +2235,7 @@ proptest! {
         jitter in 0u64..4_000,
         keep_history in any::<bool>(),
         restore_after_reconnect in any::<bool>(),
+        bframes in any::<bool>(),
     ) {
         let mut s = Sim::new(EngineConfig {
             max_delay_ms: 60_000,
@@ -2159,6 +2245,7 @@ proptest! {
         });
         s.audio = audio;
         s.jitter = jitter;
+        s.bframes = bframes;
         s.connect();
         s.advance(5 * SEC);
         // (index into `sent`, what had not aired) for each dump.

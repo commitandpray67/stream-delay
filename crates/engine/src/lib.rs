@@ -1129,13 +1129,17 @@ impl Engine {
     /// During a hold, sends the held frame again when it is due, carrying on
     /// the output's timestamps at the pace of the clock.
     fn emit_hold_frame(&mut self, now: Time, out: &mut Vec<OutMsg>) -> Option<Time> {
-        let o = &mut self.out;
-        let h = o.hold.as_mut()?;
+        let h = self.out.hold.as_ref()?;
         if now < h.next {
             return Some(h.next);
         }
+        // Presented after everything sent before it, too.
+        let after = self.after_sent(self.frame_ms(h.session), h.cts);
+        let o = &mut self.out;
+        let h = o.hold.as_mut().expect("checked above");
         let last_video = o.last_kind_ts[Kind::Video.index()].unwrap_or(0);
-        let t = o.last_out_ts.max(last_video) + ((now - h.last) / MS).max(1);
+        let paced = o.last_out_ts.max(last_video) + ((now - h.last) / MS).max(1);
+        let t = paced.max(after);
         h.last = now;
         h.next = now + SEC;
         let (payload, cts, next) = (h.payload.clone(), h.cts, h.next);
@@ -1800,26 +1804,38 @@ impl Engine {
         self.ring.get((seq - self.base_seq) as usize)
     }
 
+    /// How long a frame of encoder session `session` lasts, in ms (33 while
+    /// unknown).
+    fn frame_ms(&self, session: u32) -> u64 {
+        self.sessions
+            .iter()
+            .find(|s| s.id == session)
+            .map_or(33, |s| s.frame_ms)
+    }
+
+    /// The earliest timestamp for a keyframe with composition time `cts` to come
+    /// a frame (`frame` ms) after everything already sent, in decode order (DTS)
+    /// and in presentation order (PTS) both: frames sent before it can be
+    /// presented later than they are decoded (B-frames), and players and
+    /// transcoders take a keyframe presented before them as the stream going
+    /// back in time.
+    fn after_sent(&self, frame: u64, cts: i32) -> u64 {
+        let o = &self.out;
+        let after_dts = o.last_out_ts + frame.max(1);
+        let after_pts = o.last_pts + frame.max(1) as i64 - cts as i64;
+        after_dts.max(after_pts.max(0) as u64)
+    }
+
     fn splice_to(&mut self, k: u64, delay: u64) {
         let Some(e) = self.entry(k) else { return };
         let (ts, session, cts) = (e.ts, e.session, e.cts);
         let cra = e.hevc_nal == Some(flv::hevc::CRA);
-        let frame = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session)
-            .map_or(33, |s| s.frame_ms);
-        let o = &mut self.out;
-        // The keyframe must follow everything already sent both in decode order (DTS)
-        // and in presentation order (PTS): frames cut off before the splice may have
-        // presentation times later than their decode times (B-frames).
-        let base = if o.fresh {
+        let base = if self.out.fresh {
             0
         } else {
-            let after_dts = o.last_out_ts + frame.max(1);
-            let after_pts = o.last_pts + frame.max(1) as i64 - cts as i64;
-            after_dts.max(after_pts.max(0) as u64)
+            self.after_sent(self.frame_ms(session), cts)
         };
+        let o = &mut self.out;
         o.ts_offset = base as i64 - ts as i64;
         o.fresh = false;
         o.gate = Some((session, ts));

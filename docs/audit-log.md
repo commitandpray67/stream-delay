@@ -19,6 +19,44 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-29 — Area 1: the soak's one decoder error, a hold's first frame
+
+The 12-hour soak on b52c2e9 ran 6.3 hours before its container restarted,
+long enough for one finding. The sink's decoder reported timestamps going
+back 933 ms (`non monotonically increasing dts ... 1208080 >= 1207147`) as
+one destination connection ended. Of the 18 outages, only one came during a
+dump's hold (a Rewind dump at 40 s that held, a longer delay set during the
+hold, then the outage). The 933 ms is the hold's 1 s between frames less the
+keyframe's composition time of 67 ms.
+
+A dump that holds, then the destination dropped during the hold, gave the
+same error three times out of three. What the sink got showed why. The hold
+starts by sending the last keyframe that aired again, timed 1 ms after the
+last frame in decode order. With B-frames, a frame sent before it is
+presented later than it is decoded: the P-frame sent just before was
+presented at 72834 ms, the held keyframe at 72736 ms. A keyframe presented
+before earlier frames is a broken stream. ffmpeg's decoder then times frames
+by their decode times, and when the stream ends, the frames it still holds
+come out 933 ms back. Every hold started this way: a dump nothing covers, a
+replay that runs out early, and a dump waiting for its slate. Players and
+transcoders at the destination saw the same stream.
+
+A splice already placed its keyframe after everything sent, in presentation
+order too. The hold now uses the same rule (`after_sent`). No engine test had
+B-frames: every simulated frame had a composition time of 0, so the
+splice's rule had no test either. The simulator can now send a one-B-frame
+pattern, and a new invariant, checked on every connection of every test, is
+that a keyframe is presented after every frame sent before it. The new test
+dumps at four frame offsets and fails without the fix. The random-operations
+property test turns B-frames on at random: without the fix it failed at once,
+with it 30,000 cases pass. The same repro against the fixed build: no
+decoder errors, and every keyframe in the recordings comes after what
+preceded it.
+
+The hold is new since 0.3.1, so no release has this. Area 1 is due another
+full pass, on what the engine does with composition times. The soak starts
+again on the fixed commit.
+
 ### 2026-09-28 — Areas 3 and 5: mutation testing of the OBS crate and the relay's lib
 
 The last files no mutation run had covered, but the desktop app's.

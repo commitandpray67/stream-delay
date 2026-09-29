@@ -94,6 +94,11 @@ All notable changes to stream-delay are listed here. The format follows
   that long a silence for the end of the stream). The last frame now holds on
   the new connection too, after the stream's metadata and decoder
   configuration.
+- With B-frames (the default in OBS), a dump's hold started with the held
+  frame timed before frames already sent: the stream's presentation times
+  went back, which players and transcoders take as a broken stream (a
+  decoder at the destination reported it when the connection dropped during
+  the hold). The held frame now comes after everything already sent.
 - `streamdelayd urls` showed the token and ingest key saved in the settings
   file even when `run` was given others: with `STREAMDELAY_INGEST_KEY` in
   Docker it said the OBS key was "any", and with `STREAMDELAY_TOKEN` its links
