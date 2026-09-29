@@ -53,6 +53,9 @@ struct Sim {
     budget: Option<usize>,
     /// Video with B-frames (see [`bframe_cts`]).
     bframes: bool,
+    /// How far behind its video, in ms, the encoder sends audio: an audio
+    /// frame arrives this long after its timestamp says.
+    audio_lag: u64,
 }
 
 fn payload(prefix: &[u8], id: u32) -> Bytes {
@@ -92,6 +95,7 @@ impl Sim {
             jitter: 0,
             budget: None,
             bframes: false,
+            audio_lag: 0,
         };
         s.start_encoder(0);
         s
@@ -104,7 +108,7 @@ impl Sim {
         self.video_index = 0;
         self.audio_index = 0;
         self.next_video = self.now;
-        self.next_audio = self.now;
+        self.next_audio = self.now + self.audio_lag * MS;
         let meta = rtmp_meta();
         self.e.ingest_metadata(self.now, meta);
         // Decoder configuration comes first, like OBS.
@@ -860,11 +864,29 @@ fn nothing_is_recorded_without_a_publisher_or_a_payload() {
     }
 }
 
+/// For a dump: the destination connection took everything sent up to `taken`
+/// and threw the rest away, as the egress does. Returns the last sequence
+/// number emitted before.
+fn thrown_away_after(s: &mut Sim, taken: Option<u64>) -> u64 {
+    let emitted = s.sent.iter().filter_map(|x| x.msg.seq).max().unwrap();
+    let keep = s
+        .sent
+        .iter()
+        .position(|x| x.msg.seq == taken)
+        .map_or(0, |i| i + 1);
+    s.sent.truncate(keep);
+    // Floors set since apply from there on.
+    for (at, _) in &mut s.floor_log {
+        *at = (*at).min(keep);
+    }
+    emitted
+}
+
 /// A dump waits for the destination connection to say what it took (up to
 /// 2 s when the connection is stuck), queueing nothing meanwhile. Going live,
 /// or a delay under half a second, in that time leaves nothing to dump. What
 /// the connection threw away must not be sent again then: it would air what
-/// going live skipped, with timestamps going back.
+/// going live skipped, with timestamps going back. Going live still goes live.
 #[test]
 fn a_dump_refused_while_waiting_for_the_destination_sends_nothing_again() {
     for go_live in [true, false] {
@@ -881,7 +903,6 @@ fn a_dump_refused_while_waiting_for_the_destination_sends_nothing_again() {
             .rev()
             .filter(|x| x.at + SEC <= s.now)
             .find_map(|x| x.msg.seq);
-        let emitted = s.sent.iter().filter_map(|x| x.msg.seq).max().unwrap();
         // The dump waits for the connection's answer: nothing more is queued.
         s.budget = Some(0);
         let live = s.now;
@@ -897,6 +918,7 @@ fn a_dump_refused_while_waiting_for_the_destination_sends_nothing_again() {
         }
         let r = s.e.dump_after(s.now, taken, DelayMode::Rewind, false);
         assert_eq!(r, Err(EngineError::NothingToDump));
+        let emitted = thrown_away_after(&mut s, taken);
         s.budget = None;
         let n = s.sent.len();
         s.advance(5 * SEC);
@@ -909,6 +931,75 @@ fn a_dump_refused_while_waiting_for_the_destination_sends_nothing_again() {
                 "recorded {} ms before going live, aired",
                 (live - i.arrival) / MS
             );
+        }
+        if go_live {
+            assert_eq!(s.snapshot().phase, Phase::Live, "{:?}", s.snapshot());
+        }
+        s.check_invariants();
+    }
+}
+
+/// The same with no keyframe old enough yet for the shorter delay: nothing
+/// else moves the output, which starts again at the next keyframe rather than
+/// go on from the middle of what the connection threw away. When the
+/// connection threw nothing away, it just goes on.
+#[test]
+fn a_dump_refused_with_nothing_to_splice_to_starts_again_at_a_keyframe() {
+    for lost in [true, false] {
+        // A delay of about a second, under a keyframe interval.
+        let mut s = Sim::new(config());
+        s.audio = false;
+        s.cmd(Command::SetDelay {
+            ms: 1_000,
+            mode: DelayMode::Rewind,
+        });
+        s.connect();
+        s.advance(20 * SEC);
+        assert!(
+            (1_000..1_500).contains(&effective(&s)),
+            "{:?}",
+            s.snapshot()
+        );
+        // Just after a keyframe arrived: the one before is behind the output.
+        while s
+            .e
+            .last_seq()
+            .and_then(|q| s.e.entry(q))
+            .is_none_or(|e| !e.sync)
+        {
+            s.advance(FRAME_MS * MS);
+        }
+        let taken = s
+            .sent
+            .iter()
+            .rev()
+            .filter(|x| !lost || x.at + 200 * MS <= s.now)
+            .find_map(|x| x.msg.seq);
+        s.budget = Some(0);
+        s.cmd(Command::SetDelay {
+            ms: 300,
+            mode: DelayMode::Rewind,
+        });
+        assert_eq!(s.snapshot().phase, Phase::Reducing);
+        let r = s.e.dump_after(s.now, taken, DelayMode::Rewind, false);
+        assert_eq!(r, Err(EngineError::NothingToDump));
+        let emitted = thrown_away_after(&mut s, taken);
+        s.budget = None;
+        let n = s.sent.len();
+        s.advance(5 * SEC);
+        let first = s
+            .media_sent_in(n..s.sent.len())
+            .next()
+            .expect("nothing aired");
+        let seq = first.1.msg.seq.unwrap();
+        if lost {
+            assert!(seq > emitted);
+            assert!(
+                first.2.keyframe,
+                "went on from the middle of a keyframe group"
+            );
+        } else {
+            assert_eq!(seq, emitted + 1, "skipped ahead with nothing lost");
         }
         s.check_invariants();
     }
@@ -1542,6 +1633,82 @@ fn a_hold_carries_on_after_a_reconnect() {
     s.check_invariants_in(n..s.sent.len());
 }
 
+/// A splice's keyframe comes one frame after everything sent, in decode and
+/// in presentation order both: no sooner (players would go back in time), and
+/// no later (a gap in the timestamps is a pause).
+#[test]
+fn a_splice_comes_one_frame_after_what_was_sent() {
+    // After a P-frame, presented after the B-frame decoded next, and after that.
+    for extra in [5, 6] {
+        let mut s = Sim::new(config());
+        s.bframes = true;
+        s.audio = false;
+        s.connect();
+        s.advance(10 * SEC + extra * FRAME_MS * MS);
+        let video = |x: &&Sent| x.msg.kind == Kind::Video;
+        let dts = s.sent.iter().filter(video).map(|x| x.msg.timestamp).max();
+        let shown = s.sent.iter().filter(video).map(pts).max().unwrap();
+        let n = s.sent.len();
+        s.cmd(Command::SetDelay {
+            ms: 5_000,
+            mode: DelayMode::Rewind,
+        });
+        let key = s.sent[n..]
+            .iter()
+            .find(|x| x.msg.payload[..2] == [0x17, 0x01])
+            .expect("spliced");
+        let after_dts = i64::from(dts.unwrap()) + FRAME_MS as i64;
+        let after_pts = shown + FRAME_MS as i64 - bframe_cts(0) as i64;
+        assert_eq!(
+            i64::from(key.msg.timestamp),
+            after_dts.max(after_pts),
+            "after {extra} frames"
+        );
+        s.check_invariants();
+    }
+}
+
+/// Encoders send audio a little behind the video: after a keyframe come
+/// audio frames timed before it. After a splice to that keyframe they belong
+/// to what was skipped, and sent, they would come out of step with the video.
+#[test]
+fn audio_timed_before_the_keyframe_spliced_to_is_left_out() {
+    let mut s = Sim::new(config());
+    s.audio_lag = 60;
+    s.next_audio = s.now + 60 * MS;
+    s.connect();
+    s.advance(19 * SEC);
+    let n = s.sent.len();
+    s.cmd(Command::SetDelay {
+        ms: 5_000,
+        mode: DelayMode::Rewind,
+    });
+    s.advance(5 * SEC);
+    assert!(s.snapshot().output.dropped_frames > 0, "{:?}", s.snapshot());
+    let media: Vec<_> = s.media_sent_in(n..s.sent.len()).collect();
+    let key = media.iter().find(|m| m.2.keyframe).expect("spliced").2;
+    // An audio frame has the keyframe's timestamp: it starts with it.
+    assert_eq!(key.ts, 13_860);
+    let audio = || {
+        media
+            .iter()
+            .filter(|m| m.2.kind == Kind::Audio && m.2.session == key.session)
+    };
+    assert!(
+        audio().any(|m| m.2.ts == key.ts),
+        "the audio at the keyframe was left out"
+    );
+    for (_, _, i) in audio() {
+        assert!(
+            i.ts >= key.ts,
+            "audio at {} ms after the keyframe at {} ms",
+            i.ts,
+            key.ts
+        );
+    }
+    s.check_invariants();
+}
+
 /// A hold starts with the last keyframe that aired, sent again: it must be
 /// presented after every frame sent before it, B-frames included, which are
 /// presented after frames decoded later. It came a millisecond after the last
@@ -1615,6 +1782,7 @@ fn a_dump_nothing_covers_holds_the_last_frame_until_the_delay_is_back() {
     let last_ts = s.sent.iter().map(|x| x.msg.timestamp).max().unwrap();
     let dumped_at = s.now;
     let n = s.sent.len();
+    let sent_bytes = s.snapshot().output.sent_bytes;
     let ack = s.cmd(Command::Dump {
         mode: DelayMode::Mask,
         cover: false,
@@ -1633,6 +1801,12 @@ fn a_dump_nothing_covers_holds_the_last_frame_until_the_delay_is_back() {
     // its timestamps keeping the clock's pace.
     let held = s.sent.len() - n;
     assert!((14..=16).contains(&held), "{held} frames held");
+    let held_bytes: usize = s.sent[n..].iter().map(|x| x.msg.payload.len()).sum();
+    assert_eq!(
+        s.snapshot().output.sent_bytes - sent_bytes,
+        held_bytes as u64,
+        "held frames are sent bytes too"
+    );
     let mut prev = (dumped_at, last_ts);
     for x in &s.sent[n..] {
         assert_eq!(x.msg.kind, Kind::Video);
@@ -2290,6 +2464,7 @@ proptest! {
         keep_history in any::<bool>(),
         restore_after_reconnect in any::<bool>(),
         bframes in any::<bool>(),
+        audio_lag in prop_oneof![Just(0u64), 1u64..80],
     ) {
         let mut s = Sim::new(EngineConfig {
             max_delay_ms: 60_000,
@@ -2300,6 +2475,8 @@ proptest! {
         s.audio = audio;
         s.jitter = jitter;
         s.bframes = bframes;
+        s.audio_lag = audio_lag;
+        s.next_audio = s.now + audio_lag * MS;
         s.connect();
         s.advance(5 * SEC);
         // (index into `sent`, what had not aired) for each dump.
@@ -2796,6 +2973,15 @@ fn hevc_rasl_pictures_are_dropped_after_splicing_to_a_cra() {
         "RASL pictures after the splice must be dropped: {nals:?}"
     );
     assert_eq!(&nals[1..4], &[1, 1, 1]);
+    // The next GOP follows what aired: its RASL pictures decode, and stay.
+    out.clear();
+    e.poll(t + 5_000 * MS, &mut out);
+    let nals: Vec<u8> = out
+        .iter()
+        .filter(|m| m.seq.is_some())
+        .map(|m| (m.payload[9] >> 1) & 0x3f)
+        .collect();
+    assert!(nals.windows(2).any(|w| w == [21, 8]), "{nals:?}");
 }
 
 /// HEVC payload: enhanced CodedFrames 'hvc1', composition time `cts`, with one
@@ -2859,6 +3045,7 @@ fn hevc_leading_pictures_are_not_presented_before_what_aired() {
     };
     let media = |m: &&OutMsg| m.seq.is_some() && m.payload.len() > 8;
     let shown = out.iter().filter(media).map(pts).max().unwrap();
+    let dropped = e.snapshot(t).output.dropped_frames;
     // Aired live up to the last CRA: rewinding splices to an earlier one.
     e.command(
         t,
@@ -2876,12 +3063,26 @@ fn hevc_leading_pictures_are_not_presented_before_what_aired() {
         .map(|m| ((m.payload[12] >> 1) & 0x3f, pts(m)))
         .collect();
     assert_eq!(after[0].0, flv::hevc::BLA_W_LP, "{after:?}");
+    let dropped = e.snapshot(t).output.dropped_frames - dropped;
+    assert_eq!(dropped, 1, "the RADL");
     for &(nal, p) in &after {
         assert!(
             p > shown,
             "NAL type {nal} presented at {p} ms, after one presented at {shown} ms: {after:?}"
         );
     }
+    // The next GOP follows what aired: its leading pictures stay.
+    out.clear();
+    e.poll(t + 5_000 * MS, &mut out);
+    let nals: Vec<u8> = out
+        .iter()
+        .filter(media)
+        .map(|m| (m.payload[12] >> 1) & 0x3f)
+        .collect();
+    assert!(
+        nals.windows(2).any(|w| w == [flv::hevc::CRA, RADL_R]),
+        "{nals:?}"
+    );
 }
 
 #[test]

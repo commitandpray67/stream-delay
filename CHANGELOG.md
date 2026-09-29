@@ -107,7 +107,8 @@ All notable changes to stream-delay are listed here. The format follows
   setting a delay under half a second, left nothing to dump. The dump was
   then refused, and what the connection had thrown away was sent again: what
   going live skipped aired after all, in a burst, with timestamps going back.
-  Nothing is sent again now: the stream goes on from the next keyframe.
+  Nothing is sent again now: the stream goes on live, or from the next
+  keyframe.
 - `streamdelayd urls` showed the token and ingest key saved in the settings
   file even when `run` was given others: with `STREAMDELAY_INGEST_KEY` in
   Docker it said the OBS key was "any", and with `STREAMDELAY_TOKEN` its links

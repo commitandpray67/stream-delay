@@ -767,8 +767,8 @@ impl Engine {
     /// the dump throws away the rest of what has not aired. When nothing is
     /// left to dump (the stream went live while the connection answered), what
     /// was thrown away is not sent again either: that would air what going
-    /// live skipped, with timestamps going back. The output starts again at a
-    /// keyframe instead.
+    /// live skipped, with timestamps going back. The output goes on from a
+    /// keyframe: the one a change spliced to meanwhile, or else the next.
     pub fn dump_after(
         &mut self,
         now: Time,
@@ -780,15 +780,21 @@ impl Engine {
             self.unsend(taken);
             return self.command(now, Command::Dump { mode, cover });
         }
+        if !self.out.connected {
+            return Err(EngineError::NothingToDump);
+        }
+        // Nothing sent since a splice: the output goes on from its keyframe.
+        let spliced = self.out.pending_headers;
         let lost = match taken {
             Some(s) => s + 1 < self.out.next_seq,
             None => self.out.first_emitted.is_some(),
         };
-        if self.out.connected && lost {
+        if lost && !spliced {
             self.out.need_sync = true;
-            self.out.sent_headers.clear();
-            self.out.sent_metadata = None;
         }
+        // Some of what was thrown away may have been decoder configuration.
+        self.out.sent_headers.clear();
+        self.out.sent_metadata = None;
         Err(EngineError::NothingToDump)
     }
 

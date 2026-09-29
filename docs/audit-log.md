@@ -87,8 +87,43 @@ ahead, nothing is sent again and the output starts at the next keyframe. The
 new test covers both ways and fails without the fix. The egress cut has been
 there since 0.3.1; the changelog says so.
 
-Area 1 is due another full pass, on what the engine does with composition
-times. The soak starts again on the fixed commit.
+Mutation testing of the day's changes (`after_sent`, `frame_ms`, the hold
+frame, `dump_after`, `emit_entry`, `is_leading`: 71 mutants, against the
+engine's and the flv crate's tests) first left 21 alive. One pointed at a
+flaw in `dump_after` as pushed in bf48e42. It restarted at a keyframe even
+when going live had already spliced, so the delay grew by however long the
+dump had waited: going live left the stream about 0.7 s behind. It now
+restarts only when frames were lost and no splice is waiting to be sent.
+The tests now:
+
+- have the egress really throw away what it did not send, and cover a
+  refused dump where nothing was lost (the output goes straight on) and one
+  with nothing to splice to (it starts at the next keyframe);
+- pin a splice's keyframe to exactly one frame after what was sent, in both
+  decode and presentation order, with B-frames;
+- count held frames as sent bytes;
+- check that HEVC leading pictures come back in the GOP after the splice,
+  and that the splice's RADL is counted as dropped;
+- simulate audio sent behind its video, as encoders do. The gate that
+  leaves out audio timed before the keyframe spliced to had never run in an
+  engine test. A new test covers it, down to the audio frame at the
+  keyframe's own time, and the random-operations property test now varies
+  the lag (30,000 cases pass).
+
+Two survive, both with no effect a stream can show. One records a held
+frame's presentation time with its composition time subtracted: that
+matters only if the next keyframe's composition time is smaller than the
+held one's, which one encoder does not do. The other has `frame_ms` read
+another session's frame length: that matters only between sessions at
+different frame rates.
+
+The end-to-end harness (`tests/e2e/run.sh`, on every push for H.264,
+HEVC and the timestamp wrap) now checks that every keyframe is presented
+after what came before it. Against b52c2e9 it fails at the hold (a keyframe
+at 31.803 s after a frame at 31.869 s); against the fix, all three pass.
+ADR 0003 has an amendment for the hold and the RADL pictures.
+
+Area 1 is due another full pass. The soak starts again on the fixed commit.
 
 ### 2026-09-28 — Areas 3 and 5: mutation testing of the OBS crate and the relay's lib
 

@@ -82,6 +82,16 @@ for name, ps in (("video", v), ("audio", a)):
     bad = [(i, x, y) for i, (x, y) in enumerate(zip(dts, dts[1:])) if y < x]
     assert not bad, f"{name} DTS went backwards at {bad[:3]}"
 print(f"   {len(v)} video / {len(a)} audio packets, DTS monotonic")
+# A keyframe is presented after every frame sent before it: B-frames are
+# presented after frames decoded later, and a keyframe (spliced to, or held
+# after a dump) presented before them sends players back in time.
+shown = None
+for i, p in enumerate(v):
+    pts = float(p["pts_time"])
+    if shown is not None and p["flags"].startswith("K"):
+        assert pts > shown, f"keyframe {i} presented at {pts}, after a frame presented at {shown}"
+    shown = pts if shown is None else max(shown, pts)
+print("   every keyframe presented after what came before it")
 first_video = v[0]["flags"]
 assert first_video.startswith("K"), "recording does not start with a keyframe"
 PY
