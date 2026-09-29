@@ -56,9 +56,11 @@ pub mod hevc {
     pub const RASL_R: u8 = 9;
     pub const CRA: u8 = 21;
 
-    /// Random-access skipped leading picture: references frames before its CRA.
-    pub fn is_rasl(t: u8) -> bool {
-        t == RASL_N || t == RASL_R
+    /// Leading picture: decoded after its IRAP (CRA or BLA) and presented
+    /// before it. RADL ones are decodable from the IRAP on; RASL ones reference
+    /// frames before it.
+    pub fn is_leading(t: u8) -> bool {
+        (6..=9).contains(&t)
     }
 
     /// Intra random access point (BLA, IDR or CRA).
@@ -75,7 +77,7 @@ pub mod hevc {
 
     /// Rewrites every CRA slice in `payload` (length-prefixed NAL units starting at
     /// `offset`) as BLA_W_LP. A CRA in the middle of a stream does not reset the
-    /// decoder; a BLA marks a broken link so the decoder discards leading pictures
+    /// decoder; a BLA marks a broken link so the decoder discards RASL pictures
     /// and restarts output order. This is the standard way to splice open-GOP HEVC.
     pub fn cra_to_bla(payload: &[u8], offset: usize) -> Option<Vec<u8>> {
         let mut out = payload.to_vec();
@@ -416,7 +418,7 @@ mod tests {
         );
         // Only the NAL type bits change.
         assert_eq!(bla.iter().zip(&v).filter(|(a, b)| a != b).count(), 1);
-        assert!(hevc::is_irap(21) && hevc::is_rasl(9) && hevc::is_trailing(1));
+        assert!(hevc::is_irap(21) && hevc::is_leading(9) && hevc::is_trailing(1));
         // Legacy codec id 12, RASL_N slice.
         let legacy = [0x2c, 0x01, 0, 0, 0, 0, 0, 0, 2, 8 << 1, 1];
         assert_eq!(
@@ -430,11 +432,11 @@ mod tests {
         // H.265 table 7-1: TRAIL, TSA and STSA pictures; RADL, then RASL; then
         // BLA, IDR, CRA and two reserved IRAP types.
         let trailing = [0, 1, 2, 3, 4, 5];
-        let rasl = [8, 9];
+        let leading = [6, 7, 8, 9];
         let irap = [16, 17, 18, 19, 20, 21, 22, 23];
         for t in 0..64u8 {
             assert_eq!(hevc::is_trailing(t), trailing.contains(&t), "{t}");
-            assert_eq!(hevc::is_rasl(t), rasl.contains(&t), "{t}");
+            assert_eq!(hevc::is_leading(t), leading.contains(&t), "{t}");
             assert_eq!(hevc::is_irap(t), irap.contains(&t), "{t}");
         }
     }

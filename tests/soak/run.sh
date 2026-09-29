@@ -27,7 +27,10 @@
 #   - output timestamps kept increasing (checked by the decoder in DTS order).
 #
 # Samples are written to $OUT/samples.csv (time, rss_kb, phase, effective_ms,
-# buffered_bytes, splices) so a run can be graphed afterwards.
+# buffered_bytes, splices) so a run can be graphed afterwards. $OUT/sink-ends
+# has a line for each destination connection that ended: its number, when (UTC,
+# as in streamdelayd.log) and how many lines sink.log had then, so a decoder
+# complaint can be matched to its connection.
 #
 # Requires: ffmpeg, curl, python3 and a built streamdelayd (release recommended).
 set -euo pipefail
@@ -71,16 +74,19 @@ echo "soak: ${DURATION}s, delay changes every ${MIN_GAP}-${MAX_GAP}s, output in 
 # The sink decodes everything; any decoder complaint lands in sink.log. Each
 # connection gets its own ffmpeg: one ends when the destination goes down.
 sink() {
-  local f=
+  local f= n=0
   trap '[[ -n "$f" ]] && kill "$f" 2>/dev/null; exit' TERM
   while :; do
     ffmpeg -hide_banner -nostats -loglevel error -listen 1 -i "rtmp://127.0.0.1:$SINK_PORT/live/soak" \
       -fps_mode passthrough -enc_time_base:v demux -f null - 2>> "$OUT/sink.log" &
     f=$!
     wait "$f" || true
+    n=$((n + 1))
+    echo "$n $(date -u +%T.%N) $(wc -l < "$OUT/sink.log")" >> "$OUT/sink-ends"
   done
 }
 : > "$OUT/sink.log"
+: > "$OUT/sink-ends"
 sink &
 pids+=($!)
 DOWN="$OUT/destination-down"

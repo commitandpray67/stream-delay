@@ -26,8 +26,17 @@ long enough for one finding. The sink's decoder reported timestamps going
 back 933 ms (`non monotonically increasing dts ... 1208080 >= 1207147`) as
 one destination connection ended. Of the 18 outages, only one came during a
 dump's hold (a Rewind dump at 40 s that held, a longer delay set during the
-hold, then the outage). The 933 ms is the hold's 1 s between frames less the
-keyframe's composition time of 67 ms.
+hold, then the outage, ending connection 13). The 933 ms is the hold's 1 s
+between frames less the keyframe's composition time of 67 ms.
+
+That attribution rests on the 933 ms. The sink log does not say which
+connection a line came from, and counting its lines points one connection
+earlier. The same process wrote the complaint and the 12th end-of-stream
+error, and 19 connections ended with 19 of those. Connection 12 had no dump
+and nothing that sends frames 1 s apart, and the mismatch is unexplained.
+The soak now writes when each connection ended, with how far `sink.log` had
+got (`sink-ends`). If the next run shows a decoder complaint where no hold
+was, there is a second cause, and nothing is released until it is found.
 
 A dump that holds, then the destination dropped during the hold, gave the
 same error three times out of three. What the sink got showed why. The hold
@@ -53,9 +62,20 @@ with it 30,000 cases pass. The same repro against the fixed build: no
 decoder errors, and every keyframe in the recordings comes after what
 preceded it.
 
-The hold is new since 0.3.1, so no release has this. Area 1 is due another
-full pass, on what the engine does with composition times. The soak starts
-again on the fixed commit.
+The hold is new since 0.3.1, so no release has this.
+
+The same class, in HEVC. A splice to an open-GOP keyframe (CRA, sent as BLA)
+dropped the RASL leading pictures, which cannot be decoded without what came
+before, and kept the RADL ones. Those are presented before their keyframe,
+and the rule places only the keyframe after what was sent. A new test splices
+right after a CRA aired live. The RADL came out at the same presentation time
+as the last frame sent, and it fails without the fix. Leading pictures, RADL
+too, are now left out after a splice. Trailing pictures never reference them
+(H.265 3.114), so nothing else changes. This has been there since the first
+release; the changelog says so.
+
+Area 1 is due another full pass, on what the engine does with composition
+times. The soak starts again on the fixed commit.
 
 ### 2026-09-28 — Areas 3 and 5: mutation testing of the OBS crate and the relay's lib
 

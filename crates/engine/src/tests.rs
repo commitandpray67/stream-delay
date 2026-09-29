@@ -2744,6 +2744,92 @@ fn hevc_rasl_pictures_are_dropped_after_splicing_to_a_cra() {
     assert_eq!(&nals[1..4], &[1, 1, 1]);
 }
 
+/// HEVC payload: enhanced CodedFrames 'hvc1', composition time `cts`, with one
+/// slice of the given NAL type.
+fn hevc_cts(key: bool, nal: u8, cts: u32, id: u32) -> Bytes {
+    let mut b = BytesMut::new();
+    b.put_u8(0x80 | if key { 0x10 } else { 0x20 } | 0x01);
+    b.put_slice(b"hvc1");
+    b.put_slice(&cts.to_be_bytes()[1..]);
+    b.put_u32(3);
+    b.put_slice(&[nal << 1, 1, 0]);
+    b.put_u32(id);
+    b.freeze()
+}
+
+/// After a splice to an open-GOP keyframe (CRA), its decodable leading
+/// pictures (RADL) would be presented before it, and so before what was sent
+/// before the splice: back in time, like a hold that came too early. They are
+/// dropped, like the RASL ones that cannot be decoded.
+#[test]
+fn hevc_leading_pictures_are_not_presented_before_what_aired() {
+    const RADL_R: u8 = 7;
+    let mut e = Engine::new(config());
+    let t0 = 1_000 * SEC;
+    e.ingest_start(t0);
+    e.output_connected(t0);
+    let mut seq_header = BytesMut::new();
+    seq_header.put_u8(0x80 | 0x10);
+    seq_header.put_slice(b"hvc1");
+    e.ingest(t0, Kind::Video, 0, seq_header.freeze());
+    // A CRA, a RADL decoded after it and presented before it, then trailing
+    // pictures presented in order; each GOP presented after the last.
+    let gop = [
+        (flv::hevc::CRA, 66u32),
+        (RADL_R, 0),
+        (1, 33),
+        (1, 33),
+        (1, 33),
+        (1, 33),
+    ];
+    let (mut id, mut t, mut ts) = (0, t0, 0);
+    let mut out = Vec::new();
+    for g in 0..10 {
+        for (i, &(nal, cts)) in gop.iter().enumerate() {
+            // The last GOP stops right after its CRA.
+            if g == 9 && i > 0 {
+                break;
+            }
+            id += 1;
+            e.ingest(t, Kind::Video, ts, hevc_cts(i == 0, nal, cts, id));
+            e.poll(t, &mut out);
+            t += 33 * MS;
+            ts += 33;
+        }
+        t += 1_800 * MS;
+        ts += 1_800;
+    }
+    let pts = |m: &OutMsg| {
+        let c = &m.payload[5..8];
+        i64::from(m.timestamp) + i64::from(u32::from_be_bytes([0, c[0], c[1], c[2]]))
+    };
+    let media = |m: &&OutMsg| m.seq.is_some() && m.payload.len() > 8;
+    let shown = out.iter().filter(media).map(pts).max().unwrap();
+    // Aired live up to the last CRA: rewinding splices to an earlier one.
+    e.command(
+        t,
+        Command::SetDelay {
+            ms: 5_000,
+            mode: DelayMode::Rewind,
+        },
+    )
+    .unwrap();
+    out.clear();
+    e.poll(t + 1_000 * MS, &mut out);
+    let after: Vec<(u8, i64)> = out
+        .iter()
+        .filter(media)
+        .map(|m| ((m.payload[12] >> 1) & 0x3f, pts(m)))
+        .collect();
+    assert_eq!(after[0].0, flv::hevc::BLA_W_LP, "{after:?}");
+    for &(nal, p) in &after {
+        assert!(
+            p > shown,
+            "NAL type {nal} presented at {p} ms, after one presented at {shown} ms: {after:?}"
+        );
+    }
+}
+
 #[test]
 fn spliced_cra_is_rewritten_as_bla() {
     let mut e = Engine::new(config());

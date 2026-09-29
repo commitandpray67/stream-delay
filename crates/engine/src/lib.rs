@@ -397,9 +397,10 @@ struct Output {
     last_kind_ts: [Option<u64>; 3],
     /// Highest presentation time sent (video DTS + composition time).
     last_pts: i64,
-    /// After splicing to an HEVC CRA frame (open GOP), its RASL leading pictures
-    /// reference frames that were never sent and must be dropped.
-    skip_rasl_after: Option<u64>,
+    /// After splicing to an HEVC CRA frame (open GOP), its leading pictures are
+    /// dropped: RASL ones reference frames that were never sent, and RADL ones
+    /// are presented before it, so before frames already sent.
+    skip_leading_after: Option<u64>,
     gate: Option<(u32, u64)>,
     pending_headers: bool,
     /// The decoder configuration the destination has, one per kind and class,
@@ -479,7 +480,7 @@ impl Engine {
                 last_out_ts: 0,
                 last_kind_ts: [None; 3],
                 last_pts: 0,
-                skip_rasl_after: None,
+                skip_leading_after: None,
                 gate: None,
                 pending_headers: false,
                 sent_headers: Vec::new(),
@@ -1839,7 +1840,7 @@ impl Engine {
         o.ts_offset = base as i64 - ts as i64;
         o.fresh = false;
         o.gate = Some((session, ts));
-        o.skip_rasl_after = cra.then_some(k);
+        o.skip_leading_after = cra.then_some(k);
         if o.started {
             o.splices += 1;
         }
@@ -1939,12 +1940,12 @@ impl Engine {
             return;
         }
         if kind == Kind::Video
-            && let Some(k) = self.out.skip_rasl_after
+            && let Some(k) = self.out.skip_leading_after
             && let Some(t) = self.entry(seq).and_then(|e| e.hevc_nal)
         {
             if seq > k && (flv::hevc::is_trailing(t) || flv::hevc::is_irap(t)) {
-                self.out.skip_rasl_after = None;
-            } else if flv::hevc::is_rasl(t) {
+                self.out.skip_leading_after = None;
+            } else if flv::hevc::is_leading(t) {
                 self.out.dropped += 1;
                 return;
             }
@@ -1958,7 +1959,7 @@ impl Engine {
             return;
         }
         let mut payload = payload;
-        if self.out.skip_rasl_after == Some(seq)
+        if self.out.skip_leading_after == Some(seq)
             && let Some(offset) = self.entry(seq).and_then(|e| e.nal_offset)
             && let Some(bla) = flv::hevc::cra_to_bla(&payload, offset)
         {

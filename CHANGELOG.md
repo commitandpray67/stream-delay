@@ -96,9 +96,12 @@ All notable changes to stream-delay are listed here. The format follows
   configuration.
 - With B-frames (the default in OBS), a dump's hold started with the held
   frame timed before frames already sent: the stream's presentation times
-  went back, which players and transcoders take as a broken stream (a
-  decoder at the destination reported it when the connection dropped during
-  the hold). The held frame now comes after everything already sent.
+  went back, which players and transcoders take as a broken stream. The held
+  frame now comes after everything already sent.
+- With HEVC from an encoder whose open GOPs have decodable leading pictures
+  (RADL), the frames right after a delay change could be presented before, or
+  at the same time as, frames already sent. Those leading pictures are now
+  left out after a change, as the undecodable ones (RASL) already were.
 - `streamdelayd urls` showed the token and ingest key saved in the settings
   file even when `run` was given others: with `STREAMDELAY_INGEST_KEY` in
   Docker it said the OBS key was "any", and with `STREAMDELAY_TOKEN` its links
