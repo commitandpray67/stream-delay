@@ -19,6 +19,27 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-09-29 — Soak of 13da1dc: three runs cut short, all clean
+
+The 12-hour soak (`tests/soak/run.sh`, `DURATION=43200`) on 13da1dc, the
+commit with the three fixes below, was started three times. A restart of the
+container it runs in ended each run before 12 hours. Everything each run
+checks held for as long as it ran:
+
+| Run | Lasted | Outages | Encoder crashes | Splices | Decoder errors | RSS after warm-up | Beyond the buffer |
+|---|---|---|---|---|---|---|---|
+| 1 | 8.5 h | 24 | 87 | 302 | 0 | 17.6–37.0 MB | 10.0–17.2 MB |
+| 2 | 2.2 h | 6 | 22 | 83 | 0 | 17.3–37.6 MB | 10.0–16.4 MB |
+| 3 | 5.0 h | 14 | 50 | 177 | 0 | 17.7–36.9 MB | 10.0–17.3 MB |
+
+That is 15.7 hours in all. No encoder session was refused, and the relay
+reconnected once per outage and never otherwise. The only lines in the sink
+logs besides the end of each connection are ffmpeg's "Immediate exit
+requested" as the container stopped. The GitHub soak workflow caps a run at
+5.5 hours, and this session may not start one. A fourth local run follows,
+and nothing is released without an uninterrupted 12 hours or the owner's
+say-so.
+
 ### 2026-09-29 — Area 1: the soak's one decoder error, a hold's first frame
 
 The 12-hour soak on b52c2e9 ran 6.3 hours before its container restarted,
