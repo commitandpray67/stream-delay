@@ -74,6 +74,19 @@ too, are now left out after a splice. Trailing pictures never reference them
 (H.265 3.114), so nothing else changes. This has been there since the first
 release; the changelog says so.
 
+One more, found reading what follows `unsend`, whose rewind leaves the
+timestamps at what was emitted. A dump waits for the egress to say what it
+took (up to 2 s when the connection is stuck), queueing nothing but still
+running the engine. Going live in that time splices to the live edge; a delay
+under half a second (the API takes fractions) leaves the dump too little to
+work with. Either way the dump was refused after `unsend` had rewound the
+output to what the egress threw away. That content was then sent again: after
+going live, content recorded 11 s earlier, stamped at the last timestamp
+emitted. `Engine::dump_after` now does both steps. When the dump cannot go
+ahead, nothing is sent again and the output starts at the next keyframe. The
+new test covers both ways and fails without the fix. The egress cut has been
+there since 0.3.1; the changelog says so.
+
 Area 1 is due another full pass, on what the engine does with composition
 times. The soak starts again on the fixed commit.
 

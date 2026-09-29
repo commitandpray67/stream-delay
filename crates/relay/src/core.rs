@@ -748,8 +748,6 @@ impl Core {
             return;
         };
         let now = self.now();
-        // What was emitted after `delivered` has not aired, and never will.
-        self.engine.unsend(delivered);
         let mode = if self.engine.output_is_connected() {
             pending.mode
         } else {
@@ -760,12 +758,13 @@ impl Core {
                 "the destination connection was reset for the dump: some of what was sent had not left yet"
             );
         }
-        let cmd = Command::Dump {
-            mode,
-            cover: pending.cover,
-        };
-        let r = self.engine.command(now, cmd);
+        // What was emitted after `delivered` has not aired, and never will.
+        let r = self.engine.dump_after(now, delivered, mode, pending.cover);
         if let Ok(ack) = &r {
+            let cmd = Command::Dump {
+                mode,
+                cover: pending.cover,
+            };
             info!(?cmd, ?ack, "delay command");
         }
         self.publish_state();

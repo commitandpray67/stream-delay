@@ -102,6 +102,12 @@ All notable changes to stream-delay are listed here. The format follows
   (RADL), the frames right after a delay change could be presented before, or
   at the same time as, frames already sent. Those leading pictures are now
   left out after a change, as the undecodable ones (RASL) already were.
+- A dump waits for the connection to the destination to say what it has sent
+  (up to 2 s when the connection is stuck). Going live in that time, or
+  setting a delay under half a second, left nothing to dump. The dump was
+  then refused, and what the connection had thrown away was sent again: what
+  going live skipped aired after all, in a burst, with timestamps going back.
+  Nothing is sent again now: the stream goes on from the next keyframe.
 - `streamdelayd urls` showed the token and ingest key saved in the settings
   file even when `run` was given others: with `STREAMDELAY_INGEST_KEY` in
   Docker it said the OBS key was "any", and with `STREAMDELAY_TOKEN` its links

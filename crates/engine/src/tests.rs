@@ -860,6 +860,60 @@ fn nothing_is_recorded_without_a_publisher_or_a_payload() {
     }
 }
 
+/// A dump waits for the destination connection to say what it took (up to
+/// 2 s when the connection is stuck), queueing nothing meanwhile. Going live,
+/// or a delay under half a second, in that time leaves nothing to dump. What
+/// the connection threw away must not be sent again then: it would air what
+/// going live skipped, with timestamps going back.
+#[test]
+fn a_dump_refused_while_waiting_for_the_destination_sends_nothing_again() {
+    for go_live in [true, false] {
+        let mut s = live_sim();
+        s.cmd(Command::SetDelay {
+            ms: 10_000,
+            mode: DelayMode::Rewind,
+        });
+        s.advance(20 * SEC);
+        // The destination took all but the last second of what was sent.
+        let taken = s
+            .sent
+            .iter()
+            .rev()
+            .filter(|x| x.at + SEC <= s.now)
+            .find_map(|x| x.msg.seq);
+        let emitted = s.sent.iter().filter_map(|x| x.msg.seq).max().unwrap();
+        // The dump waits for the connection's answer: nothing more is queued.
+        s.budget = Some(0);
+        let live = s.now;
+        if go_live {
+            s.cmd(Command::GoLive(GoLiveWhen::Now));
+            s.advance(2_100 * MS);
+            assert_eq!(s.snapshot().phase, Phase::Live);
+        } else {
+            s.cmd(Command::SetDelay {
+                ms: 300,
+                mode: DelayMode::Rewind,
+            });
+        }
+        let r = s.e.dump_after(s.now, taken, DelayMode::Rewind, false);
+        assert_eq!(r, Err(EngineError::NothingToDump));
+        s.budget = None;
+        let n = s.sent.len();
+        s.advance(5 * SEC);
+        assert!(s.sent.len() > n, "nothing aired");
+        for (_, x, i) in s.media_sent_in(n..s.sent.len()) {
+            let seq = x.msg.seq.unwrap();
+            assert!(seq > emitted, "{seq} sent again (go live: {go_live})");
+            assert!(
+                !go_live || i.arrival >= live,
+                "recorded {} ms before going live, aired",
+                (live - i.arrival) / MS
+            );
+        }
+        s.check_invariants();
+    }
+}
+
 #[test]
 fn a_reconnect_resumes_right_after_what_the_destination_took() {
     // When the destination took everything up to a keyframe, the new connection

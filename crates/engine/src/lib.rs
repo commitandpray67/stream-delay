@@ -762,6 +762,36 @@ impl Engine {
         self.out.sent_metadata = None;
     }
 
+    /// A dump, once the destination connection has said what it took: output
+    /// after `taken` was emitted but thrown away (see [`Engine::unsend`]), and
+    /// the dump throws away the rest of what has not aired. When nothing is
+    /// left to dump (the stream went live while the connection answered), what
+    /// was thrown away is not sent again either: that would air what going
+    /// live skipped, with timestamps going back. The output starts again at a
+    /// keyframe instead.
+    pub fn dump_after(
+        &mut self,
+        now: Time,
+        taken: Option<u64>,
+        mode: DelayMode,
+        cover: bool,
+    ) -> Result<Ack, EngineError> {
+        if self.can_dump() {
+            self.unsend(taken);
+            return self.command(now, Command::Dump { mode, cover });
+        }
+        let lost = match taken {
+            Some(s) => s + 1 < self.out.next_seq,
+            None => self.out.first_emitted.is_some(),
+        };
+        if self.out.connected && lost {
+            self.out.need_sync = true;
+            self.out.sent_headers.clear();
+            self.out.sent_metadata = None;
+        }
+        Err(EngineError::NothingToDump)
+    }
+
     /// Ends the current broadcast on the output side. The next encoder session starts
     /// a fresh broadcast (with the current target delay) instead of continuing this one.
     pub fn output_reset(&mut self) {
