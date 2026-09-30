@@ -6,6 +6,8 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-30
+
 ### Added
 
 - `streamdelayd health` exits with 0 when an instance is running and answering
@@ -25,6 +27,36 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Changed
 
+- Twitch and YouTube are reached over RTMPS, which encrypts the stream key.
+  Settings on their earlier default RTMP addresses move to it, keeping the saved
+  key. The RTMP addresses are still there, as *Twitch (RTMP, unencrypted)* and
+  *YouTube (RTMP, unencrypted)*, for networks where RTMPS doesn't get through.
+- When the RTMP input can be reached from other devices, its ingest key must have
+  at least 16 characters (a generated one has 32); a shorter one is refused at
+  startup. The example key in the Docker instructions, `choose-a-secret`, was
+  too short: leave `STREAMDELAY_INGEST_KEY` unset to use a generated key.
+- While wrong ingest keys come from many addresses at once (20 in a minute), each
+  address gets one try every 10 minutes. Addresses that sent no wrong key, like
+  your encoder's, are not held up. The key comparison no longer reveals the key's
+  length through its timing.
+- With LAN access (always on in the Docker image), the dashboard and API only
+  answer requests that name this computer by an IP address, a local name (`nas`,
+  `gaming-pc.local`, names under `.home.arpa`, `.internal` or `.lan`) or a name
+  listed in the new `allowed_hosts` setting under `[api]`. Other names are
+  refused, which blocks DNS rebinding in LAN mode too.
+- `streamdelayd run` prints the links' access tokens and the OBS key only to a
+  terminal, not to `docker logs` or a service's log. `streamdelayd urls` shows
+  them (`docker exec <container> streamdelayd urls`).
+- The diagnostics file for bug reports masks public IP addresses, such as a
+  server's or those of whoever connected to it, also where other text is joined
+  to them (`could not reach 8.8.4.4:1935: timed out`, `ip:8.8.4.4`).
+- A destination that refuses the stream (a wrong stream key, for example) is
+  tried again after 10 s, 30 s, 1 min and 2 min, then every 5 min, rather than
+  every 10 s for as long as OBS streams, and the status says when. A new key or
+  destination is tried at once.
+- Installing an update while you are streaming asks first, as quitting does, and
+  ends the stream cleanly before installing. On Windows the broadcast was cut
+  off, and what was in the delay buffer lost.
 - Removing the saved stream key on the Setup tab takes a second click, and
   while you are streaming it says that this ends the broadcast: without its
   key, the destination refuses the stream.
@@ -70,12 +102,60 @@ All notable changes to stream-delay are listed here. The format follows
 - Building from source needs Rust 1.89 or newer. The declared minimum was 1.88,
   but two dependencies already needed 1.89; CI now checks the minimum. Builds
   and releases use the exact Rust version in `rust-toolchain.toml`.
-
 - The Docker images' base images are pinned by digest, so a rebuild uses the
   same ones until an update is reviewed.
 
 ### Fixed
 
+- An encoder sending its decoder configuration again, or a new one (after a
+  resolution change, say), could leave a keyframe still in the delay buffer
+  without it: after the destination reconnected, or a delay change went back to
+  it, the picture could not be decoded until the next configuration.
+- The record of which decoder configuration the destination has kept a copy of
+  each, outside the RAM cap: an encoder with many tracks could make it hold
+  hundreds of MiB.
+- Connecting to the destination tried its addresses one after another, so one
+  that never answers (IPv6 on a network where it doesn't work) used up the whole
+  10 s every time and the stream never got through. They are now tried in turn
+  250 ms apart, the first to answer winning.
+- The OBS setup took any server with "twitch.tv" anywhere in it for Twitch, and
+  sent its key there. It now goes by the server's host name.
+- The OBS status on the dashboard showed a login, query or stream key that OBS's
+  server URL contained. A URL whose host cannot be told apart from its login (a
+  password with a `/`, `?` or `#` in it) is shown as `rtmp://…`.
+- An error in the settings file could quote a value in backticks, such as a
+  stream key typed into `key_mode`, or the part of a value after a quote
+  character in it. Values are left out of these errors entirely.
+- The user guide said the dock link could only change the delay. It controls the
+  stream (the delay, Dump buffer, End stream, resuming), so keep it as private as
+  the dashboard link.
+- A stream started with no delay (or a short one) showed "Delayed 2 s" and the
+  overlay's "Stream delay: 2 s" for the whole broadcast: connecting to Twitch
+  takes a moment after OBS starts sending, and the broadcast kept that lag. It
+  now catches up at the next keyframe, a second or two after it starts.
+- Over RTMPS, a destination refusing the stream key showed "read failed: peer
+  closed connection without sending TLS close_notify" and was tried again
+  every few seconds: Twitch refuses a key by closing the connection without
+  ending TLS first. It now reads "the destination closed the connection (check
+  the stream key)", and the waits between tries grow as for any refusal. A
+  connection closed that way while streaming reads "the destination closed the
+  connection".
+- Asking for a delay a hair below the one in effect could leave the change
+  pending for good, with "Changing delay…" in the dock until Cancel or another
+  preset. A rewind rounds back to a keyframe, so asking for 5 s can give 6.001 s,
+  and asking for 6 s after that did it. Within half a second now counts as there.
+- After a dump, a delay change could settle several seconds over the one asked
+  for (12 s asked, 15.6 s given): the dump leaves a gap in the buffer, and the
+  keyframe the change landed on was the last one before it. The delay now comes
+  down to the one asked for once the stream after the gap is old enough. Other
+  delay changes are unchanged. A change soon after a dump or several encoder
+  restarts in a row can still end up a few seconds over; pressing the preset
+  again usually fixes it.
+- On Windows, a dump that reset the connection to a destination barely taking
+  data could count one message more as delivered than the destination had (its
+  last few bytes were missing), and a rewind dump could then air it after the
+  dump. Windows counts what it probes a closed window with as sent; up to a
+  network packet more now counts as not yet acknowledged then.
 - Cancel, while the slate covered a dump, took the slate down and aired what
   was recorded after the dump almost live, uncovered (or, before an overlay
   confirmed the slate, sent nothing at all until the delay was back). A dump
@@ -327,93 +407,6 @@ All notable changes to stream-delay are listed here. The format follows
   just after its wrap, it was taken for a jump of 49.7 days ahead and stayed
   that far ahead of the rest, so the destination lost audio/video sync until
   the encoder reconnected. A step back is now a step back.
-
-## [0.3.2] - 2026-09-27
-
-### Changed
-
-- Twitch and YouTube are reached over RTMPS, which encrypts the stream key.
-  Settings on their earlier default RTMP addresses move to it, keeping the saved
-  key. The RTMP addresses are still there, as *Twitch (RTMP, unencrypted)* and
-  *YouTube (RTMP, unencrypted)*, for networks where RTMPS doesn't get through.
-- When the RTMP input can be reached from other devices, its ingest key must have
-  at least 16 characters (a generated one has 32); a shorter one is refused at
-  startup. The example key in the Docker instructions, `choose-a-secret`, was
-  too short: leave `STREAMDELAY_INGEST_KEY` unset to use a generated key.
-- While wrong ingest keys come from many addresses at once (20 in a minute), each
-  address gets one try every 10 minutes. Addresses that sent no wrong key, like
-  your encoder's, are not held up. The key comparison no longer reveals the key's
-  length through its timing.
-- With LAN access (always on in the Docker image), the dashboard and API only
-  answer requests that name this computer by an IP address, a local name (`nas`,
-  `gaming-pc.local`, names under `.home.arpa`, `.internal` or `.lan`) or a name
-  listed in the new `allowed_hosts` setting under `[api]`. Other names are
-  refused, which blocks DNS rebinding in LAN mode too.
-- `streamdelayd run` prints the links' access tokens and the OBS key only to a
-  terminal, not to `docker logs` or a service's log. `streamdelayd urls` shows
-  them (`docker exec <container> streamdelayd urls`).
-- The diagnostics file for bug reports masks public IP addresses, such as a
-  server's or those of whoever connected to it, also where other text is joined
-  to them (`could not reach 8.8.4.4:1935: timed out`, `ip:8.8.4.4`).
-- A destination that refuses the stream (a wrong stream key, for example) is
-  tried again after 10 s, 30 s, 1 min and 2 min, then every 5 min, rather than
-  every 10 s for as long as OBS streams, and the status says when. A new key or
-  destination is tried at once.
-- Installing an update while you are streaming asks first, as quitting does, and
-  ends the stream cleanly before installing. On Windows the broadcast was cut
-  off, and what was in the delay buffer lost.
-
-### Fixed
-
-- An encoder sending its decoder configuration again, or a new one (after a
-  resolution change, say), could leave a keyframe still in the delay buffer
-  without it: after the destination reconnected, or a delay change went back to
-  it, the picture could not be decoded until the next configuration.
-- The record of which decoder configuration the destination has kept a copy of
-  each, outside the RAM cap: an encoder with many tracks could make it hold
-  hundreds of MiB.
-- Connecting to the destination tried its addresses one after another, so one
-  that never answers (IPv6 on a network where it doesn't work) used up the whole
-  10 s every time and the stream never got through. They are now tried in turn
-  250 ms apart, the first to answer winning.
-- The OBS setup took any server with "twitch.tv" anywhere in it for Twitch, and
-  sent its key there. It now goes by the server's host name.
-- The OBS status on the dashboard showed a login, query or stream key that OBS's
-  server URL contained. A URL whose host cannot be told apart from its login (a
-  password with a `/`, `?` or `#` in it) is shown as `rtmp://…`.
-- An error in the settings file could quote a value in backticks, such as a
-  stream key typed into `key_mode`, or the part of a value after a quote
-  character in it. Values are left out of these errors entirely.
-- The user guide said the dock link could only change the delay. It controls the
-  stream (the delay, Dump buffer, End stream, resuming), so keep it as private as
-  the dashboard link.
-- A stream started with no delay (or a short one) showed "Delayed 2 s" and the
-  overlay's "Stream delay: 2 s" for the whole broadcast: connecting to Twitch
-  takes a moment after OBS starts sending, and the broadcast kept that lag. It
-  now catches up at the next keyframe, a second or two after it starts.
-- Over RTMPS, a destination refusing the stream key showed "read failed: peer
-  closed connection without sending TLS close_notify" and was tried again
-  every few seconds: Twitch refuses a key by closing the connection without
-  ending TLS first. It now reads "the destination closed the connection (check
-  the stream key)", and the waits between tries grow as for any refusal. A
-  connection closed that way while streaming reads "the destination closed the
-  connection".
-- Asking for a delay a hair below the one in effect could leave the change
-  pending for good, with "Changing delay…" in the dock until Cancel or another
-  preset. A rewind rounds back to a keyframe, so asking for 5 s can give 6.001 s,
-  and asking for 6 s after that did it. Within half a second now counts as there.
-- After a dump, a delay change could settle several seconds over the one asked
-  for (12 s asked, 15.6 s given): the dump leaves a gap in the buffer, and the
-  keyframe the change landed on was the last one before it. The delay now comes
-  down to the one asked for once the stream after the gap is old enough. Other
-  delay changes are unchanged. A change soon after a dump or several encoder
-  restarts in a row can still end up a few seconds over; pressing the preset
-  again usually fixes it.
-- On Windows, a dump that reset the connection to a destination barely taking
-  data could count one message more as delivered than the destination had (its
-  last few bytes were missing), and a rewind dump could then air it after the
-  dump. Windows counts what it probes a closed window with as sent; up to a
-  network packet more now counts as not yet acknowledged then.
 
 ## [0.3.1] - 2026-09-25
 
