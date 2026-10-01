@@ -11,6 +11,7 @@ automatically.
 | Web UI | the dock's delay, dump and end controls (confirmations, what a dump will do and did, "Back to"), the overlay's slate and what it tells stream-delay inside OBS | `pnpm test` in `ui/` | every push |
 | Chaos tests | destination resets and stalls, a slow uplink, the encoder crashing inside and past the grace period | `crates/relay/tests/chaos.rs` | every push |
 | End to end | ffmpeg → streamdelayd → ffmpeg with H.264 B-frames, open-GOP HEVC and the 24-bit timestamp wrap; checks there are 0 decode errors | `tests/e2e/run.sh` | every push (Linux) |
+| Dependencies | licenses, where crates come from (crates.io only, no wildcard versions), security advisories, yanked crates | `cargo deny check` (`deny.toml`) | every push; advisories and yanks daily too |
 | Fuzzing | chunk decoder, AMF0, FLV, publish sessions, engine | `fuzz/` | nightly, and PRs touching the decoders |
 | Soak | hours of streaming with random delay changes and dumps, the encoder crashing and coming back every few minutes, and the destination going down for 15 s every 20 minutes at the maximum delay; checks that memory stays flat, the destination reconnects once per outage and never otherwise, the delay is back at the maximum within 30 s of each, every encoder session is taken up, and nothing fails to decode | `tests/soak/run.sh` | nightly (2 h); 12 h by hand before a release |
 

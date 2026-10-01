@@ -1,0 +1,32 @@
+name: Advisories
+
+# New security advisories and yanked crates turn up with no change here: CI
+# meets them on the next push, a release on its tag (v0.3.2's first run
+# stopped on a crate yanked since the last push). This checks the locked
+# dependencies every day, so they are found within a day whether or not
+# anything is pushed.
+
+on:
+  schedule:
+    - cron: "11 6 * * *"
+  workflow_dispatch:
+  # A change to this workflow runs it, so the daily run does not find out
+  # first. CI checks a change to Cargo.lock or deny.toml.
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/advisories.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: cargo-deny advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          command-arguments: advisories

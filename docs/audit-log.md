@@ -19,6 +19,29 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-01 — Area 7: 0.3.2 released; a yanked crate stopped its first run
+
+No fourth local soak ran: the owner said to cut 0.3.2 from 13da1dc. What the
+soak had shown by then was the 15.7 clean hours below and the nightly runs.
+The release commit is 72030b5: 13da1dc's code, the 0.3.2 changelog section,
+and one lockfile change.
+
+The first release run on the tag stopped at cargo-deny: `yoke-derive` 0.8.3
+(a dependency of a dependency) was yanked on 2026-09-30 at 13:05 UTC, five
+hours after main's last CI run had passed. `cargo update -p yoke-derive
+--precise 0.8.4` fixed it, and nothing else in the lockfile changed. CI and
+the release dry run passed on 72030b5, then the release run on the tag
+(36801200914). After it was published, the files were checked again:
+all 19 match `SHA256SUMS.txt`, whose hash is the one `release-checks.txt`
+records; `verify_release.py release` with the committed updater key passes
+on the downloads; the headless Linux build reports 0.3.2; and the address
+installed copies ask for updates serves `latest.json` for 0.3.2.
+
+Advisories and yanks come with no change to the code, and only a push or a
+tag ran cargo-deny. A new workflow, `advisories.yml`, now runs
+`cargo deny check advisories` on main every day. Run on 1fddbd0's lockfile
+it fails on the yank; on 72030b5's it passes.
+
 ### 2026-09-29 — Soak of 13da1dc: three runs cut short, all clean
 
 The 12-hour soak (`tests/soak/run.sh`, `DURATION=43200`) on 13da1dc, the
