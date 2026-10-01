@@ -6,6 +6,13 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Soon after the encoder reconnected, the last frame that aired can still be
+  from before. A dump that held it, then a new destination connection during
+  the hold, sent it without its decoder configuration: the picture could not be
+  decoded until the hold ended.
+
 ## [0.3.2] - 2026-09-30
 
 ### Added

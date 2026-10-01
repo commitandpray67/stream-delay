@@ -240,6 +240,14 @@ struct Entry {
     nal_offset: Option<usize>,
 }
 
+/// Stream metadata, and decoder configuration one per kind and class: what a
+/// destination needs before a keyframe.
+#[derive(Clone)]
+struct Headers {
+    metadata: Option<Bytes>,
+    config: Vec<(Kind, u16, Bytes)>,
+}
+
 #[derive(Clone)]
 struct HeaderRec {
     seq: u64,
@@ -370,10 +378,13 @@ pub const SLATE_CONFIRM_WAIT: Time = 2 * SEC;
 struct HoldFrame {
     payload: Bytes,
     cts: i32,
-    /// Where it came from: its encoder session and sequence number, for the
-    /// decoder configuration a new connection needs before it.
-    session: u32,
-    seq: u64,
+    /// How long a frame of its encoder session lasts, in ms.
+    frame_ms: u64,
+    /// The metadata and decoder configuration in effect at it, which a new
+    /// connection needs before it. Kept here: the dump that holds it throws
+    /// away what was recorded, and with it an earlier encoder session's. (No
+    /// more than a session keeps: see [`HEADER_SHARE_OF_RAM_CAP`].)
+    headers: Headers,
     /// When it was last sent (or the hold began), and when it is due next.
     last: Time,
     next: Time,
@@ -1145,7 +1156,6 @@ impl Engine {
             .find(|&&s| s < self.out.next_seq)
             .copied()?;
         let e = self.entry(k).filter(|e| e.kind == Kind::Video)?;
-        let (session, seq) = (e.session, e.seq);
         let payload = match (e.hevc_nal, e.nal_offset) {
             // Sent again after other frames: mark it as a new start.
             (Some(flv::hevc::CRA), Some(offset)) => flv::hevc::cra_to_bla(&e.payload, offset)
@@ -1155,8 +1165,8 @@ impl Engine {
         Some(HoldFrame {
             payload,
             cts: e.cts,
-            session,
-            seq,
+            frame_ms: self.frame_ms(e.session),
+            headers: self.headers_at(e.session, e.seq),
             last: now,
             next: now,
             needs_headers: false,
@@ -1171,7 +1181,7 @@ impl Engine {
             return Some(h.next);
         }
         // Presented after everything sent before it, too.
-        let after = self.after_sent(self.frame_ms(h.session), h.cts);
+        let after = self.after_sent(h.frame_ms, h.cts);
         let o = &mut self.out;
         let h = o.hold.as_mut().expect("checked above");
         let last_video = o.last_kind_ts[Kind::Video.index()].unwrap_or(0);
@@ -1180,11 +1190,11 @@ impl Engine {
         h.last = now;
         h.next = now + SEC;
         let (payload, cts, next) = (h.payload.clone(), h.cts, h.next);
-        let headers = std::mem::take(&mut h.needs_headers).then_some((h.session, h.seq));
+        let headers = std::mem::take(&mut h.needs_headers).then(|| h.headers.clone());
         // What follows the hold carries on from its timestamps.
         o.fresh = false;
-        if let Some((session, seq)) = headers {
-            self.emit_hold_headers(session, seq, t, out);
+        if let Some(headers) = headers {
+            self.emit_hold_headers(headers, t, out);
         }
         let o = &mut self.out;
         o.last_kind_ts[Kind::Video.index()] = Some(t);
@@ -1201,18 +1211,12 @@ impl Engine {
     }
 
     /// Before a held frame on a new connection: the metadata and decoder
-    /// configuration in effect at it (sequence number `seq` of `session`), at
-    /// its timestamp `t`.
-    fn emit_hold_headers(&mut self, session: u32, seq: u64, t: u64, out: &mut Vec<OutMsg>) {
-        let Some(s) = self.sessions.iter().find(|s| s.id == session) else {
-            return;
-        };
-        let metadata = s.metadata.clone();
-        let mut headers: Vec<(Kind, u16, Bytes)> = Vec::new();
-        for h in s.headers.iter().filter(|h| h.seq < seq) {
-            headers.retain(|&(k, c, _)| !(k == h.kind && c == h.class));
-            headers.push((h.kind, h.class, h.payload.clone()));
-        }
+    /// configuration in effect at it, at its timestamp `t`.
+    fn emit_hold_headers(&mut self, headers: Headers, t: u64, out: &mut Vec<OutMsg>) {
+        let Headers {
+            metadata,
+            config: headers,
+        } = headers;
         if let Some(m) = metadata {
             self.out.sent_metadata = Some(m.clone());
             out.push(OutMsg {
@@ -1899,6 +1903,28 @@ impl Engine {
         t
     }
 
+    /// The metadata and decoder configuration in effect at sequence number
+    /// `seq` of encoder session `session`.
+    fn headers_at(&self, session: u32, seq: u64) -> Headers {
+        let Some(s) = self.sessions.iter().find(|s| s.id == session) else {
+            return Headers {
+                metadata: None,
+                config: Vec::new(),
+            };
+        };
+        // For each kind of configuration, the version in effect at `seq`. They
+        // are kept in order, so a later one replaces an earlier one.
+        let mut config: Vec<(Kind, u16, Bytes)> = Vec::new();
+        for h in s.headers.iter().filter(|h| h.seq < seq) {
+            config.retain(|&(k, c, _)| !(k == h.kind && c == h.class));
+            config.push((h.kind, h.class, h.payload.clone()));
+        }
+        Headers {
+            metadata: s.metadata.clone(),
+            config,
+        }
+    }
+
     /// Sends metadata and decoder configuration valid at the splice point, if the
     /// destination has not seen them yet.
     fn emit_headers(&mut self, out: &mut Vec<OutMsg>) {
@@ -1906,18 +1932,11 @@ impl Engine {
         let Some(e) = self.entry(self.out.next_seq) else {
             return;
         };
-        let (seq, session_id, ts) = (e.seq, e.session, e.ts);
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
-            return;
-        };
-        let metadata = session.metadata.clone();
-        // For each kind of configuration, the version in effect at the splice
-        // point. They are kept in order, so a later one replaces an earlier one.
-        let mut headers: Vec<(Kind, u16, Bytes)> = Vec::new();
-        for h in session.headers.iter().filter(|h| h.seq < seq) {
-            headers.retain(|&(k, c, _)| !(k == h.kind && c == h.class));
-            headers.push((h.kind, h.class, h.payload.clone()));
-        }
+        let (seq, session, ts) = (e.seq, e.session, e.ts);
+        let Headers {
+            metadata,
+            config: headers,
+        } = self.headers_at(session, seq);
         if let Some(m) = metadata
             && self.out.sent_metadata.as_ref() != Some(&m)
         {

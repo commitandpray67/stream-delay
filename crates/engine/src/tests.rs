@@ -1633,6 +1633,45 @@ fn a_hold_carries_on_after_a_reconnect() {
     s.check_invariants_in(n..s.sent.len());
 }
 
+/// The same after the encoder reconnected: what airs for a while is still
+/// from its earlier connection, and so is the frame a dump then holds. The
+/// dump throws away all that was recorded on that connection, but a
+/// destination connection made during the hold still needs the decoder
+/// configuration before the held frame.
+#[test]
+fn a_hold_from_before_the_encoder_reconnected_carries_on_after_a_reconnect() {
+    let mut s = dump_sim(config());
+    restart_encoder(&mut s);
+    s.advance(5 * SEC);
+    let ack = s.cmd(Command::Dump {
+        mode: DelayMode::Mask,
+        cover: false,
+    });
+    assert_eq!(ack.dump, Some(DumpOutcome::Hold));
+    s.advance(2 * SEC);
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    s.advance(2 * SEC);
+    let n = s.sent.len();
+    s.connect();
+    s.advance(3 * SEC);
+    let first: Vec<&[u8]> = s.sent[n..]
+        .iter()
+        .filter(|x| x.msg.kind == Kind::Video)
+        .map(|x| &x.msg.payload[..2])
+        .take(2)
+        .collect();
+    assert_eq!(
+        first,
+        [[0x17, 0x00], [0x17, 0x01]],
+        "the configuration, then the held keyframe"
+    );
+    assert!(
+        s.sent[n..].iter().any(|x| x.msg.kind == Kind::Data),
+        "the metadata"
+    );
+}
+
 /// A splice's keyframe comes one frame after everything sent, in decode and
 /// in presentation order both: no sooner (players would go back in time), and
 /// no later (a gap in the timestamps is a pause).
@@ -2151,10 +2190,16 @@ fn when_a_dump_is_allowed() {
     assert!(s.media_sent().all(|(_, i)| i.arrival >= dumped_at));
 }
 
-/// Ids of what is waiting to air: recorded after the last thing sent. (What an
-/// earlier change skipped is not waiting; a rewind may still show it. Nor is
-/// sound left out under the slate: it airs once the delay is back.)
+/// Ids of what is waiting to air: recorded after the last thing sent, and not
+/// sent before (a held frame and a replay show again what aired before). (What
+/// an earlier change skipped is not waiting; a rewind may still show it. Nor
+/// is sound left out under the slate: it airs once the delay is back.)
 fn unaired(s: &Sim) -> std::collections::HashSet<u32> {
+    let aired: std::collections::HashSet<u32> = s
+        .sent
+        .iter()
+        .filter_map(|x| id_of(&x.msg.payload))
+        .collect();
     let sent = s.media_sent().last().map(|(_, i)| i.arrival);
     let muted =
         s.e.out
@@ -2165,7 +2210,7 @@ fn unaired(s: &Sim) -> std::collections::HashSet<u32> {
     let last = sent.max(muted.map(|e| e.arrival));
     s.inputs
         .iter()
-        .filter(|(_, i)| last.is_none_or(|t| i.arrival > t))
+        .filter(|(id, i)| last.is_none_or(|t| i.arrival > t) && !aired.contains(id))
         .map(|(id, _)| *id)
         .collect()
 }
@@ -2561,6 +2606,12 @@ proptest! {
         connections.push(s.sent.len());
         for w in connections.windows(2) {
             s.check_invariants_in(w[0]..w[1]);
+            // A connection gets the decoder configuration before any frame.
+            for kind in [Kind::Video, Kind::Audio] {
+                if let Some(first) = s.sent[w[0]..w[1]].iter().find(|x| x.msg.kind == kind) {
+                    prop_assert_eq!(first.msg.payload[1], 0x00, "{:?} before its configuration", kind);
+                }
+            }
         }
         // Nothing that had not aired by a dump ever airs after it.
         for (index, waiting) in dumps {

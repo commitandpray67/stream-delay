@@ -19,6 +19,35 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-01 — Area 1: a held frame without its configuration
+
+A full read of the engine (`lib.rs`, `snapshot.rs`) found one bug.
+
+A dump that holds sends the last keyframe that aired again until the delay is
+back. On a new destination connection during the hold, the metadata and
+decoder configuration come first, looked up in the held frame's encoder
+session. After the encoder reconnects, what airs for up to the delay is still
+from its earlier session, so the held frame can be too. But the dump throws away
+everything recorded, keeping only the current session. A destination that
+reconnected during the hold then got the keyframe with no configuration
+before it, about once a second until the hold ended. A test with an encoder
+restart, a dump 5 s later and the destination dropping during the hold
+failed that way. The held frame now keeps the configuration and metadata in
+effect at it, and how long its frames last.
+
+The random-operations property now also checks that every destination
+connection gets the configuration before any frame. Without the fix, it fails
+on its first case: a seed saved in its regressions file restarts the encoder,
+dumps, and drops the destination. At 20 000 cases it then turned up a false
+alarm in the test itself. Its "what had not aired" took what was recorded
+after the last frame sent, and that can be a held frame, which aired long
+before. So content that had aired twice counted as dumped when a later replay
+showed it again. It now leaves out what has been sent before, and that seed
+is kept too. All 83 engine tests pass, with 20 000 property cases.
+
+With a real finding, this pass does not close area 1; the next one does if
+it finds nothing.
+
 ### 2026-10-01 — Area 7: 0.3.2 released; a yanked crate stopped its first run
 
 No fourth local soak ran: the owner said to cut 0.3.2 from 13da1dc. What the
