@@ -12,6 +12,10 @@ All notable changes to stream-delay are listed here. The format follows
   from before. A dump that held it, then a new destination connection during
   the hold, sent it without its decoder configuration: the picture could not be
   decoded until the hold ended.
+- A seek command frame from the encoder (a legacy video message, which OBS
+  does not send) was taken for decoder configuration. It replaced the
+  encoder's own, so a destination connection made after it got the command
+  instead, and the picture could not be decoded.
 
 ## [0.3.2] - 2026-09-30
 

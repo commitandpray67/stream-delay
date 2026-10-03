@@ -1672,6 +1672,34 @@ fn a_hold_from_before_the_encoder_reconnected_carries_on_after_a_reconnect() {
     );
 }
 
+/// A seek command frame (legacy frame type 5) is not decoder configuration:
+/// taken for it, it replaced the encoder's own, and a new destination
+/// connection got it instead.
+#[test]
+fn a_command_frame_does_not_replace_the_decoder_configuration() {
+    let mut s = Sim::new(config());
+    s.connect();
+    s.advance(5 * SEC);
+    let ts = s.video_index * FRAME_MS;
+    s.push(Kind::Video, ts, &[0x57, 0x00], false);
+    s.advance(5 * SEC);
+    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+    s.e.output_disconnected(s.now, last);
+    s.advance(SEC);
+    let n = s.sent.len();
+    s.connect();
+    s.advance(3 * SEC);
+    let first = s.sent[n..]
+        .iter()
+        .find(|x| x.msg.kind == Kind::Video)
+        .expect("video on the new connection");
+    assert_eq!(
+        first.msg.payload[..2],
+        [0x17, 0x00],
+        "the configuration first"
+    );
+}
+
 /// A splice's keyframe comes one frame after everything sent, in decode and
 /// in presentation order both: no sooner (players would go back in time), and
 /// no later (a gap in the timestamps is a pause).

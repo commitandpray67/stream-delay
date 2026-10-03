@@ -233,9 +233,25 @@ fn audio_codec_from_fourcc(f: [u8; 4]) -> AudioCodec {
 pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
     let mut r = Reader { b: payload, pos: 0 };
     let b0 = r.u8()?;
+    let command = VideoInfo {
+        codec: VideoCodec::Other,
+        keyframe: false,
+        config: false,
+        config_class: 0,
+        enhanced: b0 & 0x80 != 0,
+        multitrack: false,
+        composition_time: 0,
+        hevc_nal_type: None,
+        nal_offset: None,
+    };
     if b0 & 0x80 == 0 {
         // Legacy FLV video tag.
         let ft = b0 >> 4;
+        if ft == frame_type::COMMAND {
+            // Seek start or end (the next byte), not a packet type: no coded
+            // data, whatever the codec.
+            return Some(command);
+        }
         let codec = match b0 & 0x0f {
             7 => VideoCodec::Avc,
             12 => VideoCodec::Hevc,
@@ -269,17 +285,7 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
     let mut packet_type = r.skip_mod_ex(b0 & 0x0f, video_packet::MOD_EX)?;
     if packet_type != video_packet::METADATA && ft == frame_type::COMMAND {
         // Command frames (seek start/end) carry no coded data.
-        return Some(VideoInfo {
-            codec: VideoCodec::Other,
-            keyframe: false,
-            config: false,
-            config_class: 0,
-            enhanced: true,
-            multitrack: false,
-            composition_time: 0,
-            hevc_nal_type: None,
-            nal_offset: None,
-        });
+        return Some(command);
     }
     let mut multitrack = false;
     let mut track_id = 0u8;
@@ -677,6 +683,20 @@ mod tests {
 
         let cmd = inspect_video(&[0x80 | 0x50 | 0x01, 0x00]).unwrap();
         assert!(!cmd.keyframe && !cmd.config);
+    }
+
+    /// A legacy command frame (frame type 5) has one byte after the first,
+    /// seek start (0) or end (1), and no packet type: seek start is not
+    /// decoder configuration, whatever the codec id says.
+    #[test]
+    fn legacy_command_frames() {
+        for codec in [7, 12, 13] {
+            for cmd in [0, 1] {
+                let i = inspect_video(&[0x50 | codec, cmd]).unwrap();
+                assert!(!i.config && !i.keyframe, "{codec} {cmd}: {i:?}");
+                assert_eq!((i.composition_time, i.nal_offset), (0, None));
+            }
+        }
     }
 }
 

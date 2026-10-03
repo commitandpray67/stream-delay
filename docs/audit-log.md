@@ -19,6 +19,32 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-03 — Area 2: a legacy command frame taken for configuration
+
+A full read of `crates/rtmp` (chunk codec, AMF0, handshake, both sessions,
+URLs, timestamp unwrapping) and `crates/flv` found one bug, in `flv`.
+
+In a legacy video tag, frame type 5 is a command frame. The byte after the
+first says seek start (0) or seek end (1); it is not a packet type. The
+inspector read it as the AVC packet type, so a seek start was decoder
+configuration. The engine then kept it as the encoder's configuration, in
+place of the real one, and a new destination connection got the command
+instead: a test with one mid-stream and a reconnect after it failed that way
+(the engine's test, and the inspector's own for each codec id). The enhanced
+header path already handled command frames, and the legacy one now does the
+same. OBS and FFmpeg do not send command frames, so only another encoder
+could hit this.
+
+Looked at and left as is: the 64-bit timestamp unwrapper could only overflow
+after about 2^32 messages each jumping 2^31 ms, from an authenticated
+encoder. A peer that sets a tiny acknowledgement window gets one ack per
+read, and the ingest writes its replies inline (with a timeout), so one that
+never reads only stalls itself. AMF0 decoding of the 1 MiB allowed after
+publishing can take many times that in memory, from an authenticated
+encoder only; before, messages are capped at 64 KiB.
+
+With a real finding, this pass does not close area 2.
+
 ### 2026-10-01 — Area 1: a held frame without its configuration
 
 A full read of the engine (`lib.rs`, `snapshot.rs`) found one bug.
