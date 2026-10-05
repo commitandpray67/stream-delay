@@ -19,6 +19,34 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-05 — Area 6 (weekly): an off-stream overlay confirmed the slate
+
+The weekly audit took area 6, the one audited longest ago. The first full
+read of `ui/src` found three things, fixed in 15e04b7, each with a test that
+failed first:
+
+- The overlay page in OBS confirmed the Mask slate as soon as it had painted
+  it, even after OBS said the page was off stream (in a scene that is not
+  live, or hidden), where viewers do not see it. A Mask change then went
+  ahead as covered, and the warning that no overlay confirmed the slate
+  ("check that the overlay is in your live scene") did not come, though
+  viewers saw the stream repeat. Dumps were not affected: they already rely
+  only on overlays OBS said are on stream. The page now holds the
+  confirmation until OBS puts it on stream, and the server ignores one from a
+  page that said it is off stream. A page OBS has said nothing about yet
+  (after OBS starts) still confirms, as before: it is most likely on stream.
+- The Setup tab said the dock link could only change the delay. Its token
+  can also dump the buffer and end the stream, which matters when deciding
+  where the link may go.
+- While a stream was ending (airing what was buffered), the dashboard's
+  header said "Delayed" and the control panel "Ending stream…".
+
+The second pass read everything again and found nothing real. The tabs
+other than Setup still load their forms once, so a save there can overwrite
+a change made meanwhile in another window, as noted before. A key typed on
+the Setup tab and then hidden by ticking passthrough is still stored when
+saving, unused until passthrough is off. Both are left as they are.
+
 ### 2026-10-03 — Area 2: a legacy command frame taken for configuration
 
 A full read of `crates/rtmp` (chunk codec, AMF0, handshake, both sessions,
