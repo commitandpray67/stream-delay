@@ -219,8 +219,8 @@
       <CopyField label="Dock URL" value={pc.urls.dock} />
       <CopyField label="Overlay URL" value={pc.urls.overlay} />
       <p class="muted small">
-        The dock link can only change the delay and the overlay link can only show it; neither can change your
-        settings or stream key. Still, don't share them on stream.
+        The dock link can change the delay, dump the buffer and end the stream; the overlay link can only show the
+        delay. Neither can change your settings or stream key. Keep them private, and never show them on stream.
       </p>
     </section>
 

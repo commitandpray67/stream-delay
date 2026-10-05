@@ -16,10 +16,15 @@ type Frame = (callback: () => void) => void;
  * page loads (after OBS starts, or the page is refreshed). Until it says, the
  * page reports nothing, and does not count as covering the stream: hiding and
  * showing it once in OBS lets it know.
+ *
+ * Off stream, viewers do not see the slate: the page confirms it once OBS puts
+ * the page on stream, not before.
  */
 export class OverlayReporter {
   private active: boolean | null = null;
   private confirmed: number | null = null;
+  /** The slate painted while off stream, confirmed when the page goes on. */
+  private waiting: number | null = null;
 
   constructor(
     private readonly send: Send,
@@ -31,6 +36,11 @@ export class OverlayReporter {
     const changed = (e: Event) => {
       this.active = (e as CustomEvent<{ active?: unknown }>).detail?.active === true;
       this.report();
+      if (this.active && this.waiting !== null) {
+        const change = this.waiting;
+        this.waiting = null;
+        this.send({ type: "slate-shown", change });
+      }
     };
     target.addEventListener("obsSourceActiveChanged", changed);
     return () => target.removeEventListener("obsSourceActiveChanged", changed);
@@ -43,17 +53,24 @@ export class OverlayReporter {
    */
   connected(): void {
     this.confirmed = null;
+    this.waiting = null;
     this.report();
   }
 
   /**
    * Call once the slate for `change` is in the page: after two frames it has
-   * been painted, and the page says so, once per change.
+   * been painted, and the page says so, once per change (off stream, once it
+   * is on).
    */
   slateShown(change: number): void {
     if (this.confirmed === change) return;
     this.confirmed = change;
-    this.frame(() => this.frame(() => this.send({ type: "slate-shown", change })));
+    this.frame(() =>
+      this.frame(() => {
+        if (this.active === false) this.waiting = change;
+        else this.send({ type: "slate-shown", change });
+      }),
+    );
   }
 
   private report(): void {

@@ -303,7 +303,8 @@ async fn events(
 enum FromOverlay {
     /// OBS put the page on stream (`true`) or took it off.
     Overlay { active: bool },
-    /// The page painted the slate for this change.
+    /// The page painted the slate for this change. Not counted from a page
+    /// OBS said is off stream (see [`crate::overlays::Page::may_confirm`]).
     SlateShown { change: u64 },
 }
 
@@ -342,10 +343,10 @@ async fn from_overlay(st: &AppState, page: &Page, text: &str) {
     }
     match serde_json::from_str::<FromOverlay>(text) {
         Ok(FromOverlay::Overlay { active }) => page.set_active(active),
-        Ok(FromOverlay::SlateShown { change }) => {
+        Ok(FromOverlay::SlateShown { change }) if page.may_confirm() => {
             let _ = st.relay().slate_shown(change).await;
         }
-        Err(_) => {}
+        Ok(FromOverlay::SlateShown { .. }) | Err(_) => {}
     }
 }
 

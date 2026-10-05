@@ -16,6 +16,14 @@ All notable changes to stream-delay are listed here. The format follows
   does not send) was taken for decoder configuration. It replaced the
   encoder's own, so a destination connection made after it got the command
   instead, and the picture could not be decoded.
+- An overlay page OBS had taken off stream (in a scene that is not live, or
+  hidden) still confirmed the Mask slate. The change then went ahead as covered,
+  without the warning that the overlay is not in the live scene, though viewers
+  saw the stream repeat. Such a page now confirms the slate only once OBS puts
+  it on stream.
+- The Setup tab said the dock link could only change the delay. It can also
+  dump the buffer and end the stream.
+- While a stream was ending, the dashboard's header still said "Delayed".
 
 ## [0.3.2] - 2026-09-30
 

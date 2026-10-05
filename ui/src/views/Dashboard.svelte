@@ -38,7 +38,11 @@
       <img src="/favicon.svg" alt="" width="28" height="28" />
       <h1>stream-delay</h1>
     </div>
-    <StatusBadge snap={live.state?.delay ?? null} ended={live.state?.ended ?? false} />
+    <StatusBadge
+      snap={live.state?.delay ?? null}
+      ended={live.state?.ended ?? false}
+      ending={live.state?.ending ?? false}
+    />
   </header>
 
   <nav aria-label="Sections">

@@ -104,7 +104,7 @@ one of the following:
 The overlay page in OBS (and only a socket with `&role=overlay`) sends two messages; anything else, anything longer than 256 bytes, or more than 10 in a second, is ignored:
 
 - `{"type": "overlay", "active": true | false}` when OBS puts it on stream or takes it off (its `obsSourceActiveChanged` event), and again on reconnecting. OBS doesn't say whether a page is on stream when it loads, so a page says nothing until it changes (hide and show it once).
-- `{"type": "slate-shown", "change": 3}` once it has painted the slate for the change numbered `slate_change` in the state. A Mask change counts what OBS sends from the slate margin after this on as covered; without it within 2 s, the change goes ahead with a warning, and a dump holds instead of using the slate.
+- `{"type": "slate-shown", "change": 3}` once it has painted the slate for the change numbered `slate_change` in the state. A Mask change counts what OBS sends from the slate margin after this on as covered; without it within 2 s, the change goes ahead with a warning, and a dump holds instead of using the slate. From a page that said it is off stream, where viewers don't see its slate, it doesn't count: the page sends it once OBS puts it on stream.
 
 Anyone with the overlay link can send these, so it decides whether a dump relies on the slate: keep it as private as the dock link.
 

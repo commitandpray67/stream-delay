@@ -87,6 +87,18 @@ impl Page {
             pages.insert(self.id, Some(active));
         });
     }
+
+    /// Whether the slate the page shows may count as covering the stream:
+    /// not once OBS said it is off stream, where viewers do not see it. Before
+    /// OBS says anything (after it starts), the page is most likely on stream.
+    pub fn may_confirm(&self) -> bool {
+        let pages = self
+            .overlays
+            .pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pages.get(&self.id) != Some(&Some(false))
+    }
 }
 
 impl Drop for Page {
@@ -122,5 +134,17 @@ mod tests {
         assert_eq!(o.counts(), counts(1, 0));
         drop(b);
         assert_eq!(o.counts(), Counts::default());
+    }
+
+    #[test]
+    fn a_page_obs_said_is_off_stream_cannot_confirm_the_slate() {
+        let o = Overlays::new();
+        let page = o.join();
+        // Not said yet (after OBS starts): most likely on stream.
+        assert!(page.may_confirm());
+        page.set_active(false);
+        assert!(!page.may_confirm());
+        page.set_active(true);
+        assert!(page.may_confirm());
     }
 }

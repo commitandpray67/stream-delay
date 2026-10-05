@@ -156,3 +156,13 @@ describe("the saved stream key", () => {
     expect(api.clearStreamKey).not.toHaveBeenCalled();
   });
 });
+
+describe("the dock and overlay links", () => {
+  it("says what someone with the dock link can do: dump the buffer and end the stream too", () => {
+    render(SetupTab);
+    const text = screen.getByText(/neither can change your settings/i).textContent ?? "";
+    expect(text).not.toMatch(/can only change the delay/);
+    expect(text).toMatch(/dump/i);
+    expect(text).toMatch(/end (the|your) (stream|broadcast)/i);
+  });
+});
