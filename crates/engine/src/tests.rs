@@ -3496,6 +3496,15 @@ fn a_delay_the_memory_limit_cannot_hold_is_refused() {
         set(&mut s.e, 100_000),
         Err(EngineError::NotEnoughMemory { .. })
     ));
+    // Over the maximum, it is that, whatever memory it would need: a larger
+    // memory limit would not let it be set.
+    assert_eq!(
+        set(&mut s.e, 300_000),
+        Err(EngineError::TooLarge {
+            requested_ms: 300_000,
+            max_ms: 120_000
+        })
+    );
 }
 
 #[test]

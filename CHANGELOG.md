@@ -27,6 +27,9 @@ All notable changes to stream-delay are listed here. The format follows
 - Changing the destination while a dump held the last frame left the new
   destination without anything until the delay was back, up to the whole
   delay. It now gets the held frame at once.
+- A delay over the maximum that the memory limit could not hold either was
+  refused for lack of memory, as if raising the memory limit would let it be
+  set. It is refused as over the maximum.
 
 ## [0.3.2] - 2026-09-30
 

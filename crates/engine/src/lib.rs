@@ -964,6 +964,13 @@ impl Engine {
 
     pub fn command(&mut self, now: Time, cmd: Command) -> Result<Ack, EngineError> {
         if let Command::SetDelay { ms, .. } = cmd {
+            // Over the maximum first: a larger memory limit would not help.
+            if ms > self.config.max_delay_ms {
+                return Err(EngineError::TooLarge {
+                    requested_ms: ms,
+                    max_ms: self.config.max_delay_ms,
+                });
+            }
             self.check_memory(ms)?;
         }
         if !matches!(cmd, Command::Cancel | Command::SlateShown { .. }) {
@@ -1028,12 +1035,7 @@ impl Engine {
                 }
             }
             Command::SetDelay { ms, mode } => {
-                if ms > self.config.max_delay_ms {
-                    return Err(EngineError::TooLarge {
-                        requested_ms: ms,
-                        max_ms: self.config.max_delay_ms,
-                    });
-                }
+                // (At most the maximum: checked above.)
                 let d = ms * MS;
                 if ms > 0
                     && let Some(delay) = self.out.pending.dump_delay_mut()
