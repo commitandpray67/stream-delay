@@ -420,56 +420,77 @@ async fn http(app: &App, method: &str, path: &str, body: &str) -> (u16, Value) {
 }
 
 #[tokio::test]
-async fn an_imported_twitch_key_makes_twitch_the_saved_destination_too() {
-    let (_obs, obs_port) = spawn_obs(
-        "rtmp_common",
-        json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
-    )
-    .await;
-    // The settings file names YouTube, with its key; this run streams to one of
-    // Twitch's servers, given on the command line.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    let mut c = Config::default();
-    c.api.token = "0123456789abcdef".into();
-    c.obs.port = obs_port;
-    c.destination.service = "youtube".into();
-    c.destination.url = "rtmps://a.rtmps.youtube.com:443/live2".into();
-    c.save(&path).unwrap();
-    let secrets = Arc::new(Secrets::new(dir.path(), false));
-    secrets.set(secret::DESTINATION_KEY, "yt-key-0123").unwrap();
-    let app = App::start(AppOptions {
-        config_path: Some(path.clone()),
-        secrets: secrets.clone(),
-        overrides: Overrides {
-            ingest: Some("127.0.0.1:0".parse().unwrap()),
-            api: Some("127.0.0.1:0".parse().unwrap()),
-            destination_url: Some("rtmps://ingest.global-contribute.live-video.net/app".into()),
-            ..Default::default()
-        },
-    })
-    .await
-    .unwrap();
-    let (s, r) = http(
-        &app,
-        "POST",
-        "/api/v1/obs/configure",
-        r#"{"import_key": true, "add_overlay": false}"#,
-    )
-    .await;
-    assert_eq!(s, 200, "{r}");
-    assert_eq!(r["imported_key"], true);
-    // The Twitch key replaced YouTube's: the settings file names Twitch, which
-    // it belongs to, not YouTube, which no longer has a key.
-    let key: Value = serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
-    assert_eq!(key["value"], "live_987_secret");
-    let saved = Config::load_or_create(&path).unwrap();
-    assert_eq!(
-        saved.destination.url, "rtmps://live.twitch.tv:443/app",
-        "{:?}",
-        saved.destination
-    );
-    app.shutdown().await;
+async fn a_twitch_key_in_obs_is_not_moved_in_for_a_command_line_destination() {
+    // The settings file names YouTube, with its key; this run streams to Twitch,
+    // given on the command line. Moving the Twitch key in would replace
+    // YouTube's, for the destination the settings file keeps.
+    for dest in [
+        "rtmps://ingest.global-contribute.live-video.net/app",
+        "rtmps://live.twitch.tv:443/app",
+    ] {
+        let (obs, obs_port) = spawn_obs(
+            "rtmp_common",
+            json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut c = Config::default();
+        c.api.token = "0123456789abcdef".into();
+        c.obs.port = obs_port;
+        c.destination.service = "youtube".into();
+        c.destination.url = "rtmps://a.rtmps.youtube.com:443/live2".into();
+        c.save(&path).unwrap();
+        let secrets = Arc::new(Secrets::new(dir.path(), false));
+        secrets.set(secret::DESTINATION_KEY, "yt-key-0123").unwrap();
+        let app = App::start(AppOptions {
+            config_path: Some(path.clone()),
+            secrets: secrets.clone(),
+            overrides: Overrides {
+                ingest: Some("127.0.0.1:0".parse().unwrap()),
+                api: Some("127.0.0.1:0".parse().unwrap()),
+                destination_url: Some(dest.into()),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+        let youtube_key_kept = || {
+            let key: Value =
+                serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
+            assert_eq!(key["value"], "yt-key-0123", "{dest}: {key}");
+            assert_eq!(
+                key["for"], "rtmps://a.rtmps.youtube.com:443/live2",
+                "{dest}"
+            );
+            let saved = Config::load_or_create(&path).unwrap();
+            assert_eq!(saved.destination, c.destination, "{dest}");
+        };
+        let (s, r) = http(
+            &app,
+            "POST",
+            "/api/v1/obs/configure",
+            r#"{"import_key": true, "add_overlay": false}"#,
+        )
+        .await;
+        assert_eq!(s, 409, "{dest}: {r}");
+        assert!(r.to_string().contains("STREAMDELAY_KEY"), "{dest}: {r}");
+        youtube_key_kept();
+        // Nothing changed in OBS either.
+        assert_eq!(obs.lock().unwrap().settings["key"], "live_987_secret");
+        // Without moving the key in, OBS is set up.
+        let (s, r) = http(
+            &app,
+            "POST",
+            "/api/v1/obs/configure",
+            r#"{"import_key": false, "add_overlay": false}"#,
+        )
+        .await;
+        assert_eq!(s, 200, "{dest}: {r}");
+        assert_eq!(r["imported_key"], false);
+        youtube_key_kept();
+        app.shutdown().await;
+    }
 }
 
 #[tokio::test]

@@ -14,10 +14,10 @@ use streamdelay_relay::RtmpUrl;
 use tracing::{info, warn};
 
 use crate::AppState;
-use crate::app::{LOCAL_KEY, same_server, urls};
+use crate::app::{LOCAL_KEY, different_server, same_server, urls};
 use crate::auth::Scope;
 use crate::bound::{self, Saved};
-use crate::changes::KeyChange;
+use crate::changes::{COMMAND_LINE_KEY, KeyChange};
 use crate::routes::ApiError;
 
 const OVERLAY_SOURCE: &str = "Stream Delay Overlay";
@@ -557,6 +557,20 @@ async fn configure(
 
         // A Twitch key, for Twitch (the destination is set to it below).
         let key = match info.stream.twitch_key() {
+            // It would replace the key saved for the destination in the settings
+            // file, which this run's, from the command line, is not.
+            Some(_)
+                if body.import_key
+                    && different_server(&st.saved_destination_url(), &config.destination.url) =>
+            {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "{COMMAND_LINE_KEY} Set OBS up without moving its stream key in, or start \
+                         stream-delay without --dest."
+                    ),
+                ));
+            }
             Some(key) if body.import_key => {
                 imported_key = true;
                 messages.push("Your Twitch stream key was moved into stream-delay.".to_string());
@@ -567,9 +581,6 @@ async fn configure(
             }
             _ => KeyChange::Keep,
         };
-        // It replaces the key saved for the destination in the settings file,
-        // which must then be Twitch too: this run's may be a command-line one.
-        let saved_is_twitch = same_server(SERVICES[0].url, &st.saved_destination_url());
         // An imported key is stored, and OBS then streams with stream-delay's.
         let obs_key = if imported_key {
             links.obs_key.clone()
@@ -590,7 +601,7 @@ async fn configure(
                 if imported_key {
                     c.destination.key_mode = KeyMode::Stored;
                     // A Twitch key only goes to Twitch.
-                    if !same_server(SERVICES[0].url, &c.destination.url) || !saved_is_twitch {
+                    if !same_server(SERVICES[0].url, &c.destination.url) {
                         c.destination.service = "twitch".into();
                         c.destination.url = SERVICES[0].url.into();
                     }

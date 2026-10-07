@@ -55,10 +55,11 @@ All notable changes to stream-delay are listed here. The format follows
   to the usual destination on the next start without `--dest`. The saved key
   now stays, and a key for the command-line destination is refused with a
   pointer to `STREAMDELAY_KEY`. Saving the tab unchanged also failed when that
-  destination's URL had a query. Moving the Twitch key in from OBS, with a
-  `--dest` on one of Twitch's servers and another service in the settings
-  file, replaced that service's key but left the settings file naming it; the
-  settings file now names Twitch along with its key.
+  destination's URL had a query. The OBS setup's "Move my Twitch stream key
+  into stream-delay", with a `--dest` on one of Twitch's servers and another
+  service in the settings file, replaced that service's key but left the
+  settings file naming it. It is refused there too; OBS can be set up without
+  moving the key in.
 
 ## [0.3.2] - 2026-09-30
 
