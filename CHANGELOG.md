@@ -30,6 +30,9 @@ All notable changes to stream-delay are listed here. The format follows
 - A delay over the maximum that the memory limit could not hold either was
   refused for lack of memory, as if raising the memory limit would let it be
   set. It is refused as over the maximum.
+- `streamdelayd delay`, `live`, `end`, `dump` and the other commands that
+  control a running instance waited forever for one that took the connection
+  but never answered. They now give up after 30 s, as `health` does after 5.
 
 ## [0.3.2] - 2026-09-30
 

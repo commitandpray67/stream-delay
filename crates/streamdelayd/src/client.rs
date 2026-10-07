@@ -46,9 +46,18 @@ fn is_this_computer(base: &str) -> bool {
             .is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
+/// How long a command waits for the running instance: far longer than any
+/// request takes (a dump waits at most 2 s for the destination), but a script
+/// or a Stream Deck button must not hang on an instance that is stuck.
+const REQUEST_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(30)
+};
+
 pub fn get(base: &str, token: &str, path: &str) -> Result<Value> {
     finish(
-        agent(base, None)
+        agent(base, Some(REQUEST_TIMEOUT))
             .get(format!("{base}{path}"))
             .header("Authorization", format!("Bearer {token}"))
             .call(),
@@ -57,7 +66,7 @@ pub fn get(base: &str, token: &str, path: &str) -> Result<Value> {
 
 pub fn put(base: &str, token: &str, path: &str, body: Value) -> Result<Value> {
     finish(
-        agent(base, None)
+        agent(base, Some(REQUEST_TIMEOUT))
             .put(format!("{base}{path}"))
             .header("Authorization", format!("Bearer {token}"))
             .send_json(body),
@@ -66,7 +75,7 @@ pub fn put(base: &str, token: &str, path: &str, body: Value) -> Result<Value> {
 
 pub fn post(base: &str, token: &str, path: &str, body: Value) -> Result<Value> {
     finish(
-        agent(base, None)
+        agent(base, Some(REQUEST_TIMEOUT))
             .post(format!("{base}{path}"))
             .header("Authorization", format!("Bearer {token}"))
             .send_json(body),
@@ -91,7 +100,19 @@ pub fn print(v: Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_this_computer;
+    use std::time::{Duration, Instant};
+
+    use super::{get, is_this_computer};
+
+    #[test]
+    fn a_command_gives_up_on_an_instance_that_never_answers() {
+        // Takes the connection (the OS does, for the listener) but never answers.
+        let stuck = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", stuck.local_addr().unwrap());
+        let started = Instant::now();
+        assert!(get(&base, "token", "/api/v1/state").is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 
     #[test]
     fn this_computer_is_localhost_or_a_loopback_address() {
