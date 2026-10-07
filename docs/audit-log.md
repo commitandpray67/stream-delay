@@ -19,6 +19,30 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-07 — Area 3: a hold left a new destination without anything
+
+A full read of `crates/relay` (`core.rs`, `egress.rs`, `ingest.rs`,
+`lifecycle.rs`, `lib.rs`, `io.rs`, `sendq.rs`, `heap.rs`) found one bug, at
+its seam with the engine; fixed in 038999f with a test that failed first.
+
+While the destination connection is off, the lifecycle starts it once the
+engine has something due. During a dump's hold nothing recorded is due until
+the delay is back, though the hold has a frame to show. Changing the
+destination during a hold stops the connection to reconnect with the new
+settings, so the new destination got nothing for up to the whole delay: in
+the test, no connection at all 4 s into a 10 s hold. A hold now counts as
+something to send, and the new destination gets the held frame at once. A
+broadcast that ends or restarts clears the hold first, so this starts no
+broadcast that should stay down.
+
+Looked at and left as is: the egress's record of what it wrote leaves out the
+acknowledgements it writes while reading, a few bytes per window, which can
+only make a dump count less as delivered.
+
+The second pass re-read the lifecycle with the change, and the relay's
+property tests passed at 20 000 cases. Nothing else real: area 3 is done for
+this round.
+
 ### 2026-10-05 — Area 6 (weekly): an off-stream overlay confirmed the slate
 
 The weekly audit took area 6, the one audited longest ago. The first full
