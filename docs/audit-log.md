@@ -19,6 +19,22 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-07 — Area 5: commands that waited forever
+
+A full read of `crates/streamdelayd`, `crates/obs` and the desktop app
+(`main.rs`, `tray.rs`, `hotkeys.rs`) found one thing, fixed in 796dd68 with
+a test that failed first: `streamdelayd delay`, `live`, `end`, `dump`,
+`state`, `resume` and `diagnostics` had no timeout, so an instance that took
+the connection but never answered left them waiting forever (the test was
+still waiting after 40 s). Run from a Stream Deck button or a script, that
+piles up processes. They now give up after 30 s; `health` already did after
+5 s.
+
+The second pass read the tray menu, quitting and updating (which ask first
+while streaming, and say the stream ends), and the OBS crate's handling of
+what it shows of OBS's server, again: nothing real. Area 5 is done for this
+round.
+
 ### 2026-10-07 — Area 2 again: nothing
 
 The pass after 10-03's finding re-read the chunk decoder's headers and
