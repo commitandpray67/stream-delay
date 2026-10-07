@@ -867,7 +867,9 @@ impl Engine {
     /// True when there is (or soon will be) something to send, so the destination
     /// should be connected.
     pub fn output_wanted(&self, now: Time) -> bool {
-        if self.out.connected && !self.drained() {
+        // A hold sends its frame until the delay is back, to a new connection
+        // too: nothing recorded is due meanwhile.
+        if self.out.hold.is_some() || (self.out.connected && !self.drained()) {
             return true;
         }
         let lead = 3 * SEC;

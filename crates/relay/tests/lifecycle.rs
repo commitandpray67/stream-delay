@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use common::*;
-use streamdelay_relay::{DelayMode, DestinationKey, DumpOutcome, EgressStatus, Phase};
+use streamdelay_relay::{DelayMode, Destination, DestinationKey, DumpOutcome, EgressStatus, Phase};
 use streamdelay_rtmp::session::MediaKind;
 
 async fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
@@ -758,6 +758,41 @@ async fn a_dump_nothing_covers_holds_even_when_the_destination_just_dropped() {
         }
         assert!(after.len() > 30, "the stream did not carry on: {after:?}");
         assert_eq!(after[0] % 30, 0, "the stream must carry on from a keyframe");
+    }
+    p.stop().await;
+    relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destination_set_during_a_hold_gets_the_held_frame() {
+    // The destination changed while a dump holds the last frame: the new one
+    // gets that frame too, rather than nothing until the delay is back.
+    let (first, _first_log, _kill) = start_sink().await;
+    let (second, second_log, _kill2) = start_sink().await;
+    let relay = start_relay(first, key(), Duration::from_secs(5)).await;
+    relay.set_delay(10_000, DelayMode::Rewind).await.unwrap();
+    let mut p = Publisher::connect(relay.ingest_addr(), "x").await;
+    p.stream_for(Duration::from_secs(12)).await;
+    let ack = relay.dump(DelayMode::Mask, false).await.unwrap();
+    assert_eq!(ack.dump, Some(DumpOutcome::Hold), "{ack:?}");
+    relay
+        .set_destination(Some(Destination {
+            url: format!("rtmp://{second}/app"),
+            key: key(),
+        }))
+        .unwrap();
+    p.stream_for(Duration::from_secs(4)).await;
+    // The delay is back only 10 s after the dump.
+    assert_eq!(relay.state().delay.phase, Phase::Holding);
+    {
+        let l = second_log.lock().unwrap();
+        assert_eq!(l.published, 1, "the new destination got nothing");
+        let held = l
+            .media
+            .iter()
+            .filter(|m| m.kind == MediaKind::Video)
+            .count();
+        assert!(held >= 2, "{held} video messages on the new destination");
     }
     p.stop().await;
     relay.shutdown().await;

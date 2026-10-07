@@ -24,6 +24,9 @@ All notable changes to stream-delay are listed here. The format follows
 - The Setup tab said the dock link could only change the delay. It can also
   dump the buffer and end the stream.
 - While a stream was ending, the dashboard's header still said "Delayed".
+- Changing the destination while a dump held the last frame left the new
+  destination without anything until the delay was back, up to the whole
+  delay. It now gets the held frame at once.
 
 ## [0.3.2] - 2026-09-30
 
