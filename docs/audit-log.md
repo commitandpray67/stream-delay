@@ -19,6 +19,14 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-07 — Area 2 again: nothing
+
+The pass after 10-03's finding re-read the chunk decoder's headers and
+timestamps (a type 3 chunk starting a message adds the previous delta, and
+carries the extended timestamp when the header before had one), the sessions'
+handling of control messages, and the FLV inspector's legacy and enhanced
+paths with 10-03's change. Nothing real: area 2 is done for this round.
+
 ### 2026-10-07 — Area 1 again: the delay's checks in the wrong order
 
 The pass after 10-01's finding re-read the engine, with today's change to
