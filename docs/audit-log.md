@@ -19,6 +19,57 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-07 — Area 4: the saved key and a command-line destination
+
+The first pass read all of `crates/control` and `crates/config` and found
+five small things, fixed in d7e4e90, each with a test that failed first:
+
+- The start delay was cut to the millisecond, not rounded (2.01 s started
+  as 2.009 s). Every conversion from seconds now goes through one helper.
+- A Delay-tab save that added a preset was not checked for hotkey clashes,
+  though a hotkey for a preset that did not exist becomes active with it.
+  The desktop app then gave the key to one action, silently.
+- The Delay tab called the start delay "Delay when a stream starts". It is
+  read when stream-delay starts, and the delay carries over between
+  streams. The label now says so; the behaviour stays.
+- The OBS wizard's error for passthrough with an ingest key had runs of
+  spaces where line continuations were lost.
+- The favicon, whose name never changes, was served as immutable for a
+  year. Only Vite's fingerprinted `assets/` are now.
+
+The second pass traced the settings paths with a command-line destination
+(`--dest`) in effect, and found a real one, fixed in c4c9488 with a test
+that failed first. Saving the Setup tab, even unchanged, deleted the stream
+key saved for the settings file's destination. A key entered there was saved
+for that destination, not the one shown: it did not apply, and the next run
+without `--dest` would have sent it to the usual destination. The rule now
+is that the saved key always belongs to the destination the settings file
+names after a change. It is forgotten only when that changes server. A key
+for a `--dest` on another server is refused, pointing to `STREAMDELAY_KEY`
+(rebinding it would have overwritten the usual key). The third pass, over
+every path that writes the key, found the OBS wizard's Twitch key import
+breaking the same rule with a `--dest` on a Twitch server and another service
+in the file. c4c9488 made the import switch the file to Twitch, but a review
+after the fourth pass found that this switch is lost when the `--dest` is
+exactly Twitch's default address: settings changes save only what differs
+from the settings in effect, so the file kept YouTube with a Twitch key.
+ddbbbe2 refuses the import whenever the settings file and this run name
+different servers, as the key field does, with a test covering both
+addresses.
+
+The fourth pass re-read every place that reads the destination in effect
+against the saved one (the key shown as set, needs-setup, the relay's
+destination, redaction, startup), and after the review, every settings
+change that writes the destination (the Setup tab and the wizard's import;
+the wizard's other steps touch only OBS's own settings): nothing more. Area 4
+is done for this round.
+
+Considered and left as is:
+
+- "Remove saved key" on the Setup tab removes the saved key even when a
+  `STREAMDELAY_KEY` for a `--dest` is the one in use. It does what it says;
+  the environment's key stays.
+
 ### 2026-10-07 — Area 5: commands that waited forever
 
 A full read of `crates/streamdelayd`, `crates/obs` and the desktop app
