@@ -286,6 +286,91 @@ async fn a_command_line_destination_never_gets_the_stored_key_of_another_server(
 }
 
 #[tokio::test]
+async fn the_setup_tab_leaves_the_saved_key_alone_for_a_command_line_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut c = Config::default(); // Twitch
+    c.api.token = "0123456789abcdef".into();
+    c.save(&path).unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    secrets
+        .set(secret::DESTINATION_KEY, "live_123_twitchkey")
+        .unwrap();
+    let start = |dest: &str| {
+        App::start(AppOptions {
+            config_path: Some(path.clone()),
+            secrets: secrets.clone(),
+            overrides: Overrides {
+                destination_url: Some(dest.into()),
+                ..overrides("127.0.0.1:0")
+            },
+        })
+    };
+    let twitch_key_kept = || {
+        let saved: serde_json::Value =
+            serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
+        assert_eq!(saved["value"], "live_123_twitchkey", "{saved}");
+        assert_eq!(saved["for"], "rtmps://live.twitch.tv:443/app", "{saved}");
+    };
+    let as_shown = async |app: &App| {
+        let (_, cfg) = http(app, "GET", "/api/v1/config", "").await;
+        serde_json::json!({ "destination": cfg["config"]["destination"] }).to_string()
+    };
+
+    let app = start("rtmp://127.0.0.1:1/test").await.unwrap();
+    // Saving the Setup tab as it is: the destination does not change, and the
+    // saved key stays.
+    let (s, body) = http(&app, "PUT", "/api/v1/config", &as_shown(&app).await).await;
+    assert_eq!(s, 200, "{body}");
+    twitch_key_kept();
+    // A key for this run's destination, in the key field or the URL: it would
+    // replace the one saved for Twitch, the destination in the settings file.
+    let (s, body) = http(
+        &app,
+        "PUT",
+        "/api/v1/destination/key",
+        r#"{"key":"relay-key-0123"}"#,
+    )
+    .await;
+    assert_eq!(s, 400, "{body}");
+    assert!(body.to_string().contains("STREAMDELAY_KEY"), "{body}");
+    twitch_key_kept();
+    let with_key = serde_json::json!({ "destination": {
+        "service": "custom", "url": "rtmp://127.0.0.1:1/test/relay-key-0123", "key_mode": "stored" } });
+    let (s, body) = http(&app, "PUT", "/api/v1/config", &with_key.to_string()).await;
+    assert_eq!(s, 400, "{body}");
+    assert!(body.to_string().contains("STREAMDELAY_KEY"), "{body}");
+    twitch_key_kept();
+    app.shutdown().await;
+
+    // One with a query, which is shown hidden: saved as shown, it stays.
+    let app = start("rtmp://127.0.0.1:1/test?auth=q-0123").await.unwrap();
+    let (s, body) = http(&app, "PUT", "/api/v1/config", &as_shown(&app).await).await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(
+        app.config().destination.url,
+        "rtmp://127.0.0.1:1/test?auth=q-0123"
+    );
+    twitch_key_kept();
+    app.shutdown().await;
+
+    // Another of Twitch's servers takes the Twitch key, entered here or not.
+    let app = start("rtmps://ingest.global-contribute.live-video.net/app")
+        .await
+        .unwrap();
+    let (s, body) = http(
+        &app,
+        "PUT",
+        "/api/v1/destination/key",
+        r#"{"key":"live_456_newkey"}"#,
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["destination_key_set"], true, "{body}");
+    app.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_saved_destination_this_version_refuses_does_not_keep_it_from_starting() {
     // Older versions took a port of 0, for one; a hand edit can hold anything.
     let dir = tempfile::tempdir().unwrap();

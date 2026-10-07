@@ -48,6 +48,17 @@ All notable changes to stream-delay are listed here. The format follows
 - Browsers kept the dashboard's icon for a year, so an update that changed it
   would not show. Only the files whose names change with each version are now
   kept that long.
+- With a destination for another server given on the command line (`--dest`),
+  saving the Setup tab, even unchanged, deleted the stream key saved for the
+  destination in the settings file. A key entered there was saved for that
+  destination, not the one shown: it did not apply, and would have been sent
+  to the usual destination on the next start without `--dest`. The saved key
+  now stays, and a key for the command-line destination is refused with a
+  pointer to `STREAMDELAY_KEY`. Saving the tab unchanged also failed when that
+  destination's URL had a query. Moving the Twitch key in from OBS, with a
+  `--dest` on one of Twitch's servers and another service in the settings
+  file, replaced that service's key but left the settings file naming it; the
+  settings file now names Twitch along with its key.
 
 ## [0.3.2] - 2026-09-30
 

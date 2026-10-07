@@ -10,8 +10,16 @@ use streamdelay_config::{Config, ConfigError, SecretError, SecretStore, secret};
 use streamdelay_relay::RelayError;
 use thiserror::Error;
 
+use crate::app::different_server;
 use crate::routes::ApiError;
 use crate::{AppState, dest_key};
+
+/// Why a stream key for this run's destination is refused when it was given
+/// on the command line for another server than the settings file names: the
+/// one key saved belongs to that destination, and would be replaced.
+pub(crate) const COMMAND_LINE_KEY: &str = "this run's destination was given on the command \
+     line: give its stream key there too (STREAMDELAY_KEY). The key saved here is for the \
+     destination in the settings file, and stays as it is.";
 
 /// Proof that the settings lock is held; see [`AppState::lock_settings`].
 pub(crate) struct SettingsLock<'a> {
@@ -211,8 +219,10 @@ impl AppState {
         }
     }
 
-    /// Saves `key` as the stream key for the destination in the settings file
-    /// (the one the key field is shown with).
+    /// Saves `key` as the stream key for the destination in the settings file,
+    /// which is the one the key field is shown with unless this run's
+    /// destination, on another server, was given on the command line: then it is
+    /// refused (see [`COMMAND_LINE_KEY`]).
     pub(crate) fn save_destination_key(&self, key: &str) -> Result<(), ChangeError> {
         let key = key.trim();
         if key.is_empty() || key.len() > 512 || key.chars().any(char::is_control) {
@@ -221,12 +231,11 @@ impl AppState {
             ));
         }
         let lock = self.lock_settings();
-        dest_key::save(
-            self.shared.secrets.as_ref(),
-            &self.saved_destination_url(),
-            key,
-        )
-        .map_err(ChangeError::Key)?;
+        let saved = self.saved_destination_url();
+        if different_server(&saved, &self.config().destination.url) {
+            return Err(ChangeError::Invalid(COMMAND_LINE_KEY.into()));
+        }
+        dest_key::save(self.shared.secrets.as_ref(), &saved, key).map_err(ChangeError::Key)?;
         self.sync_destination(&lock)?;
         self.shared.config_tx.send_modify(|_| {});
         Ok(())

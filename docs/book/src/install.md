@@ -48,7 +48,9 @@ Run `streamdelayd run --help` for all options, such as `--dest`,
 `--key-env`, `--max-delay` and `--ephemeral`. Options given on the command line
 apply to that run only: changing settings on the dashboard saves those changes,
 not the command-line values. A `--dest` for another server never gets the stream
-key saved for your usual destination; pass its key with `STREAMDELAY_KEY`.
+key saved for your usual destination; pass its key with `STREAMDELAY_KEY`. The
+dashboard does not take one for it either, so the key saved for your usual
+destination stays as it is.
 
 ### Docker
 

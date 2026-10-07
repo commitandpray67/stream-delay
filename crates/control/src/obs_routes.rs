@@ -567,6 +567,9 @@ async fn configure(
             }
             _ => KeyChange::Keep,
         };
+        // It replaces the key saved for the destination in the settings file,
+        // which must then be Twitch too: this run's may be a command-line one.
+        let saved_is_twitch = same_server(SERVICES[0].url, &st.saved_destination_url());
         // An imported key is stored, and OBS then streams with stream-delay's.
         let obs_key = if imported_key {
             links.obs_key.clone()
@@ -587,7 +590,7 @@ async fn configure(
                 if imported_key {
                     c.destination.key_mode = KeyMode::Stored;
                     // A Twitch key only goes to Twitch.
-                    if !same_server(SERVICES[0].url, &c.destination.url) {
+                    if !same_server(SERVICES[0].url, &c.destination.url) || !saved_is_twitch {
                         c.destination.service = "twitch".into();
                         c.destination.url = SERVICES[0].url.into();
                     }

@@ -12,6 +12,7 @@ use axum::routing::get;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use streamdelay_config::{Config, KeyMode, SecretStore, Secrets, secret};
+use streamdelay_control::{App, AppOptions, Overrides};
 use streamdelay_relay::RelayConfig;
 use tower::ServiceExt;
 
@@ -394,6 +395,81 @@ async fn a_twitch_key_from_obs_only_goes_to_twitch() {
     let saved: Value =
         serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
     assert_eq!(saved["for"], "rtmps://live.twitch.tv:443/app");
+}
+
+/// A minimal HTTP/1.1 request to a running instance.
+async fn http(app: &App, method: &str, path: &str, body: &str) -> (u16, Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = app.api_addr;
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        app.config().api.token,
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).await.unwrap();
+    let status = resp[9..12].parse().unwrap();
+    let json = resp
+        .split_once("\r\n\r\n")
+        .and_then(|(_, b)| serde_json::from_str(b).ok())
+        .unwrap_or(Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn an_imported_twitch_key_makes_twitch_the_saved_destination_too() {
+    let (_obs, obs_port) = spawn_obs(
+        "rtmp_common",
+        json!({"service": "Twitch", "server": "auto", "key": "live_987_secret"}),
+    )
+    .await;
+    // The settings file names YouTube, with its key; this run streams to one of
+    // Twitch's servers, given on the command line.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut c = Config::default();
+    c.api.token = "0123456789abcdef".into();
+    c.obs.port = obs_port;
+    c.destination.service = "youtube".into();
+    c.destination.url = "rtmps://a.rtmps.youtube.com:443/live2".into();
+    c.save(&path).unwrap();
+    let secrets = Arc::new(Secrets::new(dir.path(), false));
+    secrets.set(secret::DESTINATION_KEY, "yt-key-0123").unwrap();
+    let app = App::start(AppOptions {
+        config_path: Some(path.clone()),
+        secrets: secrets.clone(),
+        overrides: Overrides {
+            ingest: Some("127.0.0.1:0".parse().unwrap()),
+            api: Some("127.0.0.1:0".parse().unwrap()),
+            destination_url: Some("rtmps://ingest.global-contribute.live-video.net/app".into()),
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    let (s, r) = http(
+        &app,
+        "POST",
+        "/api/v1/obs/configure",
+        r#"{"import_key": true, "add_overlay": false}"#,
+    )
+    .await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(r["imported_key"], true);
+    // The Twitch key replaced YouTube's: the settings file names Twitch, which
+    // it belongs to, not YouTube, which no longer has a key.
+    let key: Value = serde_json::from_str(&secrets.get(secret::DESTINATION_KEY).unwrap()).unwrap();
+    assert_eq!(key["value"], "live_987_secret");
+    let saved = Config::load_or_create(&path).unwrap();
+    assert_eq!(
+        saved.destination.url, "rtmps://live.twitch.tv:443/app",
+        "{:?}",
+        saved.destination
+    );
+    app.shutdown().await;
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@ use tracing::info;
 use crate::AppState;
 use crate::app::{Urls, different_server, shown_url, split_url_key, urls};
 use crate::auth::Scope;
-use crate::changes::KeyChange;
+use crate::changes::{COMMAND_LINE_KEY, KeyChange};
 use crate::routes::ApiError;
 
 pub(crate) fn routes() -> Router<AppState> {
@@ -364,11 +364,12 @@ async fn update_config(
     // One change at a time, from reading the settings to the relay: a concurrent
     // one could otherwise pair a key with the wrong destination.
     let lock = st.lock_settings();
+    // The destination shown: this run's, which may be a command-line override.
+    let in_effect = st.config().destination.url;
     if let Some(d) = &mut update.destination {
-        // The URL as shown, its query hidden, stands for the saved one.
-        let saved = st.saved_destination_url();
-        if d.url.trim() != saved && d.url.trim() == shown_url(&saved) {
-            d.url = saved;
+        // The URL as shown, its query hidden, stands for the one in effect.
+        if d.url.trim() != in_effect && d.url.trim() == shown_url(&in_effect) {
+            d.url = in_effect.clone();
         }
     }
     validate(&update, &st.config()).map_err(ApiError::bad_request)?;
@@ -379,16 +380,23 @@ async fn update_config(
         // config.toml never contains it.
         let (url, url_key) = split_url_key(&d.url);
         d.url = url;
+        // The saved key belongs to the destination in the settings file, which
+        // only changes with a URL other than the one in effect (see
+        // [`crate::changes`]): a command-line override stays out of it.
+        let saved = st.saved_destination_url();
+        let saved_after = if d.url == in_effect { &saved } else { &d.url };
         if let Some(k) = url_key {
+            // It would replace the key of the destination the file keeps.
+            if different_server(saved_after, &d.url) {
+                return Err(ApiError::bad_request(COMMAND_LINE_KEY));
+            }
             key = KeyChange::Save {
                 server: d.url.clone(),
                 key: k,
             };
-        } else if different_server(&st.saved_destination_url(), &d.url) {
-            // The saved key belongs to the destination in the settings file (the
-            // one in effect may be a command-line override), and is never sent to
-            // another server: it is forgotten too, and if that fails, nothing
-            // changes.
+        } else if different_server(&saved, saved_after) {
+            // Never sent to another server: it is forgotten too, and if that
+            // fails, nothing changes.
             key = KeyChange::Forget;
         }
     }
