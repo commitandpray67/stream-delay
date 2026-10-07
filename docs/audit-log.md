@@ -19,6 +19,23 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-07 — Area 1 again: the delay's checks in the wrong order
+
+The pass after 10-01's finding re-read the engine, with today's change to
+`output_wanted` (area 3, above), and found one thing; fixed in ab4b717 with
+a test that failed first. A delay was checked against the memory limit
+before the maximum: one over the maximum that memory could not hold either
+was refused as needing more memory than the limit, as if raising it would
+let it be set. The maximum is checked first now, in one place.
+
+Looked at and left as is: going live during a dump's hold ends the hold at
+once, and nothing airs until the next keyframe from the encoder, up to a
+keyframe interval; the timestamps then run on from the last held frame, as
+after any splice.
+
+The pass after that re-read the commands with the change: nothing real.
+Area 1 is done for this round.
+
 ### 2026-10-07 — Area 3: a hold left a new destination without anything
 
 A full read of `crates/relay` (`core.rs`, `egress.rs`, `ingest.rs`,
