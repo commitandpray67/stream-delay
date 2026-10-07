@@ -80,7 +80,7 @@
         </select>
       </label>
       <label>
-        Delay when a stream starts (s)
+        Delay when stream-delay starts (s)
         <input type="number" min="0" max={form.max_seconds} bind:value={form.start_seconds} />
       </label>
       <label>
@@ -118,7 +118,8 @@
       hides the picture, not the sound, unless it is left out. After a dropped connection, resuming where it left
       off shows viewers everything and makes the delay longer by the outage (up to the maximum, and the dock offers
       to go back); going back to the delay set keeps it, and viewers miss what happened while it was down.
-      Changing the maximum delay, memory cap, slate margin, sound setting or reconnect time takes effect after a
+      The delay starts where it is set here when stream-delay starts, then stays as you set it from one stream to
+      the next. Changing the maximum delay, memory cap, slate margin, sound setting or reconnect time takes effect after a
       restart.
     </p>
     {#if form.ram_cap_mb < memoryFor(form.max_seconds)}

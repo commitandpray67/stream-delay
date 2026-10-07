@@ -96,13 +96,35 @@ async fn asset_named(path: &str) -> Response {
             if let Ok(v) = HeaderValue::from_str(&mime) {
                 h.insert(header::CONTENT_TYPE, v);
             }
-            // Vite fingerprints asset names, so they can be cached forever.
             h.insert(
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=31536000, immutable"),
+                HeaderValue::from_static(cache_control(path)),
             );
             r
         }
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// How long the file at `path` may be kept. Vite fingerprints the names of what
+/// it puts in `assets/`, so those can be kept forever; anything else (the
+/// favicon) has the same name in every version, and is checked each time.
+fn cache_control(path: &str) -> &'static str {
+    if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_control;
+
+    #[test]
+    fn only_fingerprinted_files_are_kept_for_good() {
+        assert!(cache_control("assets/index-BX3k9a.js").contains("immutable"));
+        // Same name in every version: a kept copy would outlive an update.
+        assert!(!cache_control("favicon.svg").contains("immutable"));
     }
 }

@@ -72,4 +72,12 @@ describe("delay settings", () => {
     await save();
     expect(api.updateConfig).toHaveBeenCalledOnce();
   });
+
+  it("says the start delay is set when stream-delay starts, not for each stream", () => {
+    render(DelayTab);
+    // The delay carries over from one stream to the next; this is where it
+    // begins when stream-delay starts.
+    expect(screen.getByLabelText(/when stream-delay starts/)).toBeTruthy();
+    expect(screen.queryByLabelText(/when a stream starts/)).toBeNull();
+  });
 });

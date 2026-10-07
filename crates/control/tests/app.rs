@@ -477,7 +477,9 @@ async fn the_relay_starts_with_the_settings_given() {
         overrides: Overrides {
             destination_url: Some("rtmp://127.0.0.1:1/test".into()),
             max_delay_seconds: Some(60),
-            start_delay_seconds: Some(2.5),
+            // To the millisecond, as a delay set from the dock is: 2.01 × 1000
+            // comes out just under 2010.
+            start_delay_seconds: Some(2.01),
             ..overrides("127.0.0.1:0")
         },
     })
@@ -486,7 +488,7 @@ async fn the_relay_starts_with_the_settings_given() {
     let mut state = app.relay().subscribe();
     let s = tokio::time::timeout(
         Duration::from_secs(5),
-        state.wait_for(|s| s.delay.target_ms == 2500),
+        state.wait_for(|s| s.delay.target_ms == 2010),
     )
     .await
     .expect("the start delay was not applied")
@@ -601,7 +603,7 @@ async fn presets_from_hotkeys_set_the_delay() {
         .unwrap();
     };
     app.apply_preset(1).await.unwrap();
-    target((presets[1].seconds * 1000.0) as u64).await;
+    target((presets[1].seconds * 1000.0).round() as u64).await;
     // One that does not exist changes nothing.
     app.apply_preset(presets.len()).await.unwrap();
     app.apply_preset(0).await.unwrap();

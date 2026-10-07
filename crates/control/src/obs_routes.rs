@@ -281,7 +281,9 @@ fn key_for_obs(s: &StreamSettings, c: &Config, obs_key: &str) -> Result<String, 
         // Its own key would be refused, and the ingest key forwarded.
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "OBS must stream to stream-delay with its ingest key (shown on this tab), and              with passthrough that is the key stream-delay forwards to the destination.              Turn passthrough off on this tab and enter your stream key here."
+            "OBS must stream to stream-delay with its ingest key (shown on this tab), and \
+             with passthrough that is the key stream-delay forwards to the destination. \
+             Turn passthrough off on this tab and enter your stream key here."
                 .into(),
         ));
     }
@@ -800,6 +802,20 @@ mod tests {
                 format!("http://{own}:7788/overlay?token={}", read(&st))
             );
         }
+    }
+
+    #[test]
+    fn passthrough_with_an_ingest_key_is_explained_in_plain_text() {
+        let mut c = Config::default();
+        c.destination.key_mode = KeyMode::Passthrough;
+        c.ingest.key = Some("ingest-key-0123456789".into());
+        let obs = StreamSettings {
+            service_type: "rtmp_custom".into(),
+            settings: serde_json::json!({ "server": "rtmp://127.0.0.1/live", "key": "own" }),
+        };
+        let e = key_for_obs(&obs, &c, "ingest-key-0123456789").unwrap_err();
+        assert_eq!(e.0, StatusCode::CONFLICT);
+        assert!(!e.1.contains("  "), "{}", e.1);
     }
 
     #[test]

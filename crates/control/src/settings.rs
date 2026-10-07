@@ -207,9 +207,11 @@ fn validate(u: &SettingsUpdate, current: &Config) -> Result<(), String> {
             }
         }
     }
-    if let Some(h) = &u.hotkeys {
+    // Also when only the presets change: keys for presets that did not exist
+    // were not counted, and are once those presets do.
+    if u.hotkeys.is_some() || u.delay.is_some() {
         let presets = u.delay.as_ref().unwrap_or(&current.delay).presets.len();
-        check_hotkeys(h, presets)?;
+        check_hotkeys(u.hotkeys.as_ref().unwrap_or(&current.hotkeys), presets)?;
     }
     if let Some(o) = &u.overlay {
         for c in [&o.accent_color, &o.background_color, &o.text_color] {
@@ -473,6 +475,8 @@ mod tests {
         let a = u.apply(&mut c);
         assert!(!a.restart && a.after_reconnect_changed);
         assert_eq!(c.delay.after_reconnect, AfterReconnect::Restore);
+        // Only ever read when stream-delay starts, which is what it is for: no
+        // restart to ask for.
         assert_eq!(apply(delay("start_seconds", 5.into())), (false, false));
         let same_grace = current.ingest.grace_seconds;
         assert_eq!(
@@ -589,6 +593,21 @@ mod tests {
         // Other keys, or other modifiers, are other hotkeys.
         assert!(check(&|h| h.dump = "CmdOrCtrl+Alt+Shift+9".into()).is_ok());
         assert!(check(&|h| h.dump = "CmdOrCtrl+Alt+1".into()).is_ok());
+
+        // The fifth preset was removed and its key given to Dump: adding a fifth
+        // preset back on the Delay tab would give that key two actions.
+        let mut current = Config::default();
+        current.delay.presets.truncate(4);
+        current.hotkeys.dump = current.hotkeys.presets[4].clone();
+        let mut delay = current.delay.clone();
+        delay.presets.push(streamdelay_config::Preset {
+            seconds: 90.0,
+            mode: delay.default_mode,
+        });
+        let u: SettingsUpdate =
+            serde_json::from_value(serde_json::json!({ "delay": delay })).unwrap();
+        let e = validate(&u, &current).unwrap_err();
+        assert!(e.contains("Dump buffer") && e.contains("Preset 5"), "{e}");
     }
 
     #[tokio::test]

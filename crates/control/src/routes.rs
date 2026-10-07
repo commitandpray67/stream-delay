@@ -17,6 +17,7 @@ use serde_json::json;
 use streamdelay_config::SecretError;
 use streamdelay_relay::{Ack, DelayMode, GoLiveWhen, RelayError, RelayState};
 
+use crate::app::millis;
 use crate::auth::{self, Scope};
 use crate::overlays::{Counts, Page};
 use crate::{AppState, diagnostics, obs_routes, settings, ui};
@@ -143,8 +144,9 @@ async fn set_delay(
         return Err(ApiError::bad_request("seconds must be a positive number"));
     }
     let mode = body.mode.unwrap_or(st.config().delay.default_mode);
-    let ms = (body.seconds * 1000.0).round() as u64;
-    Ok(Json(st.relay().set_delay(ms, mode).await?))
+    Ok(Json(
+        st.relay().set_delay(millis(body.seconds), mode).await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,9 +264,7 @@ async fn preset(
     let ack = if p.seconds <= 0.0 {
         st.relay().go_live(GoLiveWhen::Now).await?
     } else {
-        st.relay()
-            .set_delay((p.seconds * 1000.0).round() as u64, p.mode)
-            .await?
+        st.relay().set_delay(millis(p.seconds), p.mode).await?
     };
     Ok(Json(ack))
 }

@@ -33,6 +33,21 @@ All notable changes to stream-delay are listed here. The format follows
 - `streamdelayd delay`, `live`, `end`, `dump` and the other commands that
   control a running instance waited forever for one that took the connection
   but never answered. They now give up after 30 s, as `health` does after 5.
+- A start delay with hundredths of a second could start a millisecond short
+  (2.01 s as 2.009 s). It is now rounded to the millisecond, as a delay set
+  from the dock or a preset is.
+- Adding a preset on the Delay tab could give its hotkey, unused until then, a
+  second action: one given to Dump buffer or End stream after the preset was
+  removed. The desktop app then gave the key to one of them, silently. Such a
+  change is now refused, naming both, as it is on the Advanced tab.
+- The Delay tab called the start delay "Delay when a stream starts". It is the
+  delay when stream-delay starts; after that, the delay stays as set from one
+  stream to the next. It now says so.
+- The OBS setup error for passthrough with an ingest key had long runs of
+  spaces in it.
+- Browsers kept the dashboard's icon for a year, so an update that changed it
+  would not show. Only the files whose names change with each version are now
+  kept that long.
 
 ## [0.3.2] - 2026-09-30
 

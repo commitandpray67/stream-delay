@@ -285,7 +285,7 @@ impl App {
         })
         .await?;
         if config.delay.start_seconds > 0.0 {
-            let ms = (config.delay.start_seconds * 1000.0) as u64;
+            let ms = millis(config.delay.start_seconds);
             if let Err(e) = relay.set_delay(ms, config.delay.default_mode).await {
                 warn!("could not apply the start delay: {e}");
             }
@@ -383,9 +383,7 @@ impl App {
         if p.seconds <= 0.0 {
             self.relay().go_live(GoLiveWhen::Now).await?;
         } else {
-            self.relay()
-                .set_delay((p.seconds * 1000.0).round() as u64, p.mode)
-                .await?;
+            self.relay().set_delay(millis(p.seconds), p.mode).await?;
         }
         Ok(())
     }
@@ -399,6 +397,12 @@ impl App {
     pub async fn shutdown(&self) {
         self.relay().shutdown().await;
     }
+}
+
+/// A delay in seconds as the nearest whole millisecond: `2.01 * 1000.0` comes out
+/// just under 2010.
+pub(crate) fn millis(seconds: f64) -> u64 {
+    (seconds * 1000.0).round() as u64
 }
 
 /// What a dump did, in a sentence for the streamer (tray, hotkeys, command line).
