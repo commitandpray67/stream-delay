@@ -19,6 +19,33 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-12 — Area 7 (weekly): an older image could take `latest`
+
+The first pass read every workflow, the release scripts and their tests,
+both Dockerfiles, the end-to-end and soak harnesses, the fuzz targets,
+`deny.toml`, `renovate.json` and CODEOWNERS. It found one real thing, fixed
+in 56db13c with tests that failed first. `publish-image.yml` let
+docker/metadata-action tag every full release's image `latest`, and tagged
+`edge` unconditionally. RELEASING.md says to run the workflow by hand to push
+a release's image again, and doing that for an older release would have
+moved both tags back to it, so `docker pull` without a version would have got
+the older one. ghcr.io shows `latest` on 0.3.2 today, so it has not happened.
+`check_image_inputs.py` now works out whether any other published full
+release has a higher version, comparing the numbers so that 1.10 is above
+1.9. It refuses to push when it cannot list the releases. The workflow tags
+`latest` and `edge` only when no newer release exists. The first version asked
+for GitHub's latest release instead; it was changed before pushing, because
+a release published a moment ago may not be the latest there yet.
+
+Checked and sound: the smoke test's window check cannot pass on the log of an
+installer tried before it, since each start moves the old log aside before
+its health check can answer.
+
+The second pass re-read the release job graph, the publish workflow with the
+change, CI, the Dockerfiles and the scheduled workflows: nothing real. Area 7
+is done for this round. Left as is: the bug report template's example
+destination still shows Twitch's old RTMP address.
+
 ### 2026-10-07 — Area 4: the saved key and a command-line destination
 
 The first pass read all of `crates/control` and `crates/config` and found
