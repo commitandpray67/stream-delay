@@ -60,6 +60,10 @@ All notable changes to stream-delay are listed here. The format follows
   service in the settings file, replaced that service's key but left the
   settings file naming it. It is refused there too; OBS can be set up without
   moving the key in.
+- Pushing an older release's container image again, as the release guide
+  says to, would have tagged it `latest` and `edge` too, so `docker pull`
+  without a version would have got the older release. Only the latest
+  release's image is tagged that way now.
 
 ## [0.3.2] - 2026-09-30
 

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import check_image_inputs as c  # noqa: E402
@@ -45,14 +46,27 @@ class Release:
     def sums(self):
         return (self.dir / c.SUMS).read_text()
 
-    def main(self, release=None, commit=COMMIT):
+    def main(self, release=None, commit=COMMIT, others=(), listed=True):
+        """Runs the check. `others` are the repository's other releases, as
+        (tag, draft, prerelease); None: they cannot be listed. `listed`: the
+        list has this release too."""
         release = {"isDraft": False, "isPrerelease": False} if release is None else release
+        self.output = self.dir / "github-output"
+        self.output.write_text("")
 
         def gh(args, **_):
-            assert args[:3] == ["gh", "release", "view"], args
-            return subprocess.CompletedProcess(args, 0, json.dumps(release), "")
+            if args[:3] == ["gh", "release", "view"]:
+                assert args[3] == TAG, args
+                return subprocess.CompletedProcess(args, 0, json.dumps(release), "")
+            assert args[:3] == ["gh", "release", "list"], args
+            if others is None:
+                return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
+            found = [{"tagName": TAG, **release}] if listed else []
+            found += [{"tagName": t, "isDraft": d, "isPrerelease": p} for t, d, p in others]
+            return subprocess.CompletedProcess(args, 0, json.dumps(found), "")
 
-        return c.main(["check_image_inputs.py", TAG, str(self.dir), commit], run=gh)
+        with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.output)}):
+            return c.main(["check_image_inputs.py", TAG, str(self.dir), commit], run=gh)
 
 
 class Checks(unittest.TestCase):
@@ -107,6 +121,35 @@ class Checks(unittest.TestCase):
     def test_a_line_that_is_not_a_checksum_is_refused(self):
         self.r.write_sums(self.r.sums() + "garbage\n")
         self.assertEqual(self.r.main(), 1)
+
+    def test_only_the_newest_release_moves_latest_and_edge(self):
+        older = [("v1.2.2", False, False), ("v0.9.0", False, False)]
+        self.assertEqual(self.r.main(others=older), 0)
+        self.assertEqual(self.r.output.read_text(), "latest=true\n")
+        # An older release's image pushed again: `docker pull` without a tag
+        # must still get the newest. Versions compare as numbers.
+        for newer in ["v9.0.0", "v1.10.0", "v1.2.10"]:
+            self.assertEqual(self.r.main(others=older + [(newer, False, False)]), 0)
+            self.assertEqual(self.r.output.read_text(), "latest=false\n", newer)
+
+    def test_drafts_and_pre_releases_do_not_count_as_newer(self):
+        for newer in [("v9.0.0", True, False), ("v9.0.0", False, True)]:
+            self.assertEqual(self.r.main(others=[newer]), 0)
+            self.assertEqual(self.r.output.read_text(), "latest=true\n", newer)
+
+    def test_a_release_just_published_is_the_latest_before_it_is_listed(self):
+        self.assertEqual(self.r.main(others=[("v1.2.2", False, False)], listed=False), 0)
+        self.assertEqual(self.r.output.read_text(), "latest=true\n")
+
+    def test_without_knowing_the_other_releases_nothing_is_pushed(self):
+        self.assertEqual(self.r.main(others=None), 1)
+        self.assertEqual(self.r.output.read_text(), "")
+
+    def test_the_workflow_tags_latest_and_edge_only_for_the_latest_release(self):
+        workflow = (Path(__file__).parent.parent / "workflows" / "publish-image.yml").read_text()
+        self.assertIn("id: check\n", workflow)
+        self.assertIn("flavor: latest=${{ steps.check.outputs.latest }}\n", workflow)
+        self.assertIn("type=raw,value=edge,enable=${{ steps.check.outputs.latest }}\n", workflow)
 
     def test_archive_names_are_the_release_workflows(self):
         self.assertEqual(

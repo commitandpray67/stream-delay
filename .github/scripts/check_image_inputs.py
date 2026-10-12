@@ -9,6 +9,11 @@ release-checks.txt.
 - Each archive has exactly one entry in SHA256SUMS.txt, and matches it: an
   archive without one is not let through.
 
+Then it writes `latest=true` to GITHUB_OUTPUT if no other published full
+release has a higher version, else `latest=false`: only the latest release's
+image is tagged `latest` and `edge`, so pushing an older release's image again
+never takes them back to it.
+
 Usage: check_image_inputs.py TAG DIR COMMIT, with GH_TOKEN and GH_REPO set.
 COMMIT is the tag's commit.
 Tests: python3 -m unittest discover -s .github/scripts
@@ -16,6 +21,7 @@ Tests: python3 -m unittest discover -s .github/scripts
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -98,6 +104,35 @@ def view(tag, run):
     return json.loads(r.stdout)
 
 
+def version(tag):
+    """(major, minor, patch) of a tag such as v1.2.3, or None."""
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag or "")
+    return tuple(int(n) for n in m.groups()) if m else None
+
+
+def is_latest(tag, run):
+    """True unless another published full release has a higher version: the one
+    an image pulled without a version must be. Decided from the versions, not
+    from GitHub's latest release, which may not include one published a
+    moment ago."""
+    mine = version(tag)
+    if mine is None:
+        raise Refused(f"{tag} is not a version such as v1.2.3")
+    r = run(
+        ["gh", "release", "list", "--json", "tagName,isDraft,isPrerelease", "--limit", "1000"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise Refused(f"could not list the releases: {r.stderr.strip()}")
+    published = [
+        version(x.get("tagName"))
+        for x in json.loads(r.stdout)
+        if not x.get("isDraft", True) and not x.get("isPrerelease", True)
+    ]
+    return all(v is None or v <= mine for v in published)
+
+
 def main(argv, run=subprocess.run) -> int:
     if len(argv) != 4:
         print(__doc__, file=sys.stderr)
@@ -112,11 +147,17 @@ def main(argv, run=subprocess.run) -> int:
         check_release_checks((folder / CHECKS).read_text(), commit, sums)
         paths = [folder / name for name in archives(tag)]
         check_archives(sums.decode(), paths)
+        latest = is_latest(tag, run)
     except Refused as e:
         print(f"::error::{e}")
         return 1
     for path in paths:
         print(f"ok  {path.name}")
+    print(f"{tag} is {'' if latest else 'not '}the latest release")
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as f:
+            f.write(f"latest={'true' if latest else 'false'}\n")
     return 0
 
 

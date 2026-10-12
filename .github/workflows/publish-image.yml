@@ -1,13 +1,14 @@
 name: Publish container image
 
-# Pushes ghcr.io/<owner>/stream-delay:<version> (and :edge) once a release is
-# published, packaging the Linux archives attached to it. First
-# check_image_inputs.py checks that the release is published as a full release,
-# that its release-checks.txt names the tag's commit and its SHA256SUMS.txt, and
-# that each archive matches its one entry there. Nothing is pushed for a draft or
-# a pre-release, however the workflow is started, so an image never goes out for
-# a release that was not reviewed and published. Run it by hand to push the image
-# of an already published release again.
+# Pushes ghcr.io/<owner>/stream-delay:<version> once a release is published, and
+# :latest and :edge if it is the latest release, packaging the Linux archives
+# attached to it. First check_image_inputs.py checks that the release is
+# published as a full release, that its release-checks.txt names the tag's commit
+# and its SHA256SUMS.txt, and that each archive matches its one entry there.
+# Nothing is pushed for a draft or a pre-release, however the workflow is
+# started, so an image never goes out for a release that was not reviewed and
+# published. Run it by hand to push the image of an already published release
+# again: for an older one, :latest and :edge stay with the latest.
 on:
   release:
     types: [published]
@@ -40,6 +41,7 @@ jobs:
           path: .ci
           sparse-checkout: .github/scripts
       - name: Download and check the release's Linux binaries
+        id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -49,7 +51,8 @@ jobs:
             --pattern SHA256SUMS.txt --pattern release-checks.txt
           ls -l release
           # Published (not a draft or pre-release), passed every check for the
-          # tag's commit, and each archive matches its one checksum.
+          # tag's commit, and each archive matches its one checksum. Says
+          # whether it is the latest release (steps.check.outputs.latest).
           python3 .ci/.github/scripts/check_image_inputs.py "$TAG" release "$(git rev-parse HEAD)"
       - name: Arrange binaries by architecture
         run: |
@@ -71,9 +74,11 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
+          # Left to itself, the action tags any release's image `latest`.
+          flavor: latest=${{ steps.check.outputs.latest }}
           tags: |
             type=semver,pattern={{version}},value=${{ env.TAG }}
-            type=raw,value=edge
+            type=raw,value=edge,enable=${{ steps.check.outputs.latest }}
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
