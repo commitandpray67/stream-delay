@@ -6,6 +6,8 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-16
+
 ### Security
 
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346 and RUSTSEC-2026-0347.
@@ -915,7 +917,8 @@ The first public beta. Everything below is new.
 - One destination at a time; the buffer is kept in memory.
 - Installers are not code-signed yet (SmartScreen and Gatekeeper warnings).
 
-[Unreleased]: https://github.com/commitandpray67/stream-delay/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/commitandpray67/stream-delay/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/commitandpray67/stream-delay/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/commitandpray67/stream-delay/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/commitandpray67/stream-delay/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/commitandpray67/stream-delay/compare/v0.2.0...v0.3.0

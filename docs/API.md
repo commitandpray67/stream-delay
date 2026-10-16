@@ -148,7 +148,7 @@ to accept streams from the network (`--ingest 0.0.0.0:1935`), else it answers
 
 ## Health check
 
-`GET /healthz` needs no token and returns `{"status": "ok", "app": "stream-delay", "version": "0.3.2"}`.
+`GET /healthz` needs no token and returns `{"status": "ok", "app": "stream-delay", "version": "0.3.3"}`.
 The desktop app uses it to tell when another copy of stream-delay already holds its
 ports.
 
