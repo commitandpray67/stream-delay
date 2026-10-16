@@ -6,6 +6,12 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- rustls is updated to 0.23.46 for RUSTSEC-2026-0346 and RUSTSEC-2026-0347.
+  Neither affected stream-delay, which never logs TLS session values and does
+  not use Encrypted Client Hello.
+
 ### Fixed
 
 - Soon after the encoder reconnected, the last frame that aired can still be
