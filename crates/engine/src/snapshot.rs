@@ -75,6 +75,11 @@ pub struct Snapshot {
     /// With `history_short`: the buffer now reaches back far enough for the
     /// delay asked for, which setting it again gives.
     pub full_delay_ready: bool,
+    /// A Rewind dump now would replay the stretch that aired before it: the
+    /// buffer reaches back far enough. Otherwise it is covered by the slate or
+    /// holds the last frame. While a replay runs, the output is further behind
+    /// than `effective_ms`, so this can be false with plenty of history.
+    pub dump_replays: bool,
     /// How much longer than asked for the delay is, once nothing is changing
     /// it, when that is more than rounding back to a keyframe explains (a
     /// keyframe interval and half a second): after the destination connection
@@ -289,6 +294,7 @@ pub(crate) fn build(e: &Engine, now: Time) -> Snapshot {
         memory_short: o.memory_short,
         excess_ms,
         full_delay_ready,
+        dump_replays: e.dump_would_replay(now),
         ingest,
         output: OutputStats {
             connected: o.connected,

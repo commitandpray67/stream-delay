@@ -35,6 +35,8 @@ export interface Snapshot {
   excess_ms: number;
   /** With history_short: the buffer now reaches back far enough for the delay set. */
   full_delay_ready: boolean;
+  /** A Rewind dump now would replay the stretch before it: the buffer reaches back far enough. */
+  dump_replays: boolean;
   ingest: {
     active: boolean;
     video_codec: string | null;

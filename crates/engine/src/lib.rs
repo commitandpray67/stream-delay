@@ -1398,21 +1398,40 @@ impl Engine {
         }
     }
 
+    /// The keyframe a dump's replay would start from, going back to `delay`: at
+    /// least `delay` before the first thing not aired yet was recorded, so the
+    /// replay keeps the delay too. `None` if the buffer does not reach back that
+    /// far. While a replay runs, that is further back than the delay the
+    /// snapshot shows.
+    fn replay_from(&self, now: Time, delay: u64) -> Option<u64> {
+        if !self.config.keep_history {
+            return None;
+        }
+        let cut = self.out.next_seq.max(self.base_seq);
+        // When the first thing not aired yet was recorded.
+        let edge = self.entry(cut).map_or(now, |e| e.arrival);
+        self.newest_sync_arrived_by(edge.checked_sub(delay))
+    }
+
+    /// Whether a Rewind dump now would replay (see [`Engine::dump`]); not if it
+    /// would be refused for want of a delay.
+    pub(crate) fn dump_would_replay(&self, now: Time) -> bool {
+        self.out.started
+            && self.out.end_mark.is_none()
+            && self.ingest_active
+            && self.dump_delay() >= 500 * MS
+            && self.replay_from(now, self.dump_delay()).is_some()
+    }
+
     /// For a dump: throws away what has not aired and replays the stretch that
     /// aired before it, which lasts until what is recorded from now on is `delay`
     /// old. Returns false, changing nothing, if the buffer does not reach back
     /// far enough.
     fn replay_instead(&mut self, now: Time, delay: u64) -> bool {
-        if !self.config.keep_history {
-            return false;
-        }
-        let cut = self.out.next_seq.max(self.base_seq);
-        // When the first thing not aired yet was recorded.
-        let edge = self.entry(cut).map_or(now, |e| e.arrival);
-        // At least `delay` before it, so the replay keeps the delay too.
-        let Some(k) = self.newest_sync_arrived_by(edge.checked_sub(delay)) else {
+        let Some(k) = self.replay_from(now, delay) else {
             return false;
         };
+        let cut = self.out.next_seq.max(self.base_seq);
         // Cut the rest off the buffer. What is recorded next reuses its sequence
         // numbers: nothing refers to them, since none of it was ever sent.
         let keep = (cut - self.base_seq) as usize;

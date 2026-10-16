@@ -14,6 +14,10 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- During a dump's replay, the dock could say a second dump would replay the
+  last stretch too when the buffer did not reach back far enough for it, and
+  the slate or the last frame followed instead. stream-delay now says which it
+  will be (`dump_replays` in the state).
 - Soon after the encoder reconnected, the last frame that aired can still be
   from before. A dump that held it, then a new destination connection during
   the hold, sent it without its decoder configuration: the picture could not be

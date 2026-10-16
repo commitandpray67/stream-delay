@@ -22,6 +22,7 @@ function ending(): RelayState {
       memory_short: false,
       excess_ms: 0,
       full_delay_ready: false,
+      dump_replays: false,
       ingest: {
         active: false,
         video_codec: "avc",

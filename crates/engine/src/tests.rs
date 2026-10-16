@@ -2337,6 +2337,75 @@ fn id_of_input(s: &Sim, i: &InputInfo) -> u32 {
 }
 
 #[test]
+fn the_snapshot_says_whether_a_rewind_dump_would_replay() {
+    // While a dump's replay runs, the output is further behind than the delay
+    // the snapshot shows, so a second dump needs more of the buffer to replay.
+    // Whether it does is the engine's to say: the dock shows it beforehand.
+    let mut outcomes = [false; 2];
+    let mut dock_was_wrong = false;
+    for wait_ms in (0..=10_000).step_by(500) {
+        let run = || {
+            let mut s = Sim::new(config());
+            s.connect();
+            s.advance(10 * SEC);
+            s.cmd(Command::SetDelay {
+                ms: 8_000,
+                mode: DelayMode::Rewind,
+            });
+            s.advance(12 * SEC);
+            let first = s.cmd(Command::Dump {
+                mode: DelayMode::Rewind,
+                cover: true,
+            });
+            assert_eq!(first.dump, Some(DumpOutcome::Replay));
+            s.advance(wait_ms * MS);
+            s
+        };
+        let snap = run().snapshot();
+        let ack = run().cmd(Command::Dump {
+            mode: DelayMode::Rewind,
+            cover: true,
+        });
+        let replays = ack.dump == Some(DumpOutcome::Replay);
+        assert_eq!(
+            snap.dump_replays, replays,
+            "{wait_ms} ms after the first dump"
+        );
+        outcomes[usize::from(replays)] = true;
+        // What the dock worked out from the rest of the snapshot.
+        dock_was_wrong |= !replays && snap.history_ms >= snap.effective_ms + snap.target_ms + 2_000;
+    }
+    assert_eq!(outcomes, [true, true], "both outcomes were tried");
+    assert!(dock_was_wrong, "the case the dock got wrong was tried");
+
+    // Before anything has aired, nothing replays.
+    let mut s = Sim::new(config());
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.connect();
+    s.advance(5 * SEC);
+    assert!(!s.snapshot().dump_replays);
+    // Nor without the rolling buffer.
+    let mut s = Sim::new(EngineConfig {
+        keep_history: false,
+        ..config()
+    });
+    s.cmd(Command::SetDelay {
+        ms: 10_000,
+        mode: DelayMode::Rewind,
+    });
+    s.connect();
+    s.advance(60 * SEC);
+    assert!(!s.snapshot().dump_replays);
+    // With plenty of it, it does.
+    let mut s = dump_sim(config());
+    s.advance(60 * SEC);
+    assert!(s.snapshot().dump_replays);
+}
+
+#[test]
 fn a_rewind_dump_uses_the_slate_without_enough_history() {
     // Not enough of the stream yet to replay the delay's worth before the dump.
     let mut s = Sim::new(config());

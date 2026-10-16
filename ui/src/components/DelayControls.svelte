@@ -42,11 +42,10 @@
   const dumpDelayMs = $derived(snap ? (snap.target_ms > 0 ? snap.target_ms : snap.effective_ms) : 0);
   const canDump = $derived(streaming && !ending && dumpDelayMs >= 500);
   // A dump replays the stretch before what it throws away, if the buffer reaches
-  // back that far; otherwise the slate covers the stream while the delay
+  // back that far (stream-delay says: during a replay that is further than the
+  // delay shows); otherwise the slate covers the stream while the delay
   // rebuilds, if an overlay shows it; otherwise the last frame holds.
-  const dumpReplays = $derived(
-    !!snap && keepBuffer && effectiveMode === "rewind" && snap.history_ms >= snap.effective_ms + dumpDelayMs + 2000,
-  );
+  const dumpReplays = $derived(!!snap && keepBuffer && effectiveMode === "rewind" && snap.dump_replays);
   // Only an overlay OBS said is on stream can cover a dump. After OBS starts
   // it has not said so yet, until the overlay is hidden and shown once.
   const canCover = $derived((live.activeOverlays ?? 0) > 0);

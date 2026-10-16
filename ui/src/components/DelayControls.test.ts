@@ -35,6 +35,9 @@ function state(target_s: number, history_s: number, delay: Partial<Snapshot> = {
       memory_short: false,
       excess_ms: 0,
       full_delay_ready: false,
+      // As stream-delay works it out with the delay steady: back past what a
+      // dump throws away, and as far again for the replay.
+      dump_replays: history_s >= 2 * target_s + 2,
       ingest: {
         active: true,
         video_codec: "avc",
@@ -220,6 +223,14 @@ describe("dump", () => {
     // Without the rolling buffer every change is masked: never a replay.
     expect(await expected(state(30, 120), onStream, { keep_buffer: false })).toBe(
       `${t("action.dump.slate", { delay: "30 s" })} ${t("action.dump.slate.muted")}`,
+    );
+    // stream-delay says whether the buffer reaches back far enough. While a
+    // dump's replay airs, the output is further behind than the delay shows.
+    expect(await expected(state(30, 120, { dump_replays: false }), onStream)).toBe(
+      `${t("action.dump.slate", { delay: "30 s" })} ${t("action.dump.slate.muted")}`,
+    );
+    expect(await expected(state(30, 61, { dump_replays: true }), none)).toBe(
+      t("action.dump.replay", { delay: "30 s" }),
     );
   });
 
