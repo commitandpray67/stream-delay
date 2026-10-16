@@ -19,6 +19,29 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-16 — Areas 4 and 6: a browser walkthrough before 0.3.3
+
+The dashboard, dock and overlay were driven in Chromium against a running
+`streamdelayd`, with ffmpeg as the encoder and as the destination, and the
+overlay page treated as OBS shows it on stream. Saving a key on the Setup
+tab, the start delay's label, a hotkey clash being refused, a dump that
+replays, a dump the slate covers, and the cache headers of the favicon and
+of fingerprinted assets all did what the docs say. With `--dest` naming
+another server, and with the same server and a query, saving the Setup tab
+unchanged kept the saved key, and a key for this run's destination (in the
+key field or in the URL) was refused, naming `STREAMDELAY_KEY`, with the
+saved key unchanged.
+
+One real finding, fixed in 555bf51 with tests that failed first: during a
+dump's replay the output is further behind than `effective_ms`, and the
+dock's guess from `history_ms` said a second dump would replay when the
+buffer did not reach back far enough, so the slate followed. The engine now
+reports `dump_replays`, worked out as the dump does, and the dock shows it.
+Against the daemon: 3 s into a replay the state said no and the dump was
+covered (the old guess said replay); at 5.5 s it said yes and the dump
+replayed. It turns about 4.2 s in; the state is published every 250 ms, so a
+dump within that of the turn can replay though the dock said it would not.
+
 ### 2026-10-12 — Area 7 (weekly): an older image could take `latest`
 
 The first pass read every workflow, the release scripts and their tests,
