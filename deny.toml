@@ -15,12 +15,12 @@ ignore = [
     { id = "RUSTSEC-2025-0081", reason = "unic-* via urlpattern (Tauri), unmaintained, no known vulnerability" },
     { id = "RUSTSEC-2025-0098", reason = "unic-* via urlpattern (Tauri), unmaintained, no known vulnerability" },
     { id = "RUSTSEC-2025-0100", reason = "unic-* via urlpattern (Tauri), unmaintained, no known vulnerability" },
-    # Yanked on 2026-10-14 with every zip release but 9.0.3, after symlink
-    # extraction fixes in 9.0.x. tauri-plugin-updater (2.14.0, the latest)
-    # still needs zip 4, on Windows only, to unpack .zip updates; ours are the
-    # installers themselves (createUpdaterArtifacts = true), signature-checked
-    # before use. Remove once tauri-plugin-updater moves to zip 9.
-    { crate = "zip@4.6.1", reason = "yanked; no zip 4 release is left, and the updater does not unpack ours (see above)" },
+    # zbus 5's own crates, superseded by zbus 6. Tauri's plugins (notification,
+    # opener, single instance) use zbus 5 on Linux to talk to the desktop over
+    # D-Bus, up to their latest releases. Revisit when they move to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via zbus 5 (Tauri plugins, Linux D-Bus), unmaintained, no known vulnerability" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via zbus 5 (Tauri plugins, Linux D-Bus), unmaintained, no known vulnerability" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via zbus 5 (Tauri plugins, Linux D-Bus), unmaintained, compile-time only" },
 ]
 
 [licenses]

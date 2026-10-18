@@ -11,6 +11,11 @@ All notable changes to stream-delay are listed here. The format follows
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346 and RUSTSEC-2026-0347.
   Neither affected stream-delay, which never logs TLS session values and does
   not use Encrypted Client Hello.
+- The desktop app's updater no longer contains the code that unpacks zip
+  archives, which had RUSTSEC-2026-0367, RUSTSEC-2026-0368 and
+  RUSTSEC-2026-0369. It could not reach them: it unpacked only an update whose
+  signature had been checked, and stream-delay's updates are the installers
+  themselves, not zip archives.
 
 ### Fixed
 

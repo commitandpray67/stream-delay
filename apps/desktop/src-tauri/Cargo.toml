@@ -23,7 +23,11 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
-tauri-plugin-updater = "2"
+# Without "zip": that only unpacks .zip (Windows) and .tar.gz (Linux) update
+# bundles, and ours are the installers and the AppImage themselves
+# (createUpdaterArtifacts = true in the release build). macOS's .app.tar.gz is
+# unpacked whatever the features.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
