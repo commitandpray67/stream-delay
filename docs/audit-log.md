@@ -19,6 +19,31 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-19 — Area 3 (weekly): nothing
+
+Nothing in `crates/relay` changed since the last pass (2026-10-07). A full
+read of `core.rs`, `egress.rs`, `ingest.rs`, `lifecycle.rs`, `lib.rs`,
+`io.rs`, `sendq.rs` and `heap.rs` found nothing real. Looked at closely:
+
+- A dump's seam with the egress: what is queued while the dump waits, the
+  dump number every message carries, a write the dump interrupts (left out
+  of what counts as delivered), the answer coming before the disconnection
+  it causes, and that the delivered message is never past the last written,
+  so the disconnection cannot move the output into sequence numbers the dump
+  gave to what is recorded next.
+- Over RTMPS, what the OS holds is counted in TLS bytes and what was written
+  in RTMP bytes: the difference only makes a dump count less as delivered.
+- Ingest before a publish is accepted: handshake and publish deadlines,
+  slots per address and overall, wrong keys slowed and never locked out,
+  text from the client shortened and kept on one line.
+- The lifecycle's transitions for End stream with no connection running, a
+  new destination while a restart waits for the previous end, and an encoder
+  within its grace period.
+
+The relay's tests passed, and the lifecycle property test passed at 20 000
+cases. The one ignored test connects to Twitch and YouTube, which the nightly
+Real destinations workflow does.
+
 ### 2026-10-16 — Areas 4 and 6: a browser walkthrough before 0.3.3
 
 The dashboard, dock and overlay were driven in Chromium against a running
