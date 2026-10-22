@@ -18,9 +18,19 @@ All notable changes to stream-delay are listed here. The format follows
   RUSTSEC-2026-0369. It could not reach them: it unpacked only an update whose
   signature had been checked, and stream-delay's updates are the installers
   themselves, not zip archives.
+- rustls-webpki is updated to 0.103.16, and webpki-roots and webpki-root-certs
+  to 1.0.10, for RUSTSEC-2026-0381, RUSTSEC-2026-0382 and RUSTSEC-2026-0383:
+  over RTMPS, a certificate issued through distrusted emSign intermediates,
+  whose private keys are now known, could pass for the destination's. Someone
+  able to intercept the connection could have received the stream and its
+  stream key.
 
 ### Fixed
 
+- With `delay.after_reconnect` set to `"restore"`, after Cancel while there was
+  no delay (on a change started from none, say), a destination outage could
+  leave the stream up to a keyframe interval behind live for good, with the
+  delay shown as none. Cancel keeping less than half a second now keeps none.
 - During a dump's replay, the dock could say a second dump would replay the
   last stretch too when the buffer did not reach back far enough for it, and
   the slate or the last frame followed instead. stream-delay now says which it
