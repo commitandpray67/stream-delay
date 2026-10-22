@@ -1005,8 +1005,11 @@ impl Engine {
                 self.set_pending(Pending::None);
                 // An outage during the change can have taken the delay past the
                 // maximum (the change put off coming back to it): it comes back
-                // now, at the next keyframe.
-                self.out.target = self.out.delay.min(self.config.max_delay_ms * MS);
+                // now, at the next keyframe. Under half a second is live, as the
+                // phase says: no delay, to which an outage goes back by going
+                // live, not to a keyframe up to an interval back.
+                let delay = self.out.delay.min(self.config.max_delay_ms * MS);
+                self.out.target = if delay < 500 * MS { 0 } else { delay };
                 if self.out.started {
                     self.back_under_max();
                 }

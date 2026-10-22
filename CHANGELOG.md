@@ -25,6 +25,10 @@ All notable changes to stream-delay are listed here. The format follows
 
 ### Fixed
 
+- With `delay.after_reconnect` set to `"restore"`, after Cancel while there was
+  no delay (on a change started from none, say), a destination outage could
+  leave the stream up to a keyframe interval behind live for good, with the
+  delay shown as none. Cancel keeping less than half a second now keeps none.
 - During a dump's replay, the dock could say a second dump would replay the
   last stretch too when the buffer did not reach back far enough for it, and
   the slate or the last frame followed instead. stream-delay now says which it

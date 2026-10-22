@@ -3716,6 +3716,37 @@ fn restoring_after_a_reconnect_past_the_maximum_goes_to_the_delay_set() {
 }
 
 #[test]
+fn cancel_while_live_leaves_no_delay_to_come_back_to() {
+    // Cancel keeps the delay in effect. Live, that is a fraction of a second
+    // the output caught up by (here the destination connected late), which is
+    // no delay: set to go back to the delay after an outage, the output goes
+    // live, not to a keyframe up to an interval back.
+    let mut s = Sim::new(EngineConfig {
+        max_delay_ms: 60_000,
+        restore_after_reconnect: true,
+        ..config()
+    });
+    s.jitter = 9;
+    s.advance(1981 * MS);
+    s.connect();
+    s.advance(5 * SEC);
+    assert_eq!(s.snapshot().phase, Phase::Live);
+    assert!(s.e.out.delay > 0, "the output caught up by nothing");
+    s.cmd(Command::Cancel);
+    assert_eq!(s.e.out.target, 0, "a delay kept while live");
+    for down in [1_500 * MS, 13 * SEC] {
+        let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+        s.e.output_disconnected(s.now, last);
+        s.advance(down);
+        s.connect();
+    }
+    s.advance(10 * SEC);
+    let snap = s.snapshot();
+    assert_eq!(snap.phase, Phase::Live, "{snap:?}");
+    assert_eq!(snap.target_ms, 0);
+}
+
+#[test]
 fn restoring_after_a_reconnect_without_a_delay_goes_live_again() {
     let (s, from) = reconnect_after(0, 10 * SEC, true);
     let snap = s.snapshot();
