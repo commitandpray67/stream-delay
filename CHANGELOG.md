@@ -6,7 +6,7 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
-## [0.3.3] - 2026-10-16
+## [0.3.3] - 2026-10-23
 
 ### Security
 
