@@ -19,6 +19,22 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-23 — Area 7: 0.3.3 released
+
+Tagged at 09ef2ff (the release branch, then main fast-forwarded to it). The
+release run passed every job: CI on the tagged commit, the signed builds, the
+draft's check and the install tests on Ubuntu 22.04, Ubuntu 24.04, Windows and
+macOS. `release-checks.txt` named that commit and run, and `SHA256SUMS.txt`
+matched it.
+
+A release made from the tag's page was published first, with no assets. The
+container image workflow refused it (no release checks, no checksums), so
+nothing was pushed, but while it was the latest release, installed copies
+found no `latest.json`. It was deleted and the draft published: `latest.json`
+then offered 0.3.3 to every platform from the v0.3.3 assets, and the image
+was pushed. Before the tag, this code had the nightly 2-hour soak and 5,000
+property-test cases, both passed; not the 12-hour soak.
+
 ### 2026-10-19 — Area 3 (weekly): nothing
 
 Nothing in `crates/relay` changed since the last pass (2026-10-07). A full
