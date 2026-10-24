@@ -6,6 +6,11 @@ All notable changes to stream-delay are listed here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- tokio is updated to 1.53.3 for RUSTSEC-2026-0386: `AsyncFd`'s constructors
+  could break I/O safety. stream-delay does not use `AsyncFd`.
+
 ## [0.3.3] - 2026-10-23
 
 ### Security
