@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 streamdelay-rtmp.workspace = true
 streamdelay-engine.workspace = true
+streamdelay-flv.workspace = true
 bytes.workspace = true
 serde.workspace = true
 thiserror.workspace = true

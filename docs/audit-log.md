@@ -19,6 +19,28 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-24 — Areas 2 and 3: HEVC under FFmpeg 8 (from CI)
+
+CI's end-to-end run with HEVC failed when `ubuntu-latest` moved to Ubuntu
+26.04 and FFmpeg 8: "Duplicate POC in a sequence", 4 times, every run. Each
+copy of a held keyframe after the first is a BLA with the same picture order
+count, and FFmpeg 8 checks a new picture against the reference pictures it
+holds before a BLA lets go of them. Released versions have it with such
+decoders; FFmpeg 6.1 (Ubuntu 24.04's) counts sequences and does not.
+
+Fixed, with tests that failed first: the relay's writer now renumbers a new
+sequence that would repeat a number held (`crates/flv/src/hevc/poc.rs`, see
+the ADR 0003 amendment). Unit tests with written parameter sets and slices
+(sub-layers, scaling lists, predicted reference picture sets, several slice
+segments, an end of sequence, wrapping numbers), real x265 headers, and a
+relay test over RTMPS. Checked by hand: x265 streams with several slices,
+B-pyramids, 10-bit, 4:4:4, 1080p and parameter sets in band, given a hold
+and a splice, decode under FFmpeg 8 with errors and dropped frames before,
+none after; with nothing to renumber they come out unchanged. The engine
+simulator gained an HEVC mode (IDR, then CRA keyframes) for its random
+operations, which checks that an unconverted CRA only follows what it
+continues.
+
 ### 2026-10-23 — Area 7: 0.3.3 released
 
 Tagged at 09ef2ff (the release branch, then main fast-forwarded to it). The

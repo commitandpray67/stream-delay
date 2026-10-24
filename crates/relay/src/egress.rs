@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use streamdelay_engine::{Kind, OutMsg};
+use streamdelay_flv::hevc::PocGuard;
 use streamdelay_rtmp::RtmpUrl;
 use streamdelay_rtmp::amf0::Amf0Value;
 use streamdelay_rtmp::session::{ClientConfig, ClientEvent, ClientSession, MediaKind};
@@ -276,6 +277,9 @@ pub(crate) async fn run(
 ) {
     let mut target: Option<Target> = None;
     let mut failures = Failures::default();
+    // What the destination's decoder holds, across connections: a decoder
+    // that starts again with a new one holds less, never more.
+    let mut pocs = PocGuard::new();
     loop {
         let Some(t) = target.clone() else {
             // Idle: wait for a start request, discarding anything stale.
@@ -392,6 +396,7 @@ pub(crate) async fn run(
             &mut media,
             &events,
             &counters,
+            &mut pocs,
         )
         .await;
         // A failed connection is reset: what the OS still holds for it is stale,
@@ -763,6 +768,7 @@ async fn publish(
     media: &mut mpsc::UnboundedReceiver<Queued>,
     events: &mpsc::UnboundedSender<Event>,
     counters: &Counters,
+    pocs: &mut PocGuard,
 ) -> (RunEnd, Option<u64>) {
     status(events, EgressStatus::Live, None);
     let (mut rd, mut wr): (ReadHalf<BoxStream>, WriteHalf<BoxStream>) = tokio::io::split(stream);
@@ -858,7 +864,13 @@ async fn publish(
                     let m = q.msg;
                     match m.kind {
                         Kind::Audio => session.send_media(MediaKind::Audio, m.timestamp, &m.payload),
-                        Kind::Video => session.send_media(MediaKind::Video, m.timestamp, &m.payload),
+                        Kind::Video => {
+                            // Pictures renumbered where a decoder would see a
+                            // number twice.
+                            let renumbered = pocs.video(&m.payload);
+                            let payload = renumbered.as_deref().unwrap_or(&m.payload);
+                            session.send_media(MediaKind::Video, m.timestamp, payload)
+                        }
                         Kind::Data => session.send_data(m.timestamp, &m.payload),
                     }
                     if m.seq.is_some() {
@@ -928,6 +940,7 @@ mod tests {
                     &mut media_rx,
                     &events_tx,
                     &c,
+                    &mut PocGuard::new(),
                 )
                 .await
             });
@@ -955,6 +968,26 @@ mod tests {
                 .send(Queued {
                     generation: 1,
                     cut,
+                    msg,
+                })
+                .unwrap();
+        }
+
+        /// Queues video message `seq`.
+        fn video(&self, seq: u64, payload: Bytes) {
+            self.counters
+                .backlog
+                .fetch_add(payload.len() as u64, Ordering::Relaxed);
+            let msg = OutMsg {
+                kind: Kind::Video,
+                timestamp: seq as u32 * 33,
+                payload,
+                seq: Some(seq),
+            };
+            self.media
+                .send(Queued {
+                    generation: 1,
+                    cut: 0,
                     msg,
                 })
                 .unwrap();
@@ -1065,9 +1098,15 @@ mod tests {
     impl Destination {
         /// Reads until `count` media messages have come; returns their sizes.
         async fn media(&mut self, count: usize) -> Vec<usize> {
-            let mut sizes = Vec::new();
+            let payloads = self.payloads(count).await;
+            payloads.iter().map(Bytes::len).collect()
+        }
+
+        /// Reads until `count` media messages have come.
+        async fn payloads(&mut self, count: usize) -> Vec<Bytes> {
+            let mut payloads = Vec::new();
             let mut buf = vec![0u8; 64 * 1024];
-            while sizes.len() < count {
+            while payloads.len() < count {
                 let n = tokio::time::timeout(Duration::from_secs(5), self.tls.read(&mut buf))
                     .await
                     .expect("no media came")
@@ -1075,11 +1114,11 @@ mod tests {
                 assert!(n > 0, "the relay closed the connection");
                 for ev in self.session.feed(&buf[..n]).unwrap() {
                     if let ServerEvent::Media { payload, .. } = ev {
-                        sizes.push(payload.len());
+                        payloads.push(payload);
                     }
                 }
             }
-            sizes
+            payloads
         }
     }
 
@@ -1169,6 +1208,71 @@ mod tests {
             Err(f) => assert!(f.message.contains("TLS handshake failed"), "{}", f.message),
         }
         assert!(destination.await.unwrap().is_none());
+    }
+
+    /// Decoder configuration and two pictures from x265 3.5: its first IDR, and
+    /// its first CRA (as a splice or a hold sends it: as a BLA). The slices are
+    /// cut short after their headers.
+    fn hevc_messages() -> [Bytes; 3] {
+        let hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let mut config = vec![0x90, b'h', b'v', b'c', b'1'];
+        config.extend(hex("0101600000009000000000005df000fcfdf8f800000f03"));
+        for nal in [
+            "40010c01ffff01600000030090000003000003003f959809",
+            "42010101600000030090000003000003003fa00502016965959a4932bc05a020000003002000000303c1",
+            "4401c172b46240",
+        ] {
+            let nal = hex(nal);
+            config.extend([0x80 | (nal[0] >> 1), 0, 1]);
+            config.extend((nal.len() as u16).to_be_bytes());
+            config.extend(nal);
+        }
+        let frame = |nal: &str| {
+            let nal = hex(nal);
+            let mut v = vec![0x1c, 1, 0, 0, 0];
+            v.extend((nal.len() as u32).to_be_bytes());
+            v.extend(nal);
+            Bytes::from(v)
+        };
+        [
+            Bytes::from(config),
+            frame(
+                "2801af084c31854fe8a995fe3e6063fb4d7681ad304a619790cb9a615311ab52b4288c4802f26728",
+            ),
+            // CRA_NUT (21) made BLA_W_LP (16).
+            frame(
+                "2001acf05948c9c70c31548388839f8b86a0b0ac095c515fff3c138f431b993fd6ac430c11d697a4",
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_held_hevc_keyframe_sent_again_is_renumbered() {
+        let (client_tls, server_tls) = test_tls();
+        let (target, destination) = rtmps_destination(server_tls, None, false).await;
+        let (stream, session, aborter) = connect_rtmps(&target, client_tls).await;
+        let mut far = destination.await.unwrap().unwrap();
+        let mut p = Publishing::start_with(stream, session, aborter);
+        let [config, idr, held] = hevc_messages();
+        let sent = [config, idr, held.clone(), held.clone(), held.clone()];
+        for (seq, payload) in sent.iter().enumerate() {
+            p.video(seq as u64 + 1, payload.clone());
+        }
+        let got = far.payloads(sent.len()).await;
+        // The decoder still holds the first copy when the second comes: that
+        // one is renumbered (its order count goes from 60 to 61). The third
+        // may have 60 again.
+        assert_eq!(got[..3], sent[..3]);
+        assert_ne!(got[3], held);
+        assert_eq!(got[3].len(), held.len());
+        assert_eq!(got[4], held);
+        p.ctl.send(EgressCtl::Stop).unwrap();
+        assert!(matches!(p.ended().await, RunEnd::Stopped));
     }
 
     /// Twitch's and YouTube's RTMPS ingest, with a key they refuse (nothing is

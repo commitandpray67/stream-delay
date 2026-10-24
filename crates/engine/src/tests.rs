@@ -56,6 +56,9 @@ struct Sim {
     /// How far behind its video, in ms, the encoder sends audio: an audio
     /// frame arrives this long after its timestamp says.
     audio_lag: u64,
+    /// Video as HEVC over enhanced RTMP, with open GOPs like x265's: an IDR
+    /// starts each session, and the keyframes after it are CRAs.
+    hevc: bool,
 }
 
 fn payload(prefix: &[u8], id: u32) -> Bytes {
@@ -63,6 +66,34 @@ fn payload(prefix: &[u8], id: u32) -> Bytes {
     b.put_slice(prefix);
     b.put_u32(id);
     b.freeze()
+}
+
+/// HEVC NAL unit types the simulator sends that the flv crate does not name.
+const IDR_N_LP: u8 = 20;
+const TRAIL_R: u8 = 1;
+
+/// The NAL unit type of the first NAL unit of an HEVC frame over enhanced
+/// RTMP (see [`hevc_cts`]); `None` for anything else.
+fn hevc_nal(p: &[u8]) -> Option<u8> {
+    if p.len() < 5 || p[0] & 0x80 == 0 || &p[1..5] != b"hvc1" {
+        return None;
+    }
+    let at = match p[0] & 0x0f {
+        1 => 12,
+        3 => 9,
+        _ => return None,
+    };
+    p.get(at).map(|b| (b >> 1) & 0x3f)
+}
+
+/// Decoder configuration: an AVC or AAC sequence header, or enhanced RTMP's
+/// sequence start for video.
+fn is_config(kind: Kind, p: &[u8]) -> bool {
+    match p.first() {
+        Some(b) if kind == Kind::Video && b & 0x80 != 0 => b & 0x0f == 0,
+        Some(_) => p.get(1) == Some(&0x00),
+        None => false,
+    }
 }
 
 fn id_of(p: &[u8]) -> Option<u32> {
@@ -75,6 +106,11 @@ fn id_of(p: &[u8]) -> Option<u32> {
 
 impl Sim {
     fn new(config: EngineConfig) -> Self {
+        Self::with_video(config, false)
+    }
+
+    /// With `hevc`, video as HEVC (see [`Sim::hevc`]).
+    fn with_video(config: EngineConfig, hevc: bool) -> Self {
         let mut s = Self {
             e: Engine::new(config),
             now: 1_000 * SEC,
@@ -96,6 +132,7 @@ impl Sim {
             budget: None,
             bframes: false,
             audio_lag: 0,
+            hevc,
         };
         s.start_encoder(0);
         s
@@ -112,7 +149,16 @@ impl Sim {
         let meta = rtmp_meta();
         self.e.ingest_metadata(self.now, meta);
         // Decoder configuration comes first, like OBS.
-        self.push(Kind::Video, ts_base, &[0x17, 0x00, 0, 0, 0, 0x01], false);
+        if self.hevc {
+            self.push(
+                Kind::Video,
+                ts_base,
+                &[0x90, b'h', b'v', b'c', b'1', 0x01],
+                false,
+            );
+        } else {
+            self.push(Kind::Video, ts_base, &[0x17, 0x00, 0, 0, 0, 0x01], false);
+        }
         self.push(Kind::Audio, ts_base, &[0xaf, 0x00, 0x11, 0x90], false);
     }
 
@@ -122,9 +168,21 @@ impl Sim {
     }
 
     fn push(&mut self, kind: Kind, ts: u64, prefix: &[u8], counted: bool) {
+        let keyframe = kind == Kind::Video && prefix[0] == 0x17 && prefix[1] == 0x01;
+        self.push_payload(kind, ts, keyframe, counted, |id| payload(prefix, id));
+    }
+
+    /// Records the message `make` builds from its id.
+    fn push_payload(
+        &mut self,
+        kind: Kind,
+        ts: u64,
+        keyframe: bool,
+        counted: bool,
+        make: impl FnOnce(u32) -> Bytes,
+    ) {
         let id = self.next_id;
         self.next_id += 1;
-        let keyframe = kind == Kind::Video && prefix[0] == 0x17 && prefix[1] == 0x01;
         let index = if kind == Kind::Video {
             self.video_index
         } else {
@@ -143,7 +201,7 @@ impl Sim {
                 },
             );
         }
-        self.e.ingest(self.now, kind, ts, payload(prefix, id));
+        self.e.ingest(self.now, kind, ts, make(id));
     }
 
     fn connect(&mut self) {
@@ -190,9 +248,20 @@ impl Sim {
                 } else {
                     0
                 };
-                let [_, c0, c1, c2] = (cts as u32).to_be_bytes();
-                let prefix = [if key { 0x17 } else { 0x27 }, 0x01, c0, c1, c2];
-                self.push(Kind::Video, ts, &prefix, true);
+                if self.hevc {
+                    let nal = match (key, self.video_index) {
+                        (true, 0) => IDR_N_LP,
+                        (true, _) => flv::hevc::CRA,
+                        (false, _) => TRAIL_R,
+                    };
+                    self.push_payload(Kind::Video, ts, key, true, |id| {
+                        hevc_cts(key, nal, cts as u32, id)
+                    });
+                } else {
+                    let [_, c0, c1, c2] = (cts as u32).to_be_bytes();
+                    let prefix = [if key { 0x17 } else { 0x27 }, 0x01, c0, c1, c2];
+                    self.push(Kind::Video, ts, &prefix, true);
+                }
                 self.video_index += 1;
                 self.next_video = self.now + FRAME_MS * MS + (self.video_index % 3) * self.jitter;
             }
@@ -313,6 +382,18 @@ impl Sim {
                 assert!(
                     continuous || info.keyframe,
                     "splice to a non-keyframe (video index {})",
+                    info.index
+                );
+                // 6. HEVC: an open-GOP keyframe (CRA) goes out as it is only
+                //    right after the frame recorded before it. After any break
+                //    (a splice, a held frame, a new session) it is marked as a
+                //    new start (BLA): decoders otherwise number its pictures on
+                //    from what they decoded before, and can see one twice.
+                assert!(
+                    hevc_nal(&s.msg.payload) != Some(flv::hevc::CRA)
+                        || last_video.is_none()
+                        || continuous,
+                    "CRA sent as it is after a break (video index {})",
                     info.index
                 );
                 if let Some(prev) = last_video_ts {
@@ -2608,117 +2689,186 @@ proptest! {
         bframes in any::<bool>(),
         audio_lag in prop_oneof![Just(0u64), 1u64..80],
     ) {
-        let mut s = Sim::new(EngineConfig {
+        random_operations(ops, audio, jitter, keep_history, restore_after_reconnect, bframes, audio_lag, false)?;
+    }
+
+    /// The same with HEVC, in open GOPs like x265's.
+    #[test]
+    fn invariants_hold_under_random_operations_with_hevc(
+        ops in prop::collection::vec(op(), 1..25),
+        audio in any::<bool>(),
+        jitter in 0u64..4_000,
+        keep_history in any::<bool>(),
+        restore_after_reconnect in any::<bool>(),
+        bframes in any::<bool>(),
+        audio_lag in prop_oneof![Just(0u64), 1u64..80],
+    ) {
+        random_operations(ops, audio, jitter, keep_history, restore_after_reconnect, bframes, audio_lag, true)?;
+    }
+}
+
+/// Runs `ops` on a simulated stream (HEVC with `hevc`), then checks that every
+/// connection's output keeps the invariants and that nothing dumped airs.
+#[allow(clippy::too_many_arguments)]
+fn random_operations(
+    ops: Vec<Op>,
+    audio: bool,
+    jitter: u64,
+    keep_history: bool,
+    restore_after_reconnect: bool,
+    bframes: bool,
+    audio_lag: u64,
+    hevc: bool,
+) -> Result<(), TestCaseError> {
+    let mut s = Sim::with_video(
+        EngineConfig {
             max_delay_ms: 60_000,
             keep_history,
             restore_after_reconnect,
             ..Default::default()
-        });
-        s.audio = audio;
-        s.jitter = jitter;
-        s.bframes = bframes;
-        s.audio_lag = audio_lag;
-        s.next_audio = s.now + audio_lag * MS;
-        s.connect();
-        s.advance(5 * SEC);
-        // (index into `sent`, what had not aired) for each dump.
-        let mut dumps = Vec::new();
-        // Where each destination connection starts in `sent`.
-        let mut connections = vec![0];
-        for op in ops {
-            match op {
-                Op::Wait(ms) => s.advance(ms * MS),
-                Op::Rewind(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Rewind }); }
-                Op::Mask(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Mask }); }
-                Op::GoLive => { s.cmd(Command::GoLive(GoLiveWhen::Now)); }
-                Op::AfterAir => { s.cmd(Command::GoLive(GoLiveWhen::AfterAir)); }
-                Op::Reduce(sec) => { s.cmd(Command::SetDelay { ms: sec * 1000, mode: DelayMode::Rewind }); }
-                Op::Cancel => { s.cmd(Command::Cancel); }
-                Op::ConfirmSlate => s.confirm_slate(),
-                Op::Dump(mode, cover) => {
-                    let waiting = unaired(&s);
-                    if let Ok(ack) = s.e.command(s.now, Command::Dump { mode, cover }) {
-                        // Only the slate lets what is recorded next air sooner.
-                        if ack.dump == Some(DumpOutcome::Cover) {
-                            prop_assert!(cover);
-                            s.floor = 0;
-                        }
-                        s.floor_log.push((s.sent.len(), s.floor));
-                        dumps.push((s.sent.len(), waiting));
+        },
+        hevc,
+    );
+    s.audio = audio;
+    s.jitter = jitter;
+    s.bframes = bframes;
+    s.audio_lag = audio_lag;
+    s.next_audio = s.now + audio_lag * MS;
+    s.connect();
+    s.advance(5 * SEC);
+    // (index into `sent`, what had not aired) for each dump.
+    let mut dumps = Vec::new();
+    // Where each destination connection starts in `sent`.
+    let mut connections = vec![0];
+    for op in ops {
+        match op {
+            Op::Wait(ms) => s.advance(ms * MS),
+            Op::Rewind(sec) => {
+                s.cmd(Command::SetDelay {
+                    ms: sec * 1000,
+                    mode: DelayMode::Rewind,
+                });
+            }
+            Op::Mask(sec) => {
+                s.cmd(Command::SetDelay {
+                    ms: sec * 1000,
+                    mode: DelayMode::Mask,
+                });
+            }
+            Op::GoLive => {
+                s.cmd(Command::GoLive(GoLiveWhen::Now));
+            }
+            Op::AfterAir => {
+                s.cmd(Command::GoLive(GoLiveWhen::AfterAir));
+            }
+            Op::Reduce(sec) => {
+                s.cmd(Command::SetDelay {
+                    ms: sec * 1000,
+                    mode: DelayMode::Rewind,
+                });
+            }
+            Op::Cancel => {
+                s.cmd(Command::Cancel);
+            }
+            Op::ConfirmSlate => s.confirm_slate(),
+            Op::Dump(mode, cover) => {
+                let waiting = unaired(&s);
+                if let Ok(ack) = s.e.command(s.now, Command::Dump { mode, cover }) {
+                    // Only the slate lets what is recorded next air sooner.
+                    if ack.dump == Some(DumpOutcome::Cover) {
+                        prop_assert!(cover);
+                        s.floor = 0;
                     }
-                    s.poll();
+                    s.floor_log.push((s.sent.len(), s.floor));
+                    dumps.push((s.sent.len(), waiting));
                 }
-                Op::DropOutput | Op::Outage(_) => {
-                    let down = match op {
-                        Op::Outage(sec) => sec * SEC,
-                        _ => 1_500 * MS,
-                    };
-                    let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
-                    s.e.output_disconnected(s.now, last);
-                    s.advance(down);
-                    // Restart invariant tracking for the new connection.
-                    connections.push(s.sent.len());
-                    s.connect();
-                }
-                Op::EncoderRestart => {
-                    s.stop_encoder();
-                    s.advance(700 * MS);
-                    s.start_encoder(0);
-                }
+                s.poll();
             }
-            // The mask splice raises the floor once it happens. A dump's replay
-            // shows what already aired again (the snapshot gives the delay it
-            // continues with): what it holds back is checked once it continues.
-            let snap = s.snapshot();
-            let replaying = matches!(s.e.out.pending, Pending::Replay { .. });
-            if !replaying && snap.phase == Phase::Delayed && snap.effective_ms * MS > s.floor && snap.target_ms * MS <= snap.effective_ms * MS {
-                s.floor = snap.target_ms * MS;
-                s.floor_log.push((s.sent.len(), s.floor));
+            Op::DropOutput | Op::Outage(_) => {
+                let down = match op {
+                    Op::Outage(sec) => sec * SEC,
+                    _ => 1_500 * MS,
+                };
+                let last = s.sent.iter().rev().find_map(|x| x.msg.seq);
+                s.e.output_disconnected(s.now, last);
+                s.advance(down);
+                // Restart invariant tracking for the new connection.
+                connections.push(s.sent.len());
+                s.connect();
+            }
+            Op::EncoderRestart => {
+                s.stop_encoder();
+                s.advance(700 * MS);
+                s.start_encoder(0);
             }
         }
-        // Once nothing more happens and no change is under way (one pending
-        // through outages keeps the delay they added until it is done), every
-        // frame airs: no keyframe group is lost to eviction and spliced over,
-        // however long the outages were.
-        s.advance(10 * SEC);
-        for _ in 0..60 {
-            if matches!(s.snapshot().phase, Phase::Live | Phase::Delayed | Phase::Offline) {
-                break;
-            }
-            s.advance(5 * SEC);
+        // The mask splice raises the floor once it happens. A dump's replay
+        // shows what already aired again (the snapshot gives the delay it
+        // continues with): what it holds back is checked once it continues.
+        let snap = s.snapshot();
+        let replaying = matches!(s.e.out.pending, Pending::Replay { .. });
+        if !replaying
+            && snap.phase == Phase::Delayed
+            && snap.effective_ms * MS > s.floor
+            && snap.target_ms * MS <= snap.effective_ms * MS
+        {
+            s.floor = snap.target_ms * MS;
+            s.floor_log.push((s.sent.len(), s.floor));
         }
-        // What the last operation did (an encoder restart, say) airs once the
-        // delay in effect has passed.
-        s.advance(s.snapshot().effective_ms * MS + 5 * SEC);
-        let (from, splices) = (s.sent.len(), s.snapshot().output.splices);
-        s.advance(20 * SEC);
-        if s.encoder_on {
-            prop_assert_eq!(s.snapshot().output.splices, splices, "{:?}", s.snapshot());
-            let video = s
-                .media_sent_in(from..s.sent.len())
-                .filter(|(_, _, i)| i.kind == Kind::Video)
-                .count();
-            prop_assert!(video > 20 * 1000 / (FRAME_MS + 3 * jitter / 1000) as usize - 30, "{video} frames");
+    }
+    // Once nothing more happens and no change is under way (one pending
+    // through outages keeps the delay they added until it is done), every
+    // frame airs: no keyframe group is lost to eviction and spliced over,
+    // however long the outages were.
+    s.advance(10 * SEC);
+    for _ in 0..60 {
+        if matches!(
+            s.snapshot().phase,
+            Phase::Live | Phase::Delayed | Phase::Offline
+        ) {
+            break;
         }
-        connections.push(s.sent.len());
-        for w in connections.windows(2) {
-            s.check_invariants_in(w[0]..w[1]);
-            // A connection gets the decoder configuration before any frame.
-            for kind in [Kind::Video, Kind::Audio] {
-                if let Some(first) = s.sent[w[0]..w[1]].iter().find(|x| x.msg.kind == kind) {
-                    prop_assert_eq!(first.msg.payload[1], 0x00, "{:?} before its configuration", kind);
-                }
-            }
-        }
-        // Nothing that had not aired by a dump ever airs after it.
-        for (index, waiting) in dumps {
-            for x in &s.sent[index..] {
-                if let Some(id) = id_of(&x.msg.payload) {
-                    prop_assert!(!waiting.contains(&id), "dumped content aired at {}", x.at);
-                }
+        s.advance(5 * SEC);
+    }
+    // What the last operation did (an encoder restart, say) airs once the
+    // delay in effect has passed.
+    s.advance(s.snapshot().effective_ms * MS + 5 * SEC);
+    let (from, splices) = (s.sent.len(), s.snapshot().output.splices);
+    s.advance(20 * SEC);
+    if s.encoder_on {
+        prop_assert_eq!(s.snapshot().output.splices, splices, "{:?}", s.snapshot());
+        let video = s
+            .media_sent_in(from..s.sent.len())
+            .filter(|(_, _, i)| i.kind == Kind::Video)
+            .count();
+        prop_assert!(
+            video > 20 * 1000 / (FRAME_MS + 3 * jitter / 1000) as usize - 30,
+            "{video} frames"
+        );
+    }
+    connections.push(s.sent.len());
+    for w in connections.windows(2) {
+        s.check_invariants_in(w[0]..w[1]);
+        // A connection gets the decoder configuration before any frame.
+        for kind in [Kind::Video, Kind::Audio] {
+            if let Some(first) = s.sent[w[0]..w[1]].iter().find(|x| x.msg.kind == kind) {
+                prop_assert!(
+                    is_config(kind, &first.msg.payload),
+                    "{:?} before its configuration",
+                    kind
+                );
             }
         }
     }
+    // Nothing that had not aired by a dump ever airs after it.
+    for (index, waiting) in dumps {
+        for x in &s.sent[index..] {
+            if let Some(id) = id_of(&x.msg.payload) {
+                prop_assert!(!waiting.contains(&id), "dumped content aired at {}", x.at);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Viewers get the delay asked for: live when that is 0, else no less (unless

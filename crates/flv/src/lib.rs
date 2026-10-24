@@ -1,8 +1,9 @@
 //! Read-only inspection of the audio/video message bodies carried over RTMP.
 //!
 //! Handles legacy FLV tags (AVC/AAC and friends) and Enhanced RTMP v1/v2 headers
-//! (FourCC codecs, ModEx, multitrack). Payloads are never modified: the relay only
-//! needs to know which messages are keyframes and which carry decoder configuration.
+//! (FourCC codecs, ModEx, multitrack). The relay mostly needs to know which
+//! messages are keyframes and which carry decoder configuration; [`hevc`] has
+//! the only rewrites, which splices and holds of HEVC need.
 
 use serde::Serialize;
 
@@ -48,10 +49,18 @@ pub struct VideoInfo {
     pub hevc_nal_type: Option<u8>,
     /// For HEVC: offset of the length-prefixed NAL unit data in the payload.
     pub nal_offset: Option<usize>,
+    /// For HEVC: offset of the decoder configuration record (`hvcC`) in a
+    /// configuration message.
+    pub config_offset: Option<usize>,
 }
 
-/// HEVC NAL unit types relevant to splicing (ITU-T H.265 table 7-1).
+/// HEVC NAL unit types relevant to splicing (ITU-T H.265 table 7-1), and the
+/// rewrites splices and holds need.
 pub mod hevc {
+    mod poc;
+
+    pub use poc::PocGuard;
+
     pub const RASL_N: u8 = 8;
     pub const RASL_R: u8 = 9;
     pub const CRA: u8 = 21;
@@ -243,6 +252,7 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
         composition_time: 0,
         hevc_nal_type: None,
         nal_offset: None,
+        config_offset: None,
     };
     if b0 & 0x80 == 0 {
         // Legacy FLV video tag.
@@ -268,6 +278,8 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
         };
         let nal_offset = (codec == VideoCodec::Hevc && packet_type == 1).then_some(r.pos);
         let hevc_nal_type = nal_offset.and_then(|o| first_hevc_vcl(payload.get(o..)?));
+        // After the (unused) composition time.
+        let config_offset = (codec == VideoCodec::Hevc && config).then_some(r.pos + 3);
         return Some(VideoInfo {
             codec,
             keyframe: ft == frame_type::KEY && packet_type == 1,
@@ -278,6 +290,7 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
             composition_time,
             hevc_nal_type,
             nal_offset,
+            config_offset,
         });
     }
 
@@ -324,6 +337,9 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
     );
     let nal_offset = (codec == VideoCodec::Hevc && coded && !multitrack).then_some(r.pos);
     let hevc_nal_type = nal_offset.and_then(|o| first_hevc_vcl(payload.get(o..)?));
+    let config_offset =
+        (codec == VideoCodec::Hevc && packet_type == video_packet::SEQUENCE_START && !multitrack)
+            .then_some(r.pos);
     Some(VideoInfo {
         codec,
         keyframe: ft == frame_type::KEY
@@ -338,6 +354,7 @@ pub fn inspect_video(payload: &[u8]) -> Option<VideoInfo> {
         composition_time,
         hevc_nal_type,
         nal_offset,
+        config_offset,
     })
 }
 
@@ -431,6 +448,23 @@ mod tests {
             inspect_video(&legacy).unwrap().hevc_nal_type,
             Some(hevc::RASL_N)
         );
+    }
+
+    #[test]
+    fn hevc_configuration_records() {
+        // Legacy codec id 12, after the composition time; enhanced, after the
+        // FourCC. Not for AVC, coded frames or multitrack.
+        let legacy = inspect_video(&[0x1c, 0x00, 0, 0, 0, 0x01]).unwrap();
+        assert_eq!(legacy.config_offset, Some(5));
+        let enhanced = inspect_video(&[0x90, b'h', b'v', b'c', b'1', 0x01]).unwrap();
+        assert_eq!(enhanced.config_offset, Some(5));
+        let avc = inspect_video(&[0x17, 0x00, 0, 0, 0, 0x01]).unwrap();
+        let coded = inspect_video(&[0x91, b'h', b'v', b'c', b'1', 0, 0, 0]).unwrap();
+        let multitrack = inspect_video(&[0x96, 0x00, b'h', b'v', b'c', b'1', 0, 0x01]).unwrap();
+        assert!(multitrack.config && multitrack.multitrack);
+        for i in [avc, coded, multitrack] {
+            assert_eq!(i.config_offset, None, "{i:?}");
+        }
     }
 
     #[test]

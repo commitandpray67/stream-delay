@@ -4678,6 +4678,7 @@ dependencies = [
  "serde",
  "socket2",
  "streamdelay-engine",
+ "streamdelay-flv",
  "streamdelay-rtmp",
  "subtle",
  "thiserror 2.0.20",
