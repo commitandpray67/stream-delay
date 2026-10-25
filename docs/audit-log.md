@@ -36,7 +36,11 @@ segments, an end of sequence, wrapping numbers), real x265 headers, and a
 relay test over RTMPS. Checked by hand: x265 streams with several slices,
 B-pyramids, 10-bit, 4:4:4, 1080p and parameter sets in band, given a hold
 and a splice, decode under FFmpeg 8 with errors and dropped frames before,
-none after; with nothing to renumber they come out unchanged. The engine
+none after; with nothing to renumber they come out unchanged. A splice made
+to land on the last held copy's number (a 200-second x265 stream, five
+copies) had the rest of the stream renumbered, 2,042 frames: FFmpeg 8
+decoded every frame, and FFmpeg 6.1 decoded the same frames, hash for hash,
+with and without the renumbering. The engine
 simulator gained an HEVC mode (IDR, then CRA keyframes) for its random
 operations, which checks that an unconverted CRA only follows what it
 continues.
