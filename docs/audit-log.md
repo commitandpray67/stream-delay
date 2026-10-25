@@ -19,6 +19,23 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-25 — Area 7: the soak streams HEVC too
+
+The nightly soak streamed H.264 only, so HEVC's rewritten splices and holds
+(CRA to BLA, and since 2026-10-24 renumbered picture order counts) never had
+hours of random dumps, reconnects and encoder crashes. `tests/soak/run.sh`
+now takes `VCODEC`, `VCODEC_ARGS` and `SIZE` as the end-to-end script does,
+and the workflow runs it for H.264 and HEVC side by side (ba2bbb4). The first
+HEVC run passed on the runner's FFmpeg 8 (13 splices, 4 encoder crashes, an
+outage, no decoder errors), as did half an hour here with 48 splices, 14
+crashes and two outages; x265 at 720p takes about 2.3 of 4 cores.
+
+Looked at and left as is: every job warns that its actions target Node.js
+20. They already run on Node.js 24 (GitHub forces it), so nothing changes
+when Node.js 20 goes. Moving off it means major versions (checkout 4 to 7,
+upload-artifact 4 to 7, download-artifact 4 to 8, the Docker actions),
+some with changed behaviour, in release jobs that only a tag runs.
+
 ### 2026-10-25 — Area 5: a `--url` ending in a slash
 
 Changed since the last pass (2026-10-07): only the updater's features (no
