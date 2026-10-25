@@ -19,6 +19,23 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-25 — Area 5: a `--url` ending in a slash
+
+Changed since the last pass (2026-10-07): only the updater's features (no
+zip). A full read of `streamdelayd`, the desktop shell (`main.rs`, `tray.rs`,
+`hotkeys.rs`) and the OBS crate's unchanged parts.
+
+Fixed, with a test that failed first: the command line added the API path
+to `--url` as given, so `http://127.0.0.1:7788/` asked for `//api/v1/...`
+and `//healthz`, which the API does not serve. Every command failed with
+"404 Not Found", and `health` exited 1 for an instance that runs. A slash
+at the end is now left out.
+
+Looked at and left as is: the tray's End stream now and Dump act without
+asking, like the hotkeys, which must; a menu is opened and an item chosen on
+purpose, and Resume undoes an end. The log file starts again at 16 MiB, and
+if it cannot, stops writing rather than grow.
+
 ### 2026-10-25 — Area 1: nothing
 
 Changed since the last pass (2026-10-07): the dump's replay prediction

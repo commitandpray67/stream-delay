@@ -196,13 +196,17 @@ fn read_config(config: &Option<PathBuf>) -> Option<Config> {
         .and_then(|t| toml::from_str::<Config>(&t).ok())
 }
 
-/// Where the running instance is: `url` if given, else the API address in the
-/// settings file.
+/// Where the running instance is: `url` if given (a slash at the end, as
+/// addresses are often written, left out: paths are added to it), else the API
+/// address in the settings file.
 fn instance_url(url: Option<String>, file: Option<&Config>) -> String {
-    url.unwrap_or_else(|| {
-        let bind = file.map_or(Config::default().api.bind, |c| c.api.bind);
-        format!("http://{}", reachable(bind))
-    })
+    match url {
+        Some(url) => url.trim_end_matches('/').to_string(),
+        None => {
+            let bind = file.map_or(Config::default().api.bind, |c| c.api.bind);
+            format!("http://{}", reachable(bind))
+        }
+    }
 }
 
 /// The token in `path`: its content, without surrounding whitespace (such as

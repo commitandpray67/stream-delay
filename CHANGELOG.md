@@ -19,6 +19,9 @@ All notable changes to stream-delay are listed here. The format follows
   to, with the frames after it up to the next keyframe. Pictures that would
   start again on a number such a decoder still holds are now renumbered on the
   way out; streams that need no renumbering are sent unchanged.
+- `streamdelayd` commands given `--url` with a slash at the end
+  (`http://127.0.0.1:7788/`) failed with "404 Not Found", and `health` said
+  nothing answered, failing a container health check written that way.
 
 ## [0.3.3] - 2026-10-23
 

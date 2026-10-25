@@ -296,6 +296,22 @@ fn health_says_whether_stream_delay_answers() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+#[test]
+fn a_url_given_with_a_slash_at_the_end_works_the_same() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = Fake::ok(r#"{"status":"ok","app":"stream-delay","version":"9.9.9"}"#);
+    let url = format!("{}/", api.url);
+    for args in [
+        vec!["health", "--url", &url],
+        vec!["state", "--url", &url, "--token", "t"],
+    ] {
+        let out = run(cli(dir.path()).args(&args));
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+    }
+    let paths: Vec<String> = api.seen().into_iter().map(|s| s.path).collect();
+    assert_eq!(paths, ["/healthz", "/api/v1/state"]);
+}
+
 /// `streamdelayd run` with its token in a file, checked the way the Docker
 /// image's health check does, then used by the client.
 #[test]
