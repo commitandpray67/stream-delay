@@ -19,6 +19,24 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-25 — Area 6: nothing
+
+Changed since the last full pass (2026-10-05): the dock's dump prediction
+from the engine (`dump_replays`) and the start delay's wording. Read: the
+dock's controls (`DelayControls.svelte`), the API client, the live
+connection, and the overlay's announcements and colours. Looked at closely:
+
+- What the dock says a dump will do follows the engine's order (a replay
+  for Rewind with enough buffer, else the slate with an overlay OBS shows,
+  else the last frame), and only Rewind asks for the replay.
+- The dock offers no dump while the stream ends, where the engine would
+  drop the buffer and end it at once: the safer of the two.
+- After a dump the overlay announces nothing: the delay it keeps is the one
+  it had.
+
+Nothing else in `ui/src` changed since the last pass, which a browser
+walkthrough (2026-10-16) followed.
+
 ### 2026-10-25 — Area 7: the soak streams HEVC too
 
 The nightly soak streamed H.264 only, so HEVC's rewritten splices and holds
