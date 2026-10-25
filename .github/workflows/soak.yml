@@ -1,7 +1,8 @@
 name: Soak
 
 # Long-running stream with random delay changes, dumps and encoder crashes
-# (tests/soak/run.sh), and the property tests with 5000 cases each.
+# (tests/soak/run.sh), once with H.264 and once with open-GOP HEVC, side by
+# side, and the property tests with 5000 cases each.
 # GitHub-hosted runners stop after 6 hours, so the nightly run lasts 2 hours and
 # manual runs are capped at 5.5 hours. Run the full 12-hour soak on your own
 # machine: `DURATION=43200 tests/soak/run.sh`.
@@ -26,8 +27,24 @@ permissions:
 
 jobs:
   soak:
+    name: Soak (${{ matrix.codec }})
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      # One codec failing says nothing about the other.
+      fail-fast: false
+      matrix:
+        include:
+          - codec: H.264
+            vcodec: libx264
+            artifact: soak-results-h264
+          # HEVC's splices and holds are rewritten (CRA to BLA, renumbered
+          # picture order counts): hours of them, decoded by the runner's
+          # FFmpeg.
+          - codec: HEVC
+            vcodec: libx265
+            vcodec_args: -x265-params log-level=error
+            artifact: soak-results-hevc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # The version rust-toolchain.toml names, with its components.
@@ -41,6 +58,8 @@ jobs:
         env:
           HOURS: ${{ inputs.hours || (github.event_name == 'push' && '0.5') || '2' }}
           OUT: ${{ runner.temp }}/soak
+          VCODEC: ${{ matrix.vcodec }}
+          VCODEC_ARGS: ${{ matrix.vcodec_args }}
         # The input is read as data, never pasted into code.
         run: |
           DURATION=$(python3 -c 'import os; print(int(min(float(os.environ["HOURS"]), 5.5) * 3600))') tests/soak/run.sh
@@ -48,7 +67,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: soak-results
+          name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/soak
 
   # The property tests with many more cases than on every push (64). A failing

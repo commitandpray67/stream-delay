@@ -11,6 +11,10 @@
 #   DURATION=43200 tests/soak/run.sh      # the 12-hour run from docs/PLAN.md
 #   DURATION=1800 MIN_GAP=20 MAX_GAP=60 RESTART_MIN=60 RESTART_MAX=180 tests/soak/run.sh
 #                                         # a quick local run
+#   VCODEC=libx265 VCODEC_ARGS="-x265-params log-level=error" tests/soak/run.sh
+#                                         # HEVC (open GOP) instead of H.264
+#
+# SIZE sets the picture size (1280x720).
 #
 # Checks at the end:
 #   - streamdelayd is still running and reconnected to the destination once per
@@ -69,7 +73,7 @@ api() {
 }
 
 [[ -x "$BIN" ]] || { echo "streamdelayd not found at $BIN (cargo build --release -p streamdelayd)"; exit 1; }
-echo "soak: ${DURATION}s, delay changes every ${MIN_GAP}-${MAX_GAP}s, output in $OUT"
+echo "soak: ${DURATION}s of ${VCODEC:-libx264}, delay changes every ${MIN_GAP}-${MAX_GAP}s, output in $OUT"
 
 # The sink decodes everything; any decoder complaint lands in sink.log. Each
 # connection gets its own ffmpeg: one ends when the destination goes down.
@@ -105,9 +109,9 @@ for _ in $(seq 50); do curl -fs "http://$API/healthz" >/dev/null && break; sleep
 # Becomes ffmpeg, so its PID is the one to kill.
 encode() {
   exec ffmpeg -hide_banner -nostats -loglevel error -re \
-    -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440:sample_rate=48000" \
-    -t "$1" -c:v libx264 -preset veryfast -g 60 -keyint_min 60 -sc_threshold 0 -b:v 2500k \
-    -c:a aac -b:a 128k -f flv "rtmp://$INGEST/live/obs" 2>> "$OUT/encoder.log"
+    -f lavfi -i "testsrc2=size=${SIZE:-1280x720}:rate=30" -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+    -t "$1" -c:v "${VCODEC:-libx264}" -preset veryfast -g 60 -keyint_min 60 -sc_threshold 0 -b:v 2500k \
+    ${VCODEC_ARGS:-} -c:a aac -b:a 128k -f flv "rtmp://$INGEST/live/obs" 2>> "$OUT/encoder.log"
 }
 # Streams until the end of the soak, which the last session reaches and stops
 # at cleanly. The others are killed like a crashed encoder (no unpublish), and
