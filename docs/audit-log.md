@@ -19,6 +19,27 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-25 — Area 1: nothing
+
+Changed since the last pass (2026-10-07): the dump's replay prediction
+(`dump_replays`), Cancel while live, and the simulator's HEVC mode. A full
+read of `lib.rs` and `snapshot.rs` found nothing real. Looked at closely:
+
+- `dump_would_replay` against what a dump does: the same order of checks
+  (not started, ending or the encoder gone, then a replay for Rewind), the
+  same delay, the same keyframe.
+- A replay's cut: what is recorded next reuses the cut sequence numbers;
+  the new session's decoder configuration from the cut part applies from
+  before its first keyframe, and the old session's never reaches past its
+  keyframes.
+- Setting the delay during a dump changes the delay it builds; going live
+  during one goes live (asked for in so many words).
+- Eviction under the memory limit with what has not aired, the per-session
+  configuration budget, and the hold frame's pacing and timestamps.
+
+The random-operations properties passed at 20 000 cases, with H.264 and
+with HEVC.
+
 ### 2026-10-24 — Areas 2 and 3: HEVC under FFmpeg 8 (from CI)
 
 CI's end-to-end run with HEVC failed when `ubuntu-latest` moved to Ubuntu
