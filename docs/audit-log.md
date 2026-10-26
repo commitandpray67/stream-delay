@@ -19,6 +19,36 @@ finds nothing real. The weekly audit takes the area audited longest ago.
 
 Newest first: date, area, what was found and fixed (or that nothing was).
 
+### 2026-10-26 — Area 4 (weekly): nothing
+
+Nothing in `crates/control` or `crates/config` changed since the last full
+pass (2026-10-07). A full read of both found nothing real. Looked at closely:
+
+- The guard: the Host check (loopback by default; with LAN access only
+  addresses, local names and `allowed_hosts`, against DNS rebinding), the
+  Origin check (`null` and other origins refused, WebSocket upgrades too),
+  tokens compared in constant time and refused without an admin token, and
+  each route's scope. Hand-set tokens are limited to characters links carry
+  unencoded, so the query-string token needs no decoding.
+- What links with less than admin scope get: the state without the
+  encoder's address, the destination or its replies, and only the delay and
+  overlay settings.
+- Settings changes: one at a time, staged, saved, then applied; a stream key
+  changed with them is put back if the save fails; only what a change
+  changed reaches the file, so command-line overrides stay out of it; a key
+  goes only to the server it was saved for.
+- Diagnostics: every stored secret, the tokens, the ingest key and URL query
+  secrets redacted, plus Twitch-style keys, home paths and public addresses;
+  download codes single use, a minute long, compared in constant time.
+- Secret files written private (0600, or an access list for the user only)
+  before anything goes in, and replaced whole.
+
+Left as documented: anyone with the overlay link can say an overlay is on
+stream and confirm the slate, which decides whether a dump relies on it
+(docs/API.md says to keep that link as private as the dock link); a dock
+link can ask a dump to rely on a slate shown some other way
+(`allow_uncovered`), no more than it could do by removing the delay.
+
 ### 2026-10-25 — Area 6: nothing
 
 Changed since the last full pass (2026-10-05): the dock's dump prediction
